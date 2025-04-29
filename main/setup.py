@@ -21,9 +21,9 @@ def configure_app(app):
     login_manager = LoginManager(app)
     login_manager.login_view = "users.login"
 
-    from external.database import db
+    from external.database import db, database
 
-    db.init_app(app)
+    database.init_app(app)
     Migrate(app, db)
 
     CORS(app)
