@@ -37,7 +37,7 @@ class PasswordRetreival(MethodView):
             return {
                 "message": "retreival code created successfully. " + str(ret_code)
             }, 201
-        except Exception as e:
+        except Exception:
             abort(500, "could not create")
 
 
@@ -63,5 +63,5 @@ class PasswordCodeCheck(MethodView):
                 password_retrieval_to_check.delete_all_other_recovery_attempts(
                     email=data["email"]
                 )
-        except Exception as e:
+        except Exception:
             abort(404, "not found")

@@ -32,7 +32,7 @@ class NewProductRequest(MethodView):
             )
             request.save_to_db()
             return {"message": "Product request created successfully."}, 201
-        except Exception as e:
+        except Exception:
             abort(500, "Could not create request")
 
 

@@ -49,7 +49,7 @@ class RateAndComment(MethodView):
                 seller.update_rating(comment_data["rating"])
             comment.save_to_db()
             return {"message": "comment created successfully."}, 201
-        except Exception as e:
+        except Exception:
             abort(500, "could not create comment")
 
 

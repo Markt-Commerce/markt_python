@@ -32,6 +32,19 @@ class Config:
         self.LOG_DIR = Path(config("LOG_DIR", default="logs"))
         self.LOG_LEVEL = config("LOG_LEVEL", default="INFO")
 
+        # API Docs
+        self.API_TITLE = config("API_TITLE", default="Markt API")
+        self.API_VERSION = config("API_VERSION", default="v1")
+        self.OPENAPI_VERSION = config("OPENAPI_VERSION", default="3.0.3")
+        self.OPENAPI_URL_PREFIX = config("OPENAPI_URL_PREFIX", default="/")
+        self.OPENAPI_SWAGGER_UI_PATH = config(
+            "OPENAPI_SWAGGER_UI_PATH", default="/swagger-ui"
+        )
+        self.OPENAPI_SWAGGER_UI_URL = config(
+            "OPENAPI_SWAGGER_UI_URL",
+            default="https://cdn.jsdelivr.net/npm/swagger-ui-dist/",
+        )
+
     @property
     def SQLALCHEMY_DATABASE_URI(self):
         return f"postgresql+psycopg2://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"

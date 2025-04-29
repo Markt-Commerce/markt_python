@@ -27,7 +27,7 @@ class AddFavorite(MethodView):
             )
             favorite.save_to_db()
             return {"message": "favorite created successfully."}, 201
-        except Exception as e:
+        except Exception:
             abort(500, "could not save favorite")
 
 
