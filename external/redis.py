@@ -24,5 +24,17 @@ class RedisClient:
     def delete_recovery_code(self, email: str):
         self.client.delete(f"recovery:{email}")
 
+    # Product views counter
+    def increment_product_views(self, product_id):
+        self.client.zincrby("product_views", 1, product_id)
+
+    # Real-time notifications
+    def push_notification(self, user_id, message):
+        self.client.lpush(f"notifications:{user_id}", message)
+
+    # Shopping cart cache
+    def cache_cart(self, user_id, cart_data):
+        self.client.setex(f"cart:{user_id}", 3600, cart_data)
+
 
 redis_client = RedisClient()
