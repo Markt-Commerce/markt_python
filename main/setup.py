@@ -27,12 +27,13 @@ def configure_app(app):
     Migrate(app, db)
 
     CORS(app)
-    Api(app)
+    # Initialize Flask-Smorest API
+    api = Api(app)
 
     # Register error handler
     app.register_error_handler(Exception, handle_error)
 
-    return login_manager
+    return login_manager, api
 
 
 def create_app():
@@ -42,12 +43,13 @@ def create_app():
     app = Flask(__name__)
     app.wsgi_app = AuthMiddleware(app.wsgi_app)
 
-    login_manager = configure_app(app)
+    # Get both login_manager and api
+    login_manager, api = configure_app(app)
 
     with app.app_context():
         from external.database import db
 
-        db.create_all()
+        # db.create_all()
 
         # Setup user loader
         from app.users.models import User
@@ -57,7 +59,7 @@ def create_app():
             return User.query.get(int(user_id))
 
         # Register routes
-        register_blueprints(app)
+        register_blueprints(app, api)
         create_root_routes(app)
 
     logger.info("Application initialized")
