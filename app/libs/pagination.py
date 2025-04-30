@@ -1,15 +1,34 @@
-from typing import Any, Dict, List, Optional, TypeVar, Union
-from sqlalchemy import asc, desc, and_, or_
+from typing import Any, Dict, List, Optional, Union, TypeVar, Callable
+from sqlalchemy import asc, desc, and_, or_, not_
 from sqlalchemy.orm import Query
 from sqlalchemy.sql.elements import BinaryExpression, BooleanClauseList
 from flask_smorest import abort
 from math import ceil
+from .schemas import FiltersSchema
 
-# Type variable for SQLAlchemy model
-T = TypeVar("T")
+# Type variables for SQLAlchemy columns and models
+T = TypeVar("T")  # Model type
+C = TypeVar("C")  # Column type
 
 
 class Paginator:
+    # Type hints for operator dictionary
+    OPERATORS: Dict[
+        str, Callable[[C, Any], Union[BinaryExpression, BooleanClauseList]]
+    ] = {
+        "eq": lambda c, v: c == v,
+        "ne": lambda c, v: c != v,
+        "gt": lambda c, v: c > v,
+        "lt": lambda c, v: c < v,
+        "gte": lambda c, v: c >= v,
+        "lte": lambda c, v: c <= v,
+        "in": lambda c, v: c.in_(v),
+        "like": lambda c, v: c.ilike(f"%{v}%"),
+        "startswith": lambda c, v: c.ilike(f"{v}%"),
+        "endswith": lambda c, v: c.ilike(f"%{v}"),
+        "is_null": lambda c, v: c.is_(None) if v else c.isnot(None),
+    }
+
     def __init__(self, query: Query[T], page: int = 1, per_page: int = 20) -> None:
         """
         Initialize paginator with SQLAlchemy query
@@ -23,42 +42,40 @@ class Paginator:
         self.page: int = page
         self.per_page: int = per_page
         self.max_per_page: int = 100  # Safety limit
+        self.filters_schema: FiltersSchema = FiltersSchema()
 
-    def paginate(
-        self,
-        filters: Optional[Dict[str, Union[Any, Dict[str, Any]]]] = None,
-        sort: Optional[str] = None,
-    ) -> Dict[str, Union[List[T], int]]:
+    def paginate(self, request_args: Dict[str, Any]) -> Dict[str, Any]:
         """
         Apply pagination to the query
 
         Args:
-            filters: Dict of filter conditions where values can be either direct values
-                    or dicts for advanced operations (e.g., {"price": {"gt": 100}})
-            sort: Sort criteria string (e.g. "name,-created_at")
+            request_args: Dictionary of request arguments
 
         Returns:
-            dict: Paginated response with metadata containing:
-                - items: List of paginated results
-                - page: Current page number
-                - per_page: Items per page
-                - total_items: Total items matching query
-                - total_pages: Total pages available
+            Dictionary containing:
+            - items: List of paginated items
+            - page: Current page number
+            - per_page: Items per page
+            - total_items: Total number of items
+            - total_pages: Total number of pages
         """
-        # Validate inputs
         self._validate_pagination_params()
 
-        # Apply filters
+        # Parse filters from request args
+        filters: Optional[Dict[str, Any]] = self._parse_filters(
+            request_args.get("filters")
+        )
+
+        # Apply filters if any
         if filters:
             self._apply_filters(filters)
 
         # Apply sorting
+        sort: Optional[str] = request_args.get("sort")
         if sort:
             self._apply_sorting(sort)
-        else:
-            # Default sort by created_at desc if available
-            if hasattr(self.query.column_descriptions[0]["entity"], "created_at"):
-                self.query = self.query.order_by(desc("created_at"))
+        elif hasattr(self.query.column_descriptions[0]["entity"], "created_at"):
+            self.query = self.query.order_by(desc("created_at"))
 
         # Execute paginated query
         items: List[T] = (
@@ -66,8 +83,6 @@ class Paginator:
             .offset((self.page - 1) * self.per_page)
             .all()
         )
-
-        # Get total count (without pagination)
         total: int = self.query.order_by(None).count()
 
         return {
@@ -78,17 +93,17 @@ class Paginator:
             "total_pages": ceil(total / self.per_page) if total else 0,
         }
 
-    def _validate_pagination_params(self) -> None:
-        """Validate pagination parameters"""
-        if self.page < 1:
-            abort(400, message="Page must be positive integer")
-        if self.per_page < 1 or self.per_page > self.max_per_page:
-            abort(400, message=f"per_page must be between 1 and {self.max_per_page}")
+    def _parse_filters(self, filters_str: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Parse and validate filters from string"""
+        try:
+            parsed: Dict[str, Any] = self.filters_schema.parse_filters(filters_str)
+            return parsed
+        except Exception as e:
+            abort(400, message=f"Invalid filters: {str(e)}")
 
-    def _apply_filters(self, filters: Dict[str, Union[Any, Dict[str, Any]]]) -> None:
-        """Apply filters to the query"""
-        filter_conditions: List[Union[BinaryExpression, BooleanClauseList]] = []
-
+    def _apply_filters(self, filters: Dict[str, Any]) -> None:
+        """Apply filters to query"""
+        conditions: List[Union[BinaryExpression, BooleanClauseList]] = []
         for field, value in filters.items():
             if not hasattr(self.query.column_descriptions[0]["entity"], field):
                 continue
@@ -96,24 +111,19 @@ class Paginator:
             column = getattr(self.query.column_descriptions[0]["entity"], field)
 
             if isinstance(value, dict):
-                # Handle advanced filters (gt, lt, in, etc.)
+                # Handle operator syntax: {"field": {"operator": value}}
                 for op, op_value in value.items():
-                    if op == "gt":
-                        filter_conditions.append(column > op_value)
-                    elif op == "lt":
-                        filter_conditions.append(column < op_value)
-                    elif op == "in":
-                        filter_conditions.append(column.in_(op_value))
-                    # Add more operations as needed
+                    if op in self.OPERATORS:
+                        conditions.append(self.OPERATORS[op](column, op_value))
             else:
                 # Simple equality filter
-                filter_conditions.append(column == value)
+                conditions.append(self.OPERATORS["eq"](column, value))
 
-        if filter_conditions:
-            self.query = self.query.filter(and_(*filter_conditions))
+        if conditions:
+            self.query = self.query.filter(and_(*conditions))
 
     def _apply_sorting(self, sort_str: str) -> None:
-        """Apply sorting to the query"""
+        """Apply sorting to query"""
         sort_fields: List[str] = [s.strip() for s in sort_str.split(",") if s.strip()]
         sort_conditions: List[Union[asc, desc]] = []
 
@@ -125,14 +135,19 @@ class Paginator:
                 direction = asc
                 field_name = field
 
-            if not hasattr(self.query.column_descriptions[0]["entity"], field_name):
-                continue
-
-            sort_conditions.append(
-                direction(
-                    getattr(self.query.column_descriptions[0]["entity"], field_name)
+            if hasattr(self.query.column_descriptions[0]["entity"], field_name):
+                sort_conditions.append(
+                    direction(
+                        getattr(self.query.column_descriptions[0]["entity"], field_name)
+                    )
                 )
-            )
 
         if sort_conditions:
             self.query = self.query.order_by(*sort_conditions)
+
+    def _validate_pagination_params(self) -> None:
+        """Validate pagination parameters"""
+        if self.page < 1:
+            abort(400, message="Page must be positive integer")
+        if self.per_page < 1 or self.per_page > self.max_per_page:
+            abort(400, message=f"per_page must be between 1 and {self.max_per_page}")
