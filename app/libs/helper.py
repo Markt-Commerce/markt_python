@@ -38,3 +38,5 @@ class UniqueIdMixin:
         super().__init__(**kwargs)
         if not self.id and self.id_prefix:
             self.id = f"{self.id_prefix}{get_unique_id(self.__class__)}"
+
+    __abstract__ = True

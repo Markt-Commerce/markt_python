@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 def register_blueprints(app, api):
     """Dynamically register all blueprints from app modules"""
-    modules = ["users", "products", "orders", "chat"]
+    modules = ["users", "products", "orders"]
     for module in modules:
         try:
             mod = import_module(f"app.{module}.routes")

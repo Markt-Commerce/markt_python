@@ -13,6 +13,8 @@ class TimestampMixin:
 class StatusMixin:
     """Adds a status column that uses an Enum defined in the model class"""
 
+    __abstract__ = True
+
     @declared_attr
     def status(cls):
         status_enum = cls.Status

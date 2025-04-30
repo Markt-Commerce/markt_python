@@ -25,9 +25,25 @@ class Database:
 
         db.init_app(app)
 
-        # Import models to ensure they're registered with SQLAlchemy
-        # with app.app_context():
-        #     from app.users.models import User, Buyer, Seller, UserAddress
+        # Import models to ensure they're registered with SQLAlchemy -> Migration
+        with app.app_context():
+            from app.users.models import User, Buyer, Seller, UserAddress
+            from app.products.models import Product, ProductVariant, ProductInventory
+            from app.categories.models import Category, ProductCategory, Tag, ProductTag
+            from app.orders.models import Order, Shipment
+            from app.payments.models import Payment, Transaction
+            from app.socials.models import (
+                ProductLike,
+                ProductComment,
+                ProductView,
+                Follow,
+                Notification,
+            )
+            from app.requests.models import BuyerRequest, SellerOffer, RequestImage
+            from app.media.models import Media, MediaVariant, ProductImage
+            from app.chat.models import ChatRoom, ChatMessage, ChatOffer
+            from app.cart.models import Cart, CartItem
+
         # Import other models as needed
 
 
