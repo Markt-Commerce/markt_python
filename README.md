@@ -1,6 +1,12 @@
 # Markt Python Backend
 
-![Markt Logo](https://avatars.githubusercontent.com/u/188402477?s=200&v=4)  
+
+<img 
+  src="https://avatars.githubusercontent.com/u/188402477?s=200&v=4" 
+  alt="Markt Logo" 
+  style="width: 100%; max-width: 800px; height: 150px; object-fit: cover; border-radius: 8px;"
+/>
+
 *Empowering Student Entrepreneurs with Social Commerce*
 
 ## 🚀 Tech Stack
@@ -64,6 +70,21 @@ REDIS_PORT=6379
 [App]
 SECRET_KEY=your-secret-key-here
 DEBUG=True
+```
+
+## 🌟 Redis Management
+
+Start/stop Redis container:
+```bash
+# Start Redis
+cd external
+docker-compose -f docker-compose.redis.yml up -d
+
+# Stop Redis
+docker-compose -f docker-compose.redis.yml down
+
+# View logs
+docker-compose -f docker-compose.redis.yml logs -f
 ```
 
 ## 🏃 Running the Application
