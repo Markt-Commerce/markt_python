@@ -50,7 +50,7 @@ class Product(BaseModel, StatusMixin, UniqueIdMixin):
     # Social features
     likes = db.relationship("ProductLike", back_populates="product")
     comments = db.relationship("ProductComment", back_populates="product")
-    shares = db.relationship("ProductShare", back_populates="product")
+    # shares = db.relationship("ProductShare", back_populates="product")
     views = db.relationship("ProductView", back_populates="product")
 
     def is_available(self):

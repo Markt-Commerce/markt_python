@@ -9,6 +9,14 @@ class Follow(BaseModel):
     followee_id = db.Column(db.String(12), db.ForeignKey("users.id"), primary_key=True)
     created_at = db.Column(db.DateTime, server_default=db.func.now())
 
+    # Add relationships
+    follower = db.relationship(
+        "User", foreign_keys=[follower_id], back_populates="following"
+    )
+    followee = db.relationship(
+        "User", foreign_keys=[followee_id], back_populates="followers"
+    )
+
 
 class ProductLike(BaseModel):
     __tablename__ = "product_likes"

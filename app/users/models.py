@@ -21,6 +21,17 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
     address = db.relationship("UserAddress", uselist=False, back_populates="user")
     buyer_account = db.relationship("Buyer", uselist=False, back_populates="user")
     seller_account = db.relationship("Seller", uselist=False, back_populates="user")
+    requests = db.relationship("BuyerRequest", back_populates="user", lazy="dynamic")
+    notifications = db.relationship(
+        "Notification", back_populates="user", lazy="dynamic"
+    )
+    transactions = db.relationship("Transaction", back_populates="user", lazy="dynamic")
+    product_likes = db.relationship(
+        "ProductLike", back_populates="user", lazy="dynamic"
+    )
+    product_comments = db.relationship(
+        "ProductComment", back_populates="user", lazy="dynamic"
+    )
 
     # Chat relationships
     buyer_chats = db.relationship(
@@ -37,6 +48,20 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
     )
     sent_messages = db.relationship(
         "ChatMessage", back_populates="sender", lazy="dynamic"
+    )
+
+    # Social features
+    followers = db.relationship(
+        "Follow",
+        foreign_keys="[Follow.followee_id]",
+        back_populates="followee",
+        lazy="dynamic",
+    )
+    following = db.relationship(
+        "Follow",
+        foreign_keys="[Follow.follower_id]",
+        back_populates="follower",
+        lazy="dynamic",
     )
 
     # Media relationships
@@ -72,8 +97,8 @@ class Buyer(BaseModel):
         "Cart", back_populates="buyer", cascade="all, delete-orphan"
     )
     orders = db.relationship("Order", back_populates="buyer", lazy="dynamic")
-    requests = db.relationship("BuyerRequest", back_populates="buyer", lazy="dynamic")
-    favorites = db.relationship("ProductLike", back_populates="buyer", lazy="dynamic")
+    # requests = db.relationship("BuyerRequest", back_populates="buyer", lazy="dynamic")
+    # favorites = db.relationship("ProductLike", back_populates="buyer", lazy="dynamic")
 
     def set_password(self, password):
         from passlib.hash import pbkdf2_sha256
