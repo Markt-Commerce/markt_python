@@ -41,7 +41,7 @@ class Database:
             )
             from app.requests.models import BuyerRequest, SellerOffer, RequestImage
             from app.media.models import Media, MediaVariant, ProductImage
-            from app.chat.models import ChatRoom, ChatMessage, ChatOffer
+            from app.chats.models import ChatRoom, ChatMessage, ChatOffer
             from app.cart.models import Cart, CartItem
 
         # Import other models as needed

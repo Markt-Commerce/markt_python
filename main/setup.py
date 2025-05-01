@@ -1,14 +1,21 @@
+# python imports
+import logging
+
+# package imports
 from flask import Flask
 from flask_login import LoginManager
 from flask_migrate import Migrate
 from flask_cors import CORS
 from flask_smorest import Api
+from flask_socketio import SocketIO
+
+# app imports
 from main.config import settings
 from main.logger import setup_logging
 from main.errors import handle_error
 from main.middleware import AuthMiddleware
 from main.routes import register_blueprints, create_root_routes
-import logging
+from main.sockets import register_socket_namespaces
 
 logger = logging.getLogger(__name__)
 
@@ -25,15 +32,23 @@ def configure_app(app):
 
     database.init_app(app)
     Migrate(app, db)
-
     CORS(app)
+
     # Initialize Flask-Smorest API
     api = Api(app)
+
+    socketio = SocketIO(
+        app,
+        cors_allowed_origins="*",
+        async_mode="gevent",
+        logger=settings.DEBUG,
+        engineio_logger=settings.DEBUG,
+    )
 
     # Register error handler
     app.register_error_handler(Exception, handle_error)
 
-    return login_manager, api
+    return login_manager, api, socketio
 
 
 def create_app():
@@ -44,7 +59,7 @@ def create_app():
     app.wsgi_app = AuthMiddleware(app.wsgi_app)
 
     # Get both login_manager and api
-    login_manager, api = configure_app(app)
+    login_manager, api, socketio = configure_app(app)
 
     with app.app_context():
         from external.database import db
@@ -62,5 +77,8 @@ def create_app():
         register_blueprints(app, api)
         create_root_routes(app)
 
+        # Register socket namespaces
+        register_socket_namespaces(socketio)
+
     logger.info("Application initialized")
-    return app
+    return app, socketio

@@ -12,7 +12,7 @@ def register_blueprints(app, api):
         "users",
         "products",
         "orders",
-        "chat",
+        "chats",
         "cart",
         "requests",
         "media",
