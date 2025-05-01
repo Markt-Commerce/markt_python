@@ -36,7 +36,7 @@ class Config:
         self.API_TITLE = config("API_TITLE", default="Markt API")
         self.API_VERSION = config("API_VERSION", default="v1")
         self.OPENAPI_VERSION = config("OPENAPI_VERSION", default="3.0.3")
-        self.OPENAPI_URL_PREFIX = config("OPENAPI_URL_PREFIX", default="/")
+        self.OPENAPI_URL_PREFIX = config("OPENAPI_URL_PREFIX", default="/api/v1")
         self.OPENAPI_SWAGGER_UI_PATH = config(
             "OPENAPI_SWAGGER_UI_PATH", default="/swagger-ui"
         )

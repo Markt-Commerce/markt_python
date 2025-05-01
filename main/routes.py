@@ -9,14 +9,17 @@ logger = logging.getLogger(__name__)
 def register_blueprints(app, api):
     """Dynamically register all blueprints from app modules"""
     modules = ["users", "products", "orders"]
+
     for module in modules:
         try:
             mod = import_module(f"app.{module}.routes")
             bp = getattr(mod, "bp", None) or getattr(mod, f"{module}_bp")
 
-            # Register with Flask-Smorest API instead of directly with app
+            # Add URL prefix to each blueprint
+            bp.url_prefix = "/api/v1" + (bp.url_prefix or "")
+
             api.register_blueprint(bp)
-            logger.info(f"Registered blueprint for {module}")
+            logger.info(f"Registered blueprint for {module} at {bp.url_prefix}")
         except ImportError as e:
             logger.warning(f"Failed to register {module} routes: {str(e)}")
         except AttributeError as e:
@@ -24,6 +27,7 @@ def register_blueprints(app, api):
 
 
 def create_root_routes(app):
-    @app.route("/status")
+    # Update status endpoint to include version
+    @app.route("/api/v1/status")
     def status():
-        return {"status": "running", "environment": settings.ENV}
+        return {"status": "running", "environment": settings.ENV, "version": "v1"}

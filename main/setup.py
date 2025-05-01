@@ -5,7 +5,7 @@ from flask_cors import CORS
 from flask_smorest import Api
 from main.config import settings
 from main.logger import setup_logging
-from main.error import handle_error
+from main.errors import handle_error
 from main.middleware import AuthMiddleware
 from main.routes import register_blueprints, create_root_routes
 import logging
@@ -19,7 +19,7 @@ def configure_app(app):
 
     # Setup extensions
     login_manager = LoginManager(app)
-    login_manager.login_view = "users.login"
+    login_manager.login_view = "users.UserLogin"
 
     from external.database import db, database
 
@@ -56,7 +56,7 @@ def create_app():
 
         @login_manager.user_loader
         def load_user(user_id):
-            return User.query.get(int(user_id))
+            return User.query.get(str(user_id))
 
         # Register routes
         register_blueprints(app, api)

@@ -2,7 +2,7 @@ from flask import request, g
 from functools import wraps
 from main.config import settings
 import logging
-from main.error import APIError
+from main.errors import APIError
 
 logger = logging.getLogger(__name__)
 

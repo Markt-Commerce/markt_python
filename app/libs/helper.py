@@ -1,5 +1,6 @@
 import string
 import random
+from sqlalchemy import event
 from external.database import db
 
 
@@ -32,11 +33,15 @@ def get_unique_id(model_class, field="id", length=8, max_attempts=100):
 class UniqueIdMixin:
     """Mixin to add unique string ID generation"""
 
-    id_prefix = None  # Should be overridden by subclasses
+    id_prefix = None  # Should be defined in subclass
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        if not self.id and self.id_prefix:
-            self.id = f"{self.id_prefix}{get_unique_id(self.__class__)}"
+    @classmethod
+    def __declare_last__(cls):
+        """Hook into SQLAlchemy after mappings are complete."""
+
+        @event.listens_for(cls, "before_insert")
+        def _set_unique_id(mapper, connection, target):
+            if not target.id and target.id_prefix:
+                target.id = f"{target.id_prefix}{get_unique_id(cls)}"
 
     __abstract__ = True
