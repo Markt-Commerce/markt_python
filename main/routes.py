@@ -8,7 +8,18 @@ logger = logging.getLogger(__name__)
 
 def register_blueprints(app, api):
     """Dynamically register all blueprints from app modules"""
-    modules = ["users", "products", "orders"]
+    modules = [
+        "users",
+        "products",
+        "orders",
+        "chat",
+        "cart",
+        "requests",
+        "media",
+        "categories",
+        "socials",
+        "payments",
+    ]
 
     for module in modules:
         try:
