@@ -43,6 +43,8 @@ def configure_app(app):
         async_mode="gevent",
         logger=settings.DEBUG,
         engineio_logger=settings.DEBUG,
+        # Important: manage_session=False lets Flask handle the session
+        manage_session=False,
     )
 
     # Register error handler

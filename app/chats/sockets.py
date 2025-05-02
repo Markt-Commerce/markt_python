@@ -1,4 +1,4 @@
-from flask_socketio import Namespace, emit
+from flask_socketio import Namespace, emit, join_room, leave_room
 from flask_login import current_user
 
 
@@ -11,10 +11,19 @@ class ChatNamespace(Namespace):
 
     def on_join(self, data):
         room = data["room_id"]
-        self.join_room(room)
+        join_room(room)  # Use imported join_room function
         emit(
             "message",
             {"user": current_user.username, "msg": "joined the room"},
+            room=room,
+        )
+
+    def on_leave(self, data):
+        room = data["room_id"]
+        leave_room(room)  # Use imported leave_room function
+        emit(
+            "message",
+            {"user": current_user.username, "msg": "left the room"},
             room=room,
         )
 
