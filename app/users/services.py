@@ -3,6 +3,7 @@ import random
 
 # package imports
 from sqlalchemy.orm import joinedload
+from sqlalchemy import func
 
 # projects imports
 from external.redis import redis_client
@@ -11,6 +12,7 @@ from app.libs.errors import AuthError
 
 # app imports
 from .models import User, Buyer, Seller, UserAddress
+from .constants import RESERVED_USERNAMES
 
 
 class AuthService:
@@ -141,3 +143,19 @@ class UserService:
             user.current_role = "seller" if user.current_role == "buyer" else "buyer"
             session.commit()
             return user
+
+    @staticmethod
+    def check_username_availability(username):
+        with session_scope() as session:
+            exists = session.query(
+                session.query(User)
+                .filter(func.lower(User.username) == func.lower(username))
+                .exists()
+            ).scalar()
+
+            return {
+                "available": not exists,
+                "message": "Username is already taken"
+                if exists
+                else "Username available",
+            }

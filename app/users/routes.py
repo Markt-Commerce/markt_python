@@ -22,6 +22,8 @@ from .schemas import (
     UserProfileSchema,
     FeedSchema,
     PublicProfileSchema,
+    UsernameAvailableSchema,
+    UsernameCheckSchema,
 )
 from .services import AuthService, UserService
 from .models import User
@@ -108,6 +110,17 @@ class PasswordReset(MethodView):
     def post(self, data):
         code = AuthService.initiate_password_reset(data["email"])
         return {"message": f"Reset code sent (DEV ONLY: {code})"}
+
+
+@bp.route("/check-username")
+class UsernameCheck(MethodView):
+    @bp.arguments(UsernameCheckSchema, location="query")
+    @bp.response(200, UsernameAvailableSchema)
+    def get(self, args):
+        try:
+            return UserService.check_username_availability(args["username"])
+        except Exception as e:
+            abort(400, message=str(e))
 
 
 @bp.route("/password-reset/confirm")

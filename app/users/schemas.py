@@ -97,6 +97,24 @@ class SellerProfileSchema(Schema):
     total_raters = fields.Int()
 
 
+class UsernameCheckSchema(Schema):
+    username = fields.Str(
+        required=True,
+        validate=[
+            validate.Length(min=3, max=20, error="Must be between 3-20 characters"),
+            validate.Regexp(
+                r"^[a-zA-Z0-9_]+$",
+                error="Only letters, numbers and underscores allowed",
+            ),
+        ],
+    )
+
+
+class UsernameAvailableSchema(Schema):
+    available = fields.Bool(required=True)
+    message = fields.Str()
+
+
 class FeedSchema(Schema):
     pass
 
