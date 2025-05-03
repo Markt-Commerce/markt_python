@@ -14,7 +14,7 @@ class ProductStatus(Enum):
 
 class Product(BaseModel, StatusMixin, UniqueIdMixin):
     __tablename__ = "products"
-    id_prefix = "PROD_"
+    id_prefix = "PRD_"
 
     class Status(Enum):
         ACTIVE = "active"

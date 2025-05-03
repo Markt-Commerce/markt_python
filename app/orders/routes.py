@@ -3,6 +3,9 @@ from flask_smorest import Blueprint
 from flask.views import MethodView
 from flask_login import login_required, current_user
 
+# project imports
+from app.payments.schemas import PaymentSchema
+
 # app imports
 from .services import OrderService
 from .schemas import OrderSchema, OrderCreateSchema, TrackingSchema, ReviewSchema
@@ -22,8 +25,23 @@ class OrderList(MethodView):
     @bp.arguments(OrderCreateSchema)
     @bp.response(201, OrderSchema)
     def post(self, order_data):
-        """Create new order"""
-        return OrderService.create_order(order_data)
+        """Create new order from cart"""
+        return OrderService.create_order(
+            order_data["cart_id"],
+            current_user.buyer_account.id,
+            order_data["shipping_address"],
+            order_data.get("payment_method", "card"),
+        )
+
+
+@bp.route("/<order_id>/pay")
+class OrderPayment(MethodView):
+    @login_required
+    @bp.arguments(PaymentSchema)
+    @bp.response(200, OrderSchema)
+    def post(self, payment_data, order_id):
+        """Process payment for order"""
+        return OrderService.process_payment(order_id, payment_data)
 
 
 @bp.route("/<int:order_id>")

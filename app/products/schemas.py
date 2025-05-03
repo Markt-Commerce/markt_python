@@ -1,26 +1,47 @@
-from marshmallow import Schema, fields, validate
+from marshmallow import Schema, fields, validate, ValidationError
 from .models import ProductStatus
 
 
-class ProductSchema(Schema):
-    id = fields.Int(dump_only=True)
-    name = fields.Str(required=True, validate=validate.Length(min=2))
+class ProductVariantSchema(Schema):
+    name = fields.Str(required=True)
+    options = fields.Dict(required=True)
+
+
+class ProductCreateSchema(Schema):
+    name = fields.Str(required=True, validate=validate.Length(min=2, max=100))
     description = fields.Str()
-    price = fields.Float(required=True)
-    stock_quantity = fields.Int()
-    status = fields.Enum(ProductStatus)
-    metadata = fields.Dict()
-    seller_id = fields.Int(required=True)
+    price = fields.Float(required=True, validate=validate.Range(min=0.01))
+    compare_at_price = fields.Float(validate=validate.Range(min=0.01))
+    stock = fields.Int(validate=validate.Range(min=0))
+    sku = fields.Str()
+    barcode = fields.Str()
+    weight = fields.Float()
+    status = fields.Enum(ProductStatus, by_value=True)
+    variants = fields.List(fields.Nested(ProductVariantSchema))
+    category_ids = fields.List(fields.Int())
+    tag_ids = fields.List(fields.Int())
 
 
-class ProductCreateSchema(ProductSchema):
+class ProductUpdateSchema(ProductCreateSchema):
     class Meta:
-        exclude = ("id", "status")
+        partial = True
 
 
-class ProductUpdateSchema(Schema):
-    name = fields.Str(validate=validate.Length(min=2))
-    description = fields.Str()
-    price = fields.Float()
-    stock_quantity = fields.Int()
-    status = fields.Enum(ProductStatus)
+class ProductSchema(ProductCreateSchema):
+    id = fields.Str(dump_only=True)
+    created_at = fields.DateTime(dump_only=True)
+    updated_at = fields.DateTime(dump_only=True)
+    seller_id = fields.Int(dump_only=True)
+    view_count = fields.Int(dump_only=True)
+
+
+class ProductSearchSchema(Schema):
+    query = fields.Str(required=False)
+    min_price = fields.Float(required=False)
+    max_price = fields.Float(required=False)
+    category_id = fields.Int(required=False)
+    in_stock = fields.Bool(required=False)
+    sort_by = fields.Str(
+        required=False,
+        validate=validate.OneOf(["newest", "popular", "price_asc", "price_desc"]),
+    )
