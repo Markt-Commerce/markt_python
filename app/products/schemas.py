@@ -1,4 +1,5 @@
 from marshmallow import Schema, fields, validate, ValidationError
+from app.libs.schemas import PaginationSchema
 from .models import ProductStatus
 
 
@@ -36,7 +37,7 @@ class ProductSchema(ProductCreateSchema):
 
 
 class ProductSearchSchema(Schema):
-    query = fields.Str(required=False)
+    search = fields.Str(required=False)
     min_price = fields.Float(required=False)
     max_price = fields.Float(required=False)
     category_id = fields.Int(required=False)
@@ -45,3 +46,8 @@ class ProductSearchSchema(Schema):
         required=False,
         validate=validate.OneOf(["newest", "popular", "price_asc", "price_desc"]),
     )
+
+
+class ProductSearchResultSchema(Schema):
+    products = fields.List(fields.Nested(ProductSchema))
+    pagination = fields.Nested(PaginationSchema)

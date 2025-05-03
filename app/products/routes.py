@@ -14,6 +14,7 @@ from .schemas import (
     ProductCreateSchema,
     ProductUpdateSchema,
     ProductSearchSchema,
+    ProductSearchResultSchema,
 )
 
 
@@ -25,7 +26,7 @@ bp = Blueprint(
 @bp.route("/")
 class ProductList(MethodView):
     @bp.arguments(ProductSearchSchema, location="query")
-    @bp.response(200, ProductSchema(many=True))
+    @bp.response(200, ProductSearchResultSchema)
     def get(self, args):
         """List all products with filters"""
         return ProductService.search_products(args)
@@ -72,16 +73,6 @@ class ProductDetail(MethodView):
 
 # Product Discovery
 # -----------------------------------------------
-@bp.route("/search")
-class ProductSearch(MethodView):
-    @bp.response(200, ProductSchema(many=True))
-    def get(self):
-        """Search products with filters"""
-        # TODO: Full-text search
-        # TODO: Filter by price, category, ratings
-        # TODO: Sort options (newest, popular, price)
-
-
 @bp.route("/trending")
 class TrendingProducts(MethodView):
     @bp.response(200, ProductSchema(many=True))
