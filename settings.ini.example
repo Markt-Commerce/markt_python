@@ -1,0 +1,33 @@
+[settings]
+ENV=development
+DEBUG=True
+
+# Database
+DB_HOST=
+DB_PORT=
+DB_USER=
+DB_PASSWORD=
+DB_NAME=
+
+# Redis
+REDIS_HOST=
+REDIS_PORT=
+
+# Auth
+SECRET_KEY=
+SESSION_COOKIE_NAME=
+
+# App
+BIND=
+
+# Logging
+LOG_DIR=
+LOG_LEVEL=
+
+# API Docs
+API_TITLE=Markt API
+API_VERSION=v1
+OPENAPI_VERSION=3.0.3
+OPENAPI_URL_PREFIX=/
+OPENAPI_SWAGGER_UI_PATH=/swagger-ui
+OPENAPI_SWAGGER_UI_URL=https://cdn.jsdelivr.net/npm/swagger-ui-dist/
