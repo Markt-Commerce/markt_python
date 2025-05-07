@@ -1,7 +1,7 @@
 from enum import Enum
 from external.database import db
 from app.libs.models import BaseModel, StatusMixin
-from app.libs.helper import UniqueIdMixin
+from app.libs.helpers import UniqueIdMixin
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy import func, select

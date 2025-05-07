@@ -2,7 +2,7 @@ from enum import Enum
 from flask_login import UserMixin
 
 from app.libs.models import BaseModel
-from app.libs.helper import UniqueIdMixin
+from app.libs.helpers import UniqueIdMixin
 from external.database import db
 
 

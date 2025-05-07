@@ -2,7 +2,7 @@ from enum import Enum
 from datetime import datetime
 from external.database import db
 from app.libs.models import BaseModel, StatusMixin
-from app.libs.helper import UniqueIdMixin
+from app.libs.helpers import UniqueIdMixin
 from sqlalchemy.dialects.postgresql import JSONB
 
 

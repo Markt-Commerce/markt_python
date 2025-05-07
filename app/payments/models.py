@@ -1,7 +1,7 @@
 from enum import Enum
 from external.database import db
 from app.libs.models import BaseModel
-from app.libs.helper import UniqueIdMixin
+from app.libs.helpers import UniqueIdMixin
 
 
 class PaymentStatus(Enum):
