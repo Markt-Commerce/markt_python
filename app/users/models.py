@@ -1,7 +1,9 @@
+from enum import Enum
+from flask_login import UserMixin
+
 from app.libs.models import BaseModel
 from app.libs.helper import UniqueIdMixin
 from external.database import db
-from flask_login import UserMixin
 
 
 class User(BaseModel, UserMixin, UniqueIdMixin):
@@ -111,6 +113,14 @@ class Buyer(BaseModel):
         return pbkdf2_sha256.verify(password, self.password_hash)
 
 
+class SellerVerificationStatus(Enum):
+    UNVERIFIED = "unverified"
+    PENDING = "pending"
+    VERIFIED = "verified"
+    REJECTED = "rejected"
+    SUSPENDED = "suspended"
+
+
 class Seller(BaseModel):
     __tablename__ = "sellers"
 
@@ -118,16 +128,22 @@ class Seller(BaseModel):
     user_id = db.Column(db.String(12), db.ForeignKey("users.id"))
     shop_name = db.Column(db.String(100))
     password_hash = db.Column(db.String(128))
-    description = db.Column(db.String(500))
+    shop_slug = db.Column(db.String(110), unique=True)
+    description = db.Column(db.Text)
+    policies = db.Column(db.JSON)  # Return, shipping policies
     category = db.Column(db.String(100))
     total_rating = db.Column(db.Integer, default=0)
     total_raters = db.Column(db.Integer, default=0)
+    verification_status = db.Column(
+        db.Enum(SellerVerificationStatus), default=SellerVerificationStatus.UNVERIFIED
+    )
 
     # Relationships
     user = db.relationship("User", back_populates="seller_account")
     products = db.relationship("Product", back_populates="seller", lazy="dynamic")
-    orders = db.relationship("Order", back_populates="seller", lazy="dynamic")
+    order_items = db.relationship("OrderItem", back_populates="seller")
     offers = db.relationship("SellerOffer", back_populates="seller", lazy="dynamic")
+    transactions = db.relationship("Transaction", back_populates="seller")
 
     def set_password(self, password):
         from passlib.hash import pbkdf2_sha256
@@ -138,6 +154,38 @@ class Seller(BaseModel):
         from passlib.hash import pbkdf2_sha256
 
         return pbkdf2_sha256.verify(password, self.password_hash)
+
+    @property
+    def pending_order_count(self):
+        from app.orders.models import OrderItem
+
+        return (
+            db.session.query(OrderItem)
+            .filter_by(seller_id=self.id, status="pending")
+            .count()
+        )
+
+    def get_earnings(self, period="month"):
+        """Calculate earnings for given period"""
+        from sqlalchemy import func
+        from datetime import datetime, timedelta
+        from app.orders.models import Order, OrderItem
+
+        if period == "month":
+            date_filter = datetime.utcnow() - timedelta(days=30)
+        elif period == "week":
+            date_filter = datetime.utcnow() - timedelta(days=7)
+        else:
+            date_filter = None
+
+        query = db.session.query(
+            func.sum(OrderItem.price * OrderItem.quantity)
+        ).filter_by(seller_id=self.id)
+
+        if date_filter:
+            query = query.join(Order).filter(Order.created_at >= date_filter)
+
+        return query.scalar() or 0
 
 
 class UserAddress(BaseModel):

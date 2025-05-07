@@ -6,12 +6,15 @@ import logging
 from external.database import db
 from app.libs.session import session_scope
 from app.libs.errors import NotFoundError
+from app.libs.pagination import Paginator
+
 from app.cart.models import Cart, CartItem
 from app.products.models import Product
 from app.payments.models import Payment, PaymentStatus
+from app.users.models import Buyer
 
 # app imports
-from .models import Order, OrderStatus
+from .models import Order, OrderStatus, OrderItem
 
 
 logger = logging.getLogger(__name__)
@@ -21,8 +24,11 @@ class OrderService:
     @staticmethod
     def create_order(cart_id, buyer_id, shipping_address, payment_method):
         with session_scope() as session:
-            # Get cart and validate
-            cart = session.query(Cart).options(db.joinedload(Cart.items)).get(cart_id)
+            cart = (
+                session.query(Cart)
+                .options(db.joinedload(Cart.items).joinedload(CartItem.product))
+                .get(cart_id)
+            )
 
             if not cart or cart.buyer_id != buyer_id:
                 raise ValueError("Invalid cart")
@@ -30,43 +36,66 @@ class OrderService:
             if not cart.items:
                 raise ValueError("Cart is empty")
 
-            # Verify product availability
-            for item in cart.items:
-                product = session.query(Product).get(item.product_id)
-                if not product or not product.is_available():
-                    raise ValueError(f"Product {product.name} is not available")
-                if item.variant_id:
-                    # Check variant inventory here
-                    pass
-
-            # Create order
+            # Create single order for buyer
             order = Order(
                 buyer_id=buyer_id,
-                seller_id=...,  # Need logic for multi-seller orders
                 shipping_address=shipping_address,
-                items=[
-                    {
-                        "product_id": item.product_id,
-                        "variant_id": item.variant_id,
-                        "quantity": item.quantity,
-                        "price": item.product_price,
-                    }
-                    for item in cart.items
-                ],
                 subtotal=cart.subtotal(),
                 status=OrderStatus.PENDING,
             )
             session.add(order)
             session.flush()
 
-            # Generate order number
-            order.order_number = order.generate_order_number()
+            # Create order items for each product
+            for item in cart.items:
+                order_item = OrderItem(
+                    order_id=order.id,
+                    product_id=item.product_id,
+                    variant_id=item.variant_id,
+                    seller_id=item.product.seller_id,  # Critical - track seller
+                    quantity=item.quantity,
+                    price=item.product_price,
+                    status=OrderItem.Status.PENDING,
+                )
+                session.add(order_item)
+                # Explicitly add to order's items collection
+                order.items.append(order_item)
 
-            # Clear cart
-            session.query(CartItem).filter_by(cart_id=cart.id).delete()
+            # Commit changes to ensure items are persisted
             session.commit()
 
+            order.order_number = order.generate_order_number()
+            cart.clear_cart()
             return order
+
+    @staticmethod
+    def get_user_orders(user_id):
+        """For buyers - shows complete orders with all items"""
+        with session_scope() as session:
+            return (
+                session.query(Order)
+                .options(
+                    db.joinedload(Order.items).joinedload(OrderItem.product),
+                    db.joinedload(Order.items).joinedload(OrderItem.seller),
+                )
+                .filter_by(buyer_id=user_id)
+                .order_by(Order.created_at.desc())
+                .all()
+            )
+
+    @staticmethod
+    def get_order(order_id):
+        with session_scope() as session:
+            return (
+                session.query(Order)
+                .options(
+                    db.joinedload(Order.items).joinedload(OrderItem.product),
+                    db.joinedload(Order.items).joinedload(OrderItem.seller),
+                    db.joinedload(Order.items).joinedload(OrderItem.variant),
+                    db.joinedload(Order.payments),
+                )
+                .get(order_id)
+            )
 
     @staticmethod
     def process_payment(order_id, payment_data):
@@ -102,3 +131,92 @@ class OrderService:
 
     # TODO: Add order history tracking
     # TODO: Add refund processing
+
+
+class SellerOrderService:
+    @staticmethod
+    def get_seller_orders(seller_id, status=None, page=1, per_page=20):
+        """For sellers - shows only their order items"""
+        with session_scope() as session:
+            base_query = (
+                session.query(OrderItem)
+                .filter_by(seller_id=seller_id)
+                .options(
+                    db.joinedload(OrderItem.order).joinedload(Order.buyer),
+                    db.joinedload(OrderItem.product),
+                    db.joinedload(OrderItem.variant),
+                )
+            )
+
+            if status:
+                base_query = base_query.filter_by(status=status)
+
+            paginator = Paginator(base_query, page=page, per_page=per_page)
+            result = paginator.paginate({})
+
+            return {
+                "order_items": result["items"],
+                "pagination": {
+                    "page": result["page"],
+                    "per_page": result["per_page"],
+                    "total_items": result["total_items"],
+                    "total_pages": result["total_pages"],
+                },
+            }
+
+    @staticmethod
+    def update_order_item_status(order_item_id, status, seller_id):
+        with session_scope() as session:
+            item = (
+                session.query(OrderItem)
+                .filter_by(id=order_item_id, seller_id=seller_id)
+                .first()
+            )
+
+            if not item:
+                raise ValueError("Order item not found")
+
+            valid_transitions = {
+                "pending": ["processing", "cancelled"],
+                "processing": ["shipped", "cancelled"],
+                "shipped": ["delivered"],
+                # Other status transitions...
+            }
+
+            if (
+                item.status not in valid_transitions
+                or status not in valid_transitions[item.status]
+            ):
+                raise ValueError(f"Cannot transition from {item.status} to {status}")
+
+            item.status = status
+
+            # If all items are delivered, mark order as completed
+            if status == "delivered":
+                order = session.query(Order).get(item.order_id)
+                if all(i.status == "delivered" for i in order.items):
+                    order.status = OrderStatus.DELIVERED
+
+            return item
+
+    @staticmethod
+    def get_seller_order_stats(seller_id):
+        with session_scope() as session:
+            return {
+                "total_orders": session.query(OrderItem)
+                .filter_by(seller_id=seller_id)
+                .count(),
+                "pending_orders": session.query(OrderItem)
+                .filter_by(seller_id=seller_id, status="pending")
+                .count(),
+                "monthly_earnings": session.query(
+                    db.func.sum(OrderItem.price * OrderItem.quantity)
+                )
+                .filter(
+                    OrderItem.seller_id == seller_id,
+                    OrderItem.created_at
+                    >= db.func.date_sub(db.func.now(), db.text("INTERVAL 1 MONTH")),
+                )
+                .scalar()
+                or 0,
+            }

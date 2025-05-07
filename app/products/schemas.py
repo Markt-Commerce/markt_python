@@ -51,3 +51,8 @@ class ProductSearchSchema(Schema):
 class ProductSearchResultSchema(Schema):
     products = fields.List(fields.Nested(ProductSchema))
     pagination = fields.Nested(PaginationSchema)
+
+
+class ProductSimpleSchema(Schema):
+    name = fields.Str()
+    # price = fields.Float()

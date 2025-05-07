@@ -115,6 +115,11 @@ class UsernameAvailableSchema(Schema):
     message = fields.Str()
 
 
+class BuyerSimpleSchema(Schema):
+    id = fields.Int(dump_only=True)
+    buyername = fields.Str()
+
+
 class FeedSchema(Schema):
     pass
 
