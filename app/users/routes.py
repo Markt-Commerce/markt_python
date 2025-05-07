@@ -140,30 +140,7 @@ class UserList(MethodView):
     @bp.response(200, UserPaginationSchema)
     def get(self, args):
         try:
-            # Initialize paginator
-            paginator = Paginator(
-                User.query, page=args.get("page", 1), per_page=args.get("per_page", 20)
-            )
-
-            # Apply search if provided
-            if "search" in args:
-                search = f"%{args['search']}%"
-                paginator.query = paginator.query.filter(
-                    or_(User.username.ilike(search), User.email.ilike(search))
-                )
-
-            # Get paginated results
-            result = paginator.paginate(args)
-
-            return {
-                "items": result["items"],
-                "pagination": {
-                    "page": result["page"],
-                    "per_page": result["per_page"],
-                    "total_items": result["total_items"],
-                    "total_pages": result["total_pages"],
-                },
-            }
+            return UserService.list_users(args)
         except Exception as e:
             abort(500, message=str(e))
 

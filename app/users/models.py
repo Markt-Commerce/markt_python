@@ -14,6 +14,7 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
     email = db.Column(db.String(120), unique=True, nullable=False)
     phone_number = db.Column(db.String(20))
     username = db.Column(db.String(50), unique=True, nullable=False)
+    password_hash = db.Column(db.String(128))
     profile_picture = db.Column(db.String(255), default="default.jpg")
 
     is_buyer = db.Column(db.Boolean, default=False)
@@ -69,6 +70,16 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
     # Media relationships
     media_uploads = db.relationship("Media", back_populates="user", lazy="dynamic")
 
+    def set_password(self, password):
+        from passlib.hash import pbkdf2_sha256
+
+        self.password_hash = pbkdf2_sha256.hash(password)
+
+    def check_password(self, password):
+        from passlib.hash import pbkdf2_sha256
+
+        return pbkdf2_sha256.verify(password, self.password_hash)
+
     @property
     def current_role(self):
         return getattr(self, "_current_role", "buyer" if self.is_buyer else "seller")
@@ -90,7 +101,6 @@ class Buyer(BaseModel):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.String(12), db.ForeignKey("users.id"))
     buyername = db.Column(db.String(50))
-    password_hash = db.Column(db.String(128))
     shipping_address = db.Column(db.JSON)
 
     # Relationships
@@ -99,18 +109,6 @@ class Buyer(BaseModel):
         "Cart", back_populates="buyer", cascade="all, delete-orphan"
     )
     orders = db.relationship("Order", back_populates="buyer", lazy="dynamic")
-    # requests = db.relationship("BuyerRequest", back_populates="buyer", lazy="dynamic")
-    # favorites = db.relationship("ProductLike", back_populates="buyer", lazy="dynamic")
-
-    def set_password(self, password):
-        from passlib.hash import pbkdf2_sha256
-
-        self.password_hash = pbkdf2_sha256.hash(password)
-
-    def check_password(self, password):
-        from passlib.hash import pbkdf2_sha256
-
-        return pbkdf2_sha256.verify(password, self.password_hash)
 
 
 class SellerVerificationStatus(Enum):
@@ -127,7 +125,6 @@ class Seller(BaseModel):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.String(12), db.ForeignKey("users.id"))
     shop_name = db.Column(db.String(100))
-    password_hash = db.Column(db.String(128))
     shop_slug = db.Column(db.String(110), unique=True)
     description = db.Column(db.Text)
     policies = db.Column(db.JSON)  # Return, shipping policies
@@ -144,16 +141,6 @@ class Seller(BaseModel):
     order_items = db.relationship("OrderItem", back_populates="seller")
     offers = db.relationship("SellerOffer", back_populates="seller", lazy="dynamic")
     transactions = db.relationship("Transaction", back_populates="seller")
-
-    def set_password(self, password):
-        from passlib.hash import pbkdf2_sha256
-
-        self.password_hash = pbkdf2_sha256.hash(password)
-
-    def check_password(self, password):
-        from passlib.hash import pbkdf2_sha256
-
-        return pbkdf2_sha256.verify(password, self.password_hash)
 
     @property
     def pending_order_count(self):
