@@ -56,3 +56,8 @@ class ProductSearchResultSchema(Schema):
 class ProductSimpleSchema(Schema):
     name = fields.Str()
     # price = fields.Float()
+
+
+class BulkProductResultSchema(Schema):
+    success = fields.List(fields.Dict(), required=True)
+    errors = fields.List(fields.Dict(), required=True)

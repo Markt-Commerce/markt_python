@@ -5,7 +5,7 @@ from flask_login import login_required, current_user
 
 # project imports
 from app.socials.schemas import ShareSchema, CommentSchema
-
+from app.libs.decorators import seller_required, buyer_required
 
 # app imports
 from .services import ProductService
@@ -15,6 +15,7 @@ from .schemas import (
     ProductUpdateSchema,
     ProductSearchSchema,
     ProductSearchResultSchema,
+    BulkProductResultSchema,
 )
 
 
@@ -32,12 +33,11 @@ class ProductList(MethodView):
         return ProductService.search_products(args)
 
     @login_required
+    @seller_required
     @bp.arguments(ProductCreateSchema)
     @bp.response(201, ProductSchema)
     def post(self, product_data):
         """Create new product (for sellers)"""
-        if not current_user.seller_account:
-            abort(403, message="Only sellers can create products")
         return ProductService.create_product(
             product_data, current_user.seller_account.id
         )
@@ -69,6 +69,21 @@ class ProductDetail(MethodView):
             abort(403, message="You can only delete your own products")
         ProductService.delete_product(product_id)
         return None
+
+
+@bp.route("/bulk")
+class ProductBulkCreate(MethodView):
+    @login_required
+    @seller_required
+    @bp.arguments(ProductCreateSchema(many=True))
+    @bp.response(201, BulkProductResultSchema)
+    def post(self, products_data):
+        """Bulk create products (for sellers)"""
+        # if not current_user.seller_account:
+        #     raise ForbiddenError("Only sellers can create products")
+        return ProductService.bulk_create_products(
+            products_data, current_user.seller_account.id
+        )
 
 
 # Product Discovery

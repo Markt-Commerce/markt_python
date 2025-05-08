@@ -2,10 +2,18 @@
 from datetime import datetime
 import logging
 
+from sqlalchemy.exc import SQLAlchemyError
+
 # project imports
 from external.database import db
 from app.libs.session import session_scope
-from app.libs.errors import NotFoundError
+from app.libs.errors import (
+    NotFoundError,
+    ValidationError,
+    ConflictError,
+    ForbiddenError,
+    APIError,
+)
 from app.libs.pagination import Paginator
 
 from app.cart.models import Cart, CartItem
@@ -23,50 +31,55 @@ logger = logging.getLogger(__name__)
 class OrderService:
     @staticmethod
     def create_order(cart_id, buyer_id, shipping_address, payment_method):
-        with session_scope() as session:
-            cart = (
-                session.query(Cart)
-                .options(db.joinedload(Cart.items).joinedload(CartItem.product))
-                .get(cart_id)
-            )
-
-            if not cart or cart.buyer_id != buyer_id:
-                raise ValueError("Invalid cart")
-
-            if not cart.items:
-                raise ValueError("Cart is empty")
-
-            # Create single order for buyer
-            order = Order(
-                buyer_id=buyer_id,
-                shipping_address=shipping_address,
-                subtotal=cart.subtotal(),
-                status=OrderStatus.PENDING,
-            )
-            session.add(order)
-            session.flush()
-
-            # Create order items for each product
-            for item in cart.items:
-                order_item = OrderItem(
-                    order_id=order.id,
-                    product_id=item.product_id,
-                    variant_id=item.variant_id,
-                    seller_id=item.product.seller_id,  # Critical - track seller
-                    quantity=item.quantity,
-                    price=item.product_price,
-                    status=OrderItem.Status.PENDING,
+        try:
+            with session_scope() as session:
+                cart = (
+                    session.query(Cart)
+                    .options(db.joinedload(Cart.items).joinedload(CartItem.product))
+                    .get(cart_id)
                 )
-                session.add(order_item)
-                # Explicitly add to order's items collection
-                order.items.append(order_item)
 
-            # Commit changes to ensure items are persisted
-            session.commit()
+                if not cart:
+                    raise NotFoundError("Cart not found")
+                if cart.buyer_id != buyer_id:
+                    raise ForbiddenError("Cart does not belong to user")
+                if not cart.items:
+                    raise ValidationError("Cannot create order from empty cart")
 
-            order.order_number = order.generate_order_number()
-            cart.clear_cart()
-            return order
+                # Create single order for buyer
+                order = Order(
+                    buyer_id=buyer_id,
+                    shipping_address=shipping_address,
+                    subtotal=cart.subtotal(),
+                    status=OrderStatus.PENDING,
+                )
+                session.add(order)
+                session.flush()
+
+                # Create order items for each product
+                for item in cart.items:
+                    order_item = OrderItem(
+                        order_id=order.id,
+                        product_id=item.product_id,
+                        variant_id=item.variant_id,
+                        seller_id=item.product.seller_id,  # Critical - track seller
+                        quantity=item.quantity,
+                        price=item.product_price,
+                        status=OrderItem.Status.PENDING,
+                    )
+                    session.add(order_item)
+                    # Explicitly add to order's items collection
+                    order.items.append(order_item)
+
+                # Commit changes to ensure items are persisted
+                session.commit()
+
+                order.order_number = order.generate_order_number()
+                cart.clear_cart()
+                return order
+        except SQLAlchemyError as e:
+            logger.error(f"Database error creating order: {str(e)}")
+            raise APIError("Failed to create order", 500)
 
     @staticmethod
     def get_user_orders(user_id):

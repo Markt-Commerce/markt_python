@@ -3,12 +3,14 @@ import logging
 
 # package imports
 from sqlalchemy import or_, and_
+from sqlalchemy.exc import SQLAlchemyError
 
 # project imports
 from external.database import db
 from app.libs.session import session_scope
 from app.libs.pagination import Paginator
 from app.categories.models import ProductCategory, ProductTag
+from app.libs.errors import NotFoundError, ValidationError, ConflictError, APIError
 
 # app imports
 from .models import Product, ProductVariant, ProductInventory
@@ -21,8 +23,39 @@ logger = logging.getLogger(__name__)
 class ProductService:
     @staticmethod
     def get_all_products():
-        with session_scope() as session:
-            return session.query(Product).filter_by(status=Product.Status.ACTIVE).all()
+        try:
+            with session_scope() as session:
+                products = (
+                    session.query(Product).filter_by(status=Product.Status.ACTIVE).all()
+                )
+                if not products:
+                    raise NotFoundError("No products found")
+                return products
+        except SQLAlchemyError as e:
+            logger.error(f"Database error fetching products: {str(e)}")
+            raise APIError("Failed to fetch products", 500)
+
+    @staticmethod
+    def get_product(product_id):
+        try:
+            with session_scope() as session:
+                product = (
+                    session.query(Product)
+                    .options(
+                        db.joinedload(Product.seller),
+                        db.joinedload(Product.variants),
+                        db.joinedload(Product.categories).joinedload(
+                            ProductCategory.category
+                        ),
+                    )
+                    .get(product_id)
+                )
+                if not product:
+                    raise NotFoundError("Product not found")
+                return product
+        except SQLAlchemyError as e:
+            logger.error(f"Database error fetching product {product_id}: {str(e)}")
+            raise APIError("Failed to fetch product", 500)
 
     @staticmethod
     def search_products(args):
@@ -88,49 +121,115 @@ class ProductService:
             }
 
     @staticmethod
-    def get_product(product_id):
-        with session_scope() as session:
-            return (
-                session.query(Product)
-                .options(
-                    db.joinedload(Product.seller),
-                    db.joinedload(Product.variants),
-                    db.joinedload(Product.categories).joinedload(
-                        ProductCategory.category
-                    ),
+    def create_product(product_data, seller_id):
+        try:
+            with session_scope() as session:
+                product = Product(
+                    name=product_data["name"],
+                    description=product_data.get("description"),
+                    price=product_data["price"],
+                    stock=product_data.get("stock", 0),
+                    seller_id=seller_id,
+                    **{
+                        k: v
+                        for k, v in product_data.items()
+                        if k in OPTIONAL_PRODUCT_FIELDS
+                    },
                 )
-                .get(product_id)
-            )
+                session.add(product)
+                session.flush()  # Get product ID
+
+                # Handle variants if provided
+                if "variants" in product_data:
+                    for variant_data in product_data["variants"]:
+                        variant = ProductVariant(
+                            product_id=product.id,
+                            name=variant_data["name"],
+                            options=variant_data["options"],
+                        )
+                        session.add(variant)
+
+                return product
+        except SQLAlchemyError as e:
+            logger.error(f"Database error creating product: {str(e)}")
+            raise APIError("Failed to create product", 500)
 
     @staticmethod
-    def create_product(product_data, seller_id):
-        with session_scope() as session:
-            product = Product(
-                name=product_data["name"],
-                description=product_data.get("description"),
-                price=product_data["price"],
-                stock=product_data.get("stock", 0),
-                seller_id=seller_id,
-                **{
-                    k: v
-                    for k, v in product_data.items()
-                    if k in OPTIONAL_PRODUCT_FIELDS
-                },
-            )
-            session.add(product)
-            session.flush()  # Get product ID
+    def bulk_create_products(products_data, seller_id):
+        try:
+            if not isinstance(products_data, list):
+                raise ValidationError("Expected a list of products")
 
-            # Handle variants if provided
-            if "variants" in product_data:
-                for variant_data in product_data["variants"]:
-                    variant = ProductVariant(
-                        product_id=product.id,
-                        name=variant_data["name"],
-                        options=variant_data["options"],
-                    )
-                    session.add(variant)
+            if len(products_data) > 100:  # Limit to prevent abuse
+                raise ValidationError("Cannot create more than 100 products at once")
 
-            return product
+            results = {"success": [], "errors": []}
+
+            with session_scope() as session:
+                for idx, product_data in enumerate(products_data):
+                    try:
+                        product = Product(
+                            name=product_data["name"],
+                            description=product_data.get("description"),
+                            price=product_data["price"],
+                            stock=product_data.get("stock", 0),
+                            seller_id=seller_id,
+                            **{
+                                k: v
+                                for k, v in product_data.items()
+                                if k in OPTIONAL_PRODUCT_FIELDS
+                            },
+                        )
+                        session.add(product)
+                        session.flush()
+
+                        if "variants" in product_data:
+                            for variant_data in product_data["variants"]:
+                                if not variant_data.get("name") or not variant_data.get(
+                                    "options"
+                                ):
+                                    raise ValidationError(
+                                        "Variant requires name and options",
+                                        errors={"index": idx},
+                                    )
+
+                                variant = ProductVariant(
+                                    product_id=product.id,
+                                    name=variant_data["name"],
+                                    options=variant_data["options"],
+                                )
+                                session.add(variant)
+
+                        results["success"].append(
+                            {
+                                "index": idx,
+                                "product_id": product.id,
+                                "name": product.name,
+                            }
+                        )
+
+                    except (ValidationError, SQLAlchemyError) as e:
+                        session.rollback()  # Rollback only this product's changes
+                        error_msg = str(e)
+                        if isinstance(e, ValidationError):
+                            error_msg = e.message
+                            if hasattr(e, "errors"):
+                                error_msg = f"{error_msg}: {e.errors}"
+
+                        results["errors"].append(
+                            {
+                                "index": idx,
+                                "error": error_msg,
+                                "product_data": product_data,
+                            }
+                        )
+                        continue
+
+                return results
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error in bulk product creation: {str(e)}")
+            raise APIError("Failed to create products", 500)
 
     @staticmethod
     def update_inventory(product_id, variant_id=None, quantity_change=0):

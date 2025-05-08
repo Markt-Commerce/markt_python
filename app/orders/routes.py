@@ -5,6 +5,7 @@ from flask_login import login_required, current_user
 
 # project imports
 from app.libs.schemas import PaginationQueryArgs
+from app.libs.decorators import seller_required, buyer_required
 from app.payments.schemas import PaymentSchema
 
 # app imports
@@ -26,11 +27,10 @@ bp = Blueprint("orders", __name__, description="Order operations", url_prefix="/
 @bp.route("/")
 class OrderList(MethodView):
     @login_required
+    @buyer_required
     @bp.response(200, BuyerOrderSchema(many=True))
     def get(self):
         """List user's orders"""
-        if not current_user.is_buyer:
-            abort(403, message="Only buyers can access this endpoint")
         return OrderService.get_user_orders(current_user.buyer_account.id)
 
     @login_required
@@ -68,13 +68,11 @@ class OrderDetail(MethodView):
 @bp.route("/seller")
 class SellerOrderList(MethodView):
     @login_required
+    @seller_required
     @bp.arguments(PaginationQueryArgs, location="query")
     @bp.response(200, SellerOrderResponseSchema)
     def get(self, args):
         """List orders for current seller"""
-        if not current_user.seller_account and not current_user.is_seller:
-            abort(403, message="Only sellers can access this endpoint")
-
         return SellerOrderService.get_seller_orders(
             current_user.seller_account.id,
             status=args.get("status"),
@@ -86,18 +84,17 @@ class SellerOrderList(MethodView):
 @bp.route("/seller/stats")
 class SellerOrderStats(MethodView):
     @login_required
+    @seller_required
     @bp.response(200)
     def get(self):
         """Get seller order statistics"""
-        if not current_user.seller_account and not current_user.is_seller:
-            abort(403, message="Only sellers can access this endpoint")
-
         return SellerOrderService.get_seller_order_stats(current_user.seller_account.id)
 
 
 @bp.route("/seller/items/<int:order_item_id>")
 class SellerOrderItem(MethodView):
     @login_required
+    @seller_required
     @bp.response(200, OrderItemSchema)
     def patch(self, order_item_id, status_data):
         """Update order item status"""
