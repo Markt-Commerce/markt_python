@@ -1,8 +1,10 @@
 from enum import Enum
 from external.database import db
 from app.libs.models import BaseModel, StatusMixin
-from app.libs.helper import UniqueIdMixin
+from app.libs.helpers import UniqueIdMixin
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy import func, select
 
 
 class ProductStatus(Enum):
@@ -14,7 +16,7 @@ class ProductStatus(Enum):
 
 class Product(BaseModel, StatusMixin, UniqueIdMixin):
     __tablename__ = "products"
-    id_prefix = "PROD_"
+    id_prefix = "PRD_"
 
     class Status(Enum):
         ACTIVE = "active"
@@ -55,6 +57,21 @@ class Product(BaseModel, StatusMixin, UniqueIdMixin):
 
     def is_available(self):
         return self.status == self.Status.ACTIVE and self.stock > 0
+
+    @hybrid_property
+    def view_count(self):
+        return len(self.views)
+
+    @view_count.expression
+    def view_count(cls):
+        from app.socials.models import ProductView
+
+        return (
+            select(func.count(ProductView.id))
+            .where(ProductView.product_id == cls.id)
+            .correlate(cls)
+            .scalar_subquery()  # or `.as_scalar()` for older versions
+        )
 
 
 class ProductVariant(BaseModel):

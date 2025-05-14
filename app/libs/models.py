@@ -19,7 +19,12 @@ class StatusMixin:
     def status(cls):
         status_enum = cls.Status
         default_value = next(iter(status_enum))  # First enum member
-        return db.Column(db.Enum(status_enum), default=default_value, nullable=False)
+        # Create a unique enum name based on the table name
+        enum_name = f"{cls.__tablename__}_status"
+
+        return db.Column(
+            db.Enum(status_enum, name=enum_name), default=default_value, nullable=False
+        )
 
 
 class BaseModel(db.Model, TimestampMixin):

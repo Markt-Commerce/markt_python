@@ -84,3 +84,18 @@ def create_app():
 
     logger.info("Application initialized")
     return app, socketio
+
+
+def create_flask_app():
+    """
+    Flask CLI-compatible app factory.
+
+    This function is specifically intended for use with Flask CLI commands like:
+        flask db migrate
+        flask db upgrade
+
+    Since the main `create_app()` returns a tuple (app, socketio), which is not compatible
+    with the Flask CLI (expects a Flask instance), this wrapper returns only the Flask app
+    to enable proper integration with tools like Flask-Migrate.
+    """
+    return create_app()[0]

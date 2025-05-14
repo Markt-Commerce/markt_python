@@ -1,7 +1,7 @@
 from enum import Enum
 from external.database import db
 from app.libs.models import BaseModel
-from app.libs.helper import UniqueIdMixin
+from app.libs.helpers import UniqueIdMixin
 
 
 class PaymentStatus(Enum):
@@ -41,6 +41,7 @@ class Transaction(BaseModel):
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.String(12), db.ForeignKey("users.id"))
+    seller_id = db.Column(db.Integer, db.ForeignKey("sellers.id"), nullable=True)
     amount = db.Column(db.Float)
     type = db.Column(db.String(20))  # 'credit', 'debit'
     reference = db.Column(db.String(100))
@@ -48,3 +49,4 @@ class Transaction(BaseModel):
     payment_metadata = db.Column(db.JSON)
 
     user = db.relationship("User", back_populates="transactions")
+    seller = db.relationship("Seller", back_populates="transactions")

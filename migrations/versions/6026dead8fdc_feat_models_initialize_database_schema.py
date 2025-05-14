@@ -50,6 +50,7 @@ def upgrade():
     sa.Column('email', sa.String(length=120), nullable=False),
     sa.Column('phone_number', sa.String(length=20), nullable=True),
     sa.Column('username', sa.String(length=50), nullable=False),
+    sa.Column('password_hash', sa.String(length=128), nullable=True),
     sa.Column('profile_picture', sa.String(length=255), nullable=True),
     sa.Column('is_buyer', sa.Boolean(), nullable=True),
     sa.Column('is_seller', sa.Boolean(), nullable=True),
@@ -81,7 +82,6 @@ def upgrade():
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('user_id', sa.String(length=12), nullable=True),
     sa.Column('buyername', sa.String(length=50), nullable=True),
-    sa.Column('password_hash', sa.String(length=128), nullable=True),
     sa.Column('shipping_address', sa.JSON(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
@@ -132,28 +132,18 @@ def upgrade():
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('user_id', sa.String(length=12), nullable=True),
     sa.Column('shop_name', sa.String(length=100), nullable=True),
-    sa.Column('password_hash', sa.String(length=128), nullable=True),
-    sa.Column('description', sa.String(length=500), nullable=True),
+    sa.Column('shop_slug', sa.String(length=110), nullable=True),
+    sa.Column('description', sa.Text(), nullable=True),
+    sa.Column('policies', sa.JSON(), nullable=True),
     sa.Column('category', sa.String(length=100), nullable=True),
     sa.Column('total_rating', sa.Integer(), nullable=True),
     sa.Column('total_raters', sa.Integer(), nullable=True),
+    sa.Column('verification_status', sa.Enum('UNVERIFIED', 'PENDING', 'VERIFIED', 'REJECTED', 'SUSPENDED', name='sellerverificationstatus'), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
-    sa.PrimaryKeyConstraint('id')
-    )
-    op.create_table('transactions',
-    sa.Column('id', sa.Integer(), nullable=False),
-    sa.Column('user_id', sa.String(length=12), nullable=True),
-    sa.Column('amount', sa.Float(), nullable=True),
-    sa.Column('type', sa.String(length=20), nullable=True),
-    sa.Column('reference', sa.String(length=100), nullable=True),
-    sa.Column('status', sa.String(length=20), nullable=True),
-    sa.Column('payment_metadata', sa.JSON(), nullable=True),
-    sa.Column('created_at', sa.DateTime(), nullable=False),
-    sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
-    sa.PrimaryKeyConstraint('id')
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('shop_slug')
     )
     op.create_table('user_addresses',
     sa.Column('id', sa.Integer(), nullable=False),
@@ -197,22 +187,19 @@ def upgrade():
     op.create_table('orders',
     sa.Column('id', sa.String(length=12), nullable=False),
     sa.Column('buyer_id', sa.Integer(), nullable=True),
-    sa.Column('seller_id', sa.Integer(), nullable=True),
-    sa.Column('order_number', sa.String(length=20), nullable=True),
+    sa.Column('order_number', sa.String(length=21), nullable=True),
     sa.Column('subtotal', sa.Float(), nullable=True),
     sa.Column('shipping_fee', sa.Float(), nullable=True),
     sa.Column('tax', sa.Float(), nullable=True),
     sa.Column('discount', sa.Float(), nullable=True),
     sa.Column('total', sa.Float(), nullable=True),
     sa.Column('status', sa.Enum('PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED', 'RETURNED', name='orderstatus'), nullable=True),
-    sa.Column('items', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('shipping_address', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('billing_address', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('customer_note', sa.Text(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.ForeignKeyConstraint(['buyer_id'], ['buyers.id'], ),
-    sa.ForeignKeyConstraint(['seller_id'], ['sellers.id'], ),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('order_number')
     )
@@ -231,7 +218,7 @@ def upgrade():
     sa.Column('seller_id', sa.Integer(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
-    sa.Column('status', sa.Enum('ACTIVE', 'DRAFT', 'ARCHIVED', 'OUT_OF_STOCK', name='status'), nullable=False),
+    sa.Column('status', sa.Enum('ACTIVE', 'DRAFT', 'ARCHIVED', 'OUT_OF_STOCK', name='products_status'), nullable=False),
     sa.ForeignKeyConstraint(['seller_id'], ['sellers.id'], ),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('sku')
@@ -244,6 +231,21 @@ def upgrade():
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.ForeignKeyConstraint(['request_id'], ['buyer_requests.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('transactions',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('user_id', sa.String(length=12), nullable=True),
+    sa.Column('seller_id', sa.Integer(), nullable=True),
+    sa.Column('amount', sa.Float(), nullable=True),
+    sa.Column('type', sa.String(length=20), nullable=True),
+    sa.Column('reference', sa.String(length=100), nullable=True),
+    sa.Column('status', sa.String(length=20), nullable=True),
+    sa.Column('payment_metadata', sa.JSON(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), nullable=False),
+    sa.Column('updated_at', sa.DateTime(), nullable=False),
+    sa.ForeignKeyConstraint(['seller_id'], ['sellers.id'], ),
+    sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_table('chat_rooms',
@@ -412,6 +414,23 @@ def upgrade():
     sa.ForeignKeyConstraint(['sender_id'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
+    op.create_table('order_items',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('order_id', sa.String(length=12), nullable=True),
+    sa.Column('product_id', sa.String(length=12), nullable=True),
+    sa.Column('variant_id', sa.Integer(), nullable=True),
+    sa.Column('seller_id', sa.Integer(), nullable=True),
+    sa.Column('quantity', sa.Integer(), nullable=True),
+    sa.Column('price', sa.Float(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), nullable=False),
+    sa.Column('updated_at', sa.DateTime(), nullable=False),
+    sa.Column('status', sa.Enum('PENDING', 'SHIPPED', 'DELIVERED', name='order_items_status'), nullable=False),
+    sa.ForeignKeyConstraint(['order_id'], ['orders.id'], ),
+    sa.ForeignKeyConstraint(['product_id'], ['products.id'], ),
+    sa.ForeignKeyConstraint(['seller_id'], ['sellers.id'], ),
+    sa.ForeignKeyConstraint(['variant_id'], ['product_variants.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
     op.create_table('product_inventory',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('product_id', sa.String(length=12), nullable=True),
@@ -443,6 +462,7 @@ def downgrade():
     # ### commands auto generated by Alembic - please adjust! ###
     op.drop_table('chat_offers')
     op.drop_table('product_inventory')
+    op.drop_table('order_items')
     op.drop_table('chat_messages')
     op.drop_table('cart_items')
     op.drop_table('shipments')
@@ -456,13 +476,13 @@ def downgrade():
     op.drop_table('product_categories')
     op.drop_table('payments')
     op.drop_table('chat_rooms')
+    op.drop_table('transactions')
     op.drop_table('request_images')
     op.drop_table('products')
     op.drop_table('orders')
     op.drop_table('media_variants')
     op.drop_table('carts')
     op.drop_table('user_addresses')
-    op.drop_table('transactions')
     op.drop_table('sellers')
     op.drop_table('notifications')
     op.drop_table('media')

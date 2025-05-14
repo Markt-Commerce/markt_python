@@ -102,6 +102,9 @@ Access API docs at: `http://localhost:8000/swagger-ui`
 ## 📦 Database Migrations
 
 ```bash
+# Set flask app
+export FLASK_APP=main.setup:create_flask_app
+
 # Initialize migrations (first time only)
 flask db init
 

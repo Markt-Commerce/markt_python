@@ -1,14 +1,23 @@
 # package imports
-from flask_smorest import Blueprint
+from flask_smorest import Blueprint, abort
 from flask.views import MethodView
-from flask_login import login_required
+from flask_login import login_required, current_user
 
 # project imports
 from app.socials.schemas import ShareSchema, CommentSchema
+from app.libs.decorators import seller_required, buyer_required
 
 # app imports
 from .services import ProductService
-from .schemas import ProductSchema, ProductCreateSchema, ProductUpdateSchema
+from .schemas import (
+    ProductSchema,
+    ProductCreateSchema,
+    ProductUpdateSchema,
+    ProductSearchSchema,
+    ProductSearchResultSchema,
+    BulkProductResultSchema,
+)
+
 
 bp = Blueprint(
     "products", __name__, description="Product operations", url_prefix="/products"
@@ -17,50 +26,68 @@ bp = Blueprint(
 
 @bp.route("/")
 class ProductList(MethodView):
-    @bp.response(200, ProductSchema(many=True))
-    def get(self):
-        """List all products"""
-        return ProductService.get_all_products()
+    @bp.arguments(ProductSearchSchema, location="query")
+    @bp.response(200, ProductSearchResultSchema)
+    def get(self, args):
+        """List all products with filters"""
+        return ProductService.search_products(args)
 
+    @login_required
+    @seller_required
     @bp.arguments(ProductCreateSchema)
     @bp.response(201, ProductSchema)
     def post(self, product_data):
-        """Create new product"""
-        return ProductService.create_product(product_data)
+        """Create new product (for sellers)"""
+        return ProductService.create_product(
+            product_data, current_user.seller_account.id
+        )
 
 
-@bp.route("/<int:product_id>")
+@bp.route("/<product_id>")
 class ProductDetail(MethodView):
     @bp.response(200, ProductSchema)
     def get(self, product_id):
         """Get product details"""
         return ProductService.get_product(product_id)
 
+    @login_required
     @bp.arguments(ProductUpdateSchema)
     @bp.response(200, ProductSchema)
     def put(self, product_data, product_id):
-        """Update product"""
+        """Update product (owner only)"""
+        product = ProductService.get_product(product_id)
+        if product.seller_id != current_user.seller_account.id:
+            abort(403, message="You can only update your own products")
         return ProductService.update_product(product_id, product_data)
 
+    @login_required
     @bp.response(204)
     def delete(self, product_id):
-        """Delete product"""
+        """Delete product (owner only)"""
+        product = ProductService.get_product(product_id)
+        if product.seller_id != current_user.seller_account.id:
+            abort(403, message="You can only delete your own products")
         ProductService.delete_product(product_id)
         return None
 
 
+@bp.route("/bulk")
+class ProductBulkCreate(MethodView):
+    @login_required
+    @seller_required
+    @bp.arguments(ProductCreateSchema(many=True))
+    @bp.response(201, BulkProductResultSchema)
+    def post(self, products_data):
+        """Bulk create products (for sellers)"""
+        # if not current_user.seller_account:
+        #     raise ForbiddenError("Only sellers can create products")
+        return ProductService.bulk_create_products(
+            products_data, current_user.seller_account.id
+        )
+
+
 # Product Discovery
 # -----------------------------------------------
-@bp.route("/search")
-class ProductSearch(MethodView):
-    @bp.response(200, ProductSchema(many=True))
-    def get(self):
-        """Search products with filters"""
-        # TODO: Full-text search
-        # TODO: Filter by price, category, ratings
-        # TODO: Sort options (newest, popular, price)
-
-
 @bp.route("/trending")
 class TrendingProducts(MethodView):
     @bp.response(200, ProductSchema(many=True))
@@ -107,3 +134,9 @@ class ProductComments(MethodView):
 
 
 # -----------------------------------------------
+
+# TODO: Add more endpoints for:
+# - Product reviews
+# - Product questions
+# - Bulk product operations
+# - Export/import products

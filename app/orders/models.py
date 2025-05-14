@@ -1,8 +1,8 @@
 from enum import Enum
 from datetime import datetime
 from external.database import db
-from app.libs.models import BaseModel
-from app.libs.helper import UniqueIdMixin
+from app.libs.models import BaseModel, StatusMixin
+from app.libs.helpers import UniqueIdMixin
 from sqlalchemy.dialects.postgresql import JSONB
 
 
@@ -21,28 +21,53 @@ class Order(BaseModel, UniqueIdMixin):
 
     id = db.Column(db.String(12), primary_key=True, default=None)
     buyer_id = db.Column(db.Integer, db.ForeignKey("buyers.id"))
-    seller_id = db.Column(db.Integer, db.ForeignKey("sellers.id"))
-    order_number = db.Column(db.String(20), unique=True)
+    order_number = db.Column(db.String(21), unique=True)
     subtotal = db.Column(db.Float)
     shipping_fee = db.Column(db.Float)
     tax = db.Column(db.Float)
     discount = db.Column(db.Float)
     total = db.Column(db.Float)
     status = db.Column(db.Enum(OrderStatus), default=OrderStatus.PENDING)
-    items = db.Column(JSONB)  # Serialized order items
     shipping_address = db.Column(JSONB)
     billing_address = db.Column(JSONB)
     customer_note = db.Column(db.Text)
 
     # Relationships
     buyer = db.relationship("Buyer", back_populates="orders")
-    seller = db.relationship("Seller", back_populates="orders")
+    items = db.relationship(
+        "OrderItem", back_populates="order", cascade="all, delete-orphan"
+    )
     payments = db.relationship("Payment", back_populates="order")
     shipments = db.relationship("Shipment", back_populates="order")
 
     def generate_order_number(self):
         # Implement your order number generation logic
-        return f"ORD-{datetime.now().strftime('%Y%m%d')}-{self.id:06d}"
+        return f"ORD-{datetime.now().strftime('%Y%m%d')}-{self.id.split('_')[1]}"
+
+
+class OrderItem(BaseModel, StatusMixin):
+    __tablename__ = "order_items"
+
+    class Status(Enum):
+        PENDING = "pending"
+        SHIPPED = "shipped"
+        DELIVERED = "delivered"
+
+    id = db.Column(db.Integer, primary_key=True)
+    order_id = db.Column(db.String(12), db.ForeignKey("orders.id"))
+    product_id = db.Column(db.String(12), db.ForeignKey("products.id"))
+    variant_id = db.Column(
+        db.Integer, db.ForeignKey("product_variants.id"), nullable=True
+    )
+    seller_id = db.Column(db.Integer, db.ForeignKey("sellers.id"))
+    quantity = db.Column(db.Integer)
+    price = db.Column(db.Float)
+
+    # Relationships
+    order = db.relationship("Order", back_populates="items")
+    product = db.relationship("Product")
+    variant = db.relationship("ProductVariant")
+    seller = db.relationship("Seller")
 
 
 class Shipment(BaseModel):
