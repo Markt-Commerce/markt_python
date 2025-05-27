@@ -15,3 +15,68 @@ class StorySchema(Schema):
 
 class CollectionSchema(Schema):
     pass
+
+
+class PostMediaSchema(Schema):
+    media_url = fields.Str(required=True)
+    media_type = fields.Str(validate=validate.OneOf(["image", "video"]))
+    sort_order = fields.Int()
+
+
+class PostProductSchema(Schema):
+    product_id = fields.Str(required=True)
+
+
+class PostCreateSchema(Schema):
+    caption = fields.Str(required=False)
+    media = fields.List(fields.Nested(PostMediaSchema), required=False)
+    products = fields.List(fields.Nested(PostProductSchema), required=False)
+
+
+class PostSchema(Schema):
+    id = fields.Str(dump_only=True)
+    user_id = fields.Str(dump_only=True)
+    caption = fields.Str()
+    created_at = fields.DateTime(dump_only=True)
+    like_count = fields.Method("get_like_count")
+    comment_count = fields.Method("get_comment_count")
+
+    def get_like_count(self, obj):
+        return len(obj.likes)
+
+    def get_comment_count(self, obj):
+        return len(obj.comments)
+
+
+class PostDetailSchema(PostSchema):
+    media = fields.List(fields.Nested(PostMediaSchema))
+    products = fields.List(fields.Nested(PostProductSchema))
+    user = fields.Nested("UserPublicSchema")
+
+
+class PostLikeSchema(Schema):
+    user_id = fields.Str(dump_only=True)
+    post_id = fields.Str(dump_only=True)
+    created_at = fields.DateTime(dump_only=True)
+
+
+class PostCommentSchema(Schema):
+    id = fields.Int(dump_only=True)
+    user_id = fields.Str(dump_only=True)
+    post_id = fields.Str(dump_only=True)
+    content = fields.Str(required=True)
+    created_at = fields.DateTime(dump_only=True)
+    user = fields.Nested("UserPublicSchema")
+
+
+class FollowSchema(Schema):
+    follower_id = fields.Str(dump_only=True)
+    followee_id = fields.Str(dump_only=True)
+    follow_type = fields.Str(dump_only=True)
+    created_at = fields.DateTime(dump_only=True)
+
+
+class FeedItemSchema(Schema):
+    type = fields.Str(dump_only=True)  # 'post' or 'product'
+    data = fields.Dict(dump_only=True)
+    created_at = fields.DateTime(dump_only=True)
