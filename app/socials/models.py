@@ -97,6 +97,17 @@ class Post(BaseModel, UniqueIdMixin):
         "PostComment", back_populates="post", cascade="all, delete-orphan"
     )
 
+    __table_args__ = (
+        # Seller post history
+        db.Index("idx_seller_posts", "seller_id", "created_at"),
+        # Full-text search for captions
+        db.Index(
+            "idx_post_search",
+            db.func.to_tsvector("english", "caption"),
+            postgresql_using="gin",
+        ),
+    )
+
 
 class PostMedia(BaseModel):
     __tablename__ = "post_media"

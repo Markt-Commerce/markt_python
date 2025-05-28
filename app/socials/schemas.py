@@ -52,7 +52,7 @@ class PostSchema(Schema):
 class PostDetailSchema(PostSchema):
     media = fields.List(fields.Nested(PostMediaSchema))
     products = fields.List(fields.Nested(PostProductSchema))
-    user = fields.Nested("UserPublicSchema")
+    user = fields.Nested("UserProfileSchema")
 
 
 class SellerPostsSchema(Schema):
@@ -72,7 +72,7 @@ class PostCommentSchema(Schema):
     post_id = fields.Str(dump_only=True)
     content = fields.Str(required=True)
     created_at = fields.DateTime(dump_only=True)
-    user = fields.Nested("UserPublicSchema")
+    user = fields.Nested("UserProfileSchema")
 
 
 class FollowSchema(Schema):

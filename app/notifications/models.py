@@ -28,7 +28,7 @@ class Notification(BaseModel):
     is_seen = db.Column(db.Boolean, default=False)  # Appeared in UI
     reference_type = db.Column(db.String(50))  # 'post', 'product', 'order', 'user'
     reference_id = db.Column(db.String(12))  # ID of related entity
-    metadata = db.Column(JSONB)  # Flexible data storage
+    metadata_ = db.Column(JSONB)  # Flexible data storage
     created_at = db.Column(db.DateTime, server_default=db.func.now())
 
     __table_args__ = (
@@ -48,5 +48,5 @@ class Notification(BaseModel):
             "reference_type": self.reference_type,
             "reference_id": self.reference_id,
             "created_at": self.created_at.isoformat(),
-            "metadata": self.metadata or {},
+            "metadata_": self.metadata_ or {},
         }

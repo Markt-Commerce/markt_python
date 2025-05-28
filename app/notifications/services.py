@@ -54,7 +54,7 @@ class NotificationService:
         actor_id=None,
         reference_type=None,
         reference_id=None,
-        metadata=None,
+        metadata_=None,
     ):
         """Create and deliver a notification"""
         try:
@@ -77,9 +77,9 @@ class NotificationService:
             # Format message
             message = template["message"].format(
                 username=actor_name or "Someone",
-                product_name=metadata.get("product_name") if metadata else None,
+                product_name=metadata_.get("product_name") if metadata_ else None,
                 order_id=reference_id,
-                status=metadata.get("status") if metadata else None,
+                status=metadata_.get("status") if metadata_ else None,
             )
 
             with session_scope() as session:
@@ -91,7 +91,7 @@ class NotificationService:
                     is_read=False,
                     reference_type=reference_type,
                     reference_id=reference_id,
-                    metadata=metadata or {},
+                    metadata_=metadata_ or {},
                 )
                 session.add(notification)
                 session.flush()

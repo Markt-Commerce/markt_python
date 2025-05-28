@@ -10,7 +10,7 @@ class NotificationSchema(Schema):
     reference_type = fields.Str(dump_only=True)
     reference_id = fields.Str(dump_only=True)
     created_at = fields.DateTime(dump_only=True)
-    metadata = fields.Dict(dump_only=True)
+    metadata_ = fields.Dict(dump_only=True)
 
 
 class NotificationPaginationSchema(Schema):
