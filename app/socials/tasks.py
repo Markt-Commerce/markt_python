@@ -1,13 +1,18 @@
+# python imports
 import logging
 from datetime import datetime, timedelta
 
+# project imports
 from main.tasks import celery_app
 
 from external.redis import redis_client
 from external.database import db
+from app.libs.session import session_scope
+
 from app.users.models import User
 from app.products.services import ProductService
 
+# app imports
 from .models import Post
 from .services import FeedService
 
@@ -18,7 +23,7 @@ logger = logging.getLogger(__name__)
 def generate_all_feeds():
     """Full feed regeneration for all users"""
     try:
-        with db.session_scope() as session:
+        with session_scope() as session:
             users = session.query(User.id).filter(User.is_active == True).all()
             for (user_id,) in users:
                 generate_user_feed(user_id)
@@ -43,7 +48,7 @@ def update_popular_content():
     """Update trending content metrics"""
     try:
         # Update popular posts
-        with db.session_scope() as session:
+        with session_scope() as session:
             posts = (
                 session.query(Post)
                 .filter(Post.created_at >= datetime.utcnow() - timedelta(days=7))

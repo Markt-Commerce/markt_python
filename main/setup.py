@@ -87,11 +87,6 @@ def create_app():
         # Register socket namespaces
         register_socket_namespaces(socketio)
 
-        # Configure schedules
-        from main.schedules import configure_schedules
-
-        configure_schedules(app)
-
     logger.info("Application initialized")
     return app, socketio
 

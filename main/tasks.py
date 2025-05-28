@@ -15,14 +15,20 @@ def create_celery_app(app: Flask = None) -> Celery:
 
         celery.Task = ContextTask
         celery.flask_app = app
+        celery.conf.update(app.config)
 
     # Auto-discover tasks from modules
     celery.autodiscover_tasks(
         [
             "app.socials.tasks",
-            # 'app.products.tasks'
+            # add more task modules here
         ]
     )
+
+    # Import and apply beat schedule
+    from main.schedules import CELERYBEAT_SCHEDULE
+
+    celery.conf.CELERYBEAT_SCHEDULE = CELERYBEAT_SCHEDULE
 
     return celery
 
