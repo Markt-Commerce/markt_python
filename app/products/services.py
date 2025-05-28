@@ -1,16 +1,23 @@
 # python imports
 import logging
+from datetime import datetime, timedelta
 
 # package imports
 from sqlalchemy import or_, and_
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import joinedload
 
 # project imports
 from external.database import db
+from external.redis import redis_client
+
 from app.libs.session import session_scope
 from app.libs.pagination import Paginator
 from app.categories.models import ProductCategory, ProductTag
 from app.libs.errors import NotFoundError, ValidationError, ConflictError, APIError
+
+from app.users.models import Seller
+from app.socials.models import Follow, Post, PostProduct
 
 # app imports
 from .models import Product, ProductVariant, ProductInventory
@@ -262,5 +269,121 @@ class ProductService:
                 session.add(inventory)
 
             return inventory
+
+    @staticmethod
+    def get_seller_posts(seller_id, page=1, per_page=20):
+        """Get paginated posts by seller"""
+        with session_scope() as session:
+            base_query = (
+                session.query(Post)
+                .filter(Post.seller_id == seller_id, Post.status == "active")
+                .options(
+                    joinedload(Post.media),
+                    joinedload(Post.tagged_products).joinedload(PostProduct.product),
+                )
+            )
+
+            paginator = Paginator(base_query, page=page, per_page=per_page)
+            result = paginator.paginate({})  # Pass empty dict if no filters
+
+            return {
+                "items": result["items"],
+                "pagination": {
+                    "page": result["page"],
+                    "per_page": result["per_page"],
+                    "total_items": result["total_items"],
+                    "total_pages": result["total_pages"],
+                },
+            }
+
+    @staticmethod
+    def get_recommended_products(user_id, limit=10):
+        """Get personalized product recommendations"""
+        try:
+            with session_scope() as session:
+                # Base query - could be enhanced with ML later
+                query = (
+                    session.query(Product)
+                    .filter(Product.status == Product.Status.ACTIVE)
+                    .options(joinedload(Product.seller), joinedload(Product.images))
+                )
+
+                # Simple recommendation logic (will enhance later)
+                if user_id:
+                    # Get products from followed sellers
+                    followed_sellers = (
+                        session.query(Seller.id)
+                        .join(Follow, Follow.followee_id == Seller.user_id)
+                        .filter(Follow.follower_id == user_id)
+                        .subquery()
+                    )
+
+                    query = query.filter(Product.seller_id.in_(followed_sellers))
+
+                return query.order_by(Product.view_count.desc()).limit(limit).all()
+
+        except Exception as e:
+            logger.error(f"Product recommendations failed: {str(e)}")
+            return []
+
+    @staticmethod
+    def get_trending_products(user_id, limit=5):
+        """Get trending products with personalization"""
+        try:
+            # Get from Redis cache
+            product_ids = redis_client.zrevrange("trending_products", 0, limit - 1)
+            if not product_ids:
+                return []
+
+            with session_scope() as session:
+                products = (
+                    session.query(Product)
+                    .filter(Product.id.in_(product_ids))
+                    .options(joinedload(Product.seller), joinedload(Product.images))
+                    .all()
+                )
+
+                # Personalize based on user's preferences
+                if user_id:
+                    products = ProductService._apply_personalization(products, user_id)
+
+                return [
+                    {
+                        "type": "product",
+                        "data": p,
+                        "score": redis_client.zscore("trending_products", p.id),
+                        "created_at": p.created_at,
+                    }
+                    for p in products
+                ]
+
+        except Exception as e:
+            logger.error(f"Trending products error: {str(e)}")
+            return []
+
+    @staticmethod
+    def update_trending_products():
+        """Update trending products in Redis"""
+        try:
+            with session_scope() as session:
+                # Get products with most engagement in last 7 days
+                products = (
+                    session.query(Product)
+                    .filter(Product.created_at >= datetime.utcnow() - timedelta(days=7))
+                    .order_by((Product.view_count + Product.like_count * 2).desc())
+                    .limit(50)
+                    .all()
+                )
+
+                # Update Redis
+                with redis_client.pipeline() as pipe:
+                    pipe.delete("trending_products")
+                    for product in products:
+                        score = product.view_count + product.like_count * 2
+                        pipe.zadd("trending_products", {product.id: score})
+                    pipe.execute()
+
+        except Exception as e:
+            logger.error(f"Failed to update trending products: {str(e)}")
 
     # TODO: Add search, filtering, pagination

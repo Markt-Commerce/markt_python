@@ -1,4 +1,5 @@
 from marshmallow import Schema, fields, validate
+from app.libs.schemas import PaginationSchema
 
 
 class ShareSchema(Schema):
@@ -35,7 +36,7 @@ class PostCreateSchema(Schema):
 
 class PostSchema(Schema):
     id = fields.Str(dump_only=True)
-    user_id = fields.Str(dump_only=True)
+    seller_id = fields.Int(dump_only=True)
     caption = fields.Str()
     created_at = fields.DateTime(dump_only=True)
     like_count = fields.Method("get_like_count")
@@ -52,6 +53,11 @@ class PostDetailSchema(PostSchema):
     media = fields.List(fields.Nested(PostMediaSchema))
     products = fields.List(fields.Nested(PostProductSchema))
     user = fields.Nested("UserPublicSchema")
+
+
+class SellerPostsSchema(Schema):
+    items = fields.List(fields.Nested(PostSchema))
+    pagination = fields.Nested(PostDetailSchema)
 
 
 class PostLikeSchema(Schema):
@@ -77,6 +83,12 @@ class FollowSchema(Schema):
 
 
 class FeedItemSchema(Schema):
-    type = fields.Str(dump_only=True)  # 'post' or 'product'
-    data = fields.Dict(dump_only=True)
+    type = fields.Str(required=True)
+    data = fields.Dict(required=True)
+    score = fields.Float(dump_only=True)
     created_at = fields.DateTime(dump_only=True)
+
+
+class HybridFeedSchema(Schema):
+    items = fields.List(fields.Nested(FeedItemSchema))
+    pagination = fields.Nested(PaginationSchema)

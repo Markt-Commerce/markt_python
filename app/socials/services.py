@@ -1,4 +1,6 @@
 import logging
+import math
+from datetime import datetime
 
 # package imports
 from sqlalchemy.exc import SQLAlchemyError
@@ -11,8 +13,10 @@ from external.redis import redis_client
 from app.libs.session import session_scope
 from app.libs.pagination import Paginator
 from app.libs.errors import NotFoundError, ValidationError, ConflictError
+
 from app.users.models import User, Seller
 from app.products.models import Product
+from app.products.services import ProductService
 
 # app imports
 from .models import (
@@ -187,30 +191,124 @@ class FollowService:
 
 class FeedService:
     @staticmethod
-    def get_user_feed(user_id, page=1, per_page=20):
+    def get_hybrid_feed(user_id, page=1, per_page=20):
+        """Primary endpoint for feed consumption"""
         try:
-            # First try to get feed from Redis
-            feed_items = redis_client.zrevrange(f"user:{user_id}:feed", 0, -1)
+            # Try Redis cache first
+            cached_items = FeedService._get_cached_feed(user_id)
 
-            if not feed_items:
-                # Fallback to database query
-                feed_items = FeedService._generate_feed_from_db(user_id)
+            if cached_items:
+                feed_items = FeedService._hydrate_cached_items(cached_items)
+            else:
+                # Fallback to database generation
+                feed_items = FeedService._generate_fresh_feed(user_id)
 
-            # Paginate results
-            paginator = Paginator(feed_items, page=page, per_page=per_page)
-            return paginator.paginate()
+            return FeedService._paginate_feed(feed_items, page, per_page)
 
         except Exception as e:
-            logger.error(f"Error getting feed for user {user_id}: {str(e)}")
+            logger.error(f"Feed error for user {user_id}: {str(e)}")
             raise NotFoundError("Failed to get feed")
 
     @staticmethod
-    def _generate_feed_from_db(user_id):
-        """Generate feed from database when Redis cache is empty"""
+    def _get_cached_feed(user_id):
+        """Get feed from Redis cache"""
+        return redis_client.zrevrange(f"user:{user_id}:feed", 0, -1, withscores=True)
+
+    @staticmethod
+    def _hydrate_cached_items(cached_items):
+        """Convert cached IDs to full objects"""
         with session_scope() as session:
-            # Get posts from followed sellers
+            # Separate posts and products
+            post_ids = []
+            product_ids = []
+
+            for item_id, _ in cached_items:
+                if item_id.startswith("PST_"):
+                    post_ids.append(item_id)
+                elif item_id.startswith("PRD_"):
+                    product_ids.append(item_id)
+
+            # Fetch posts
+            posts = (
+                session.query(Post)
+                .options(
+                    joinedload(Post.seller).joinedload(Seller.user),
+                    joinedload(Post.media),
+                    joinedload(Post.tagged_products).joinedload(PostProduct.product),
+                )
+                .filter(Post.id.in_(post_ids))
+                .all()
+                if post_ids
+                else []
+            )
+
+            # Fetch products
+            products = (
+                session.query(Product)
+                .options(joinedload(Product.seller), joinedload(Product.images))
+                .filter(Product.id.in_(product_ids))
+                .all()
+                if product_ids
+                else []
+            )
+
+            # Reconstruct feed items
+            feed_items = []
+            for item_id, score in cached_items:
+                if item_id.startswith("PST_"):
+                    post = next((p for p in posts if p.id == item_id), None)
+                    if post:
+                        feed_items.append(
+                            {
+                                "type": "post",
+                                "data": post,
+                                "score": score,
+                                "created_at": datetime.fromtimestamp(score),
+                            }
+                        )
+                else:
+                    product = next((p for p in products if p.id == item_id), None)
+                    if product:
+                        feed_items.append(
+                            {
+                                "type": "product",
+                                "data": product,
+                                "score": score,
+                                "created_at": datetime.fromtimestamp(score),
+                            }
+                        )
+
+            return feed_items
+
+    @staticmethod
+    def _generate_fresh_feed(user_id):
+        """Generate fresh feed from database sources"""
+        # Get base content
+        posts = FeedService._get_followed_posts(user_id)
+        products = ProductService.get_recommended_products(user_id)
+        trending = TrendingService.get_trending_content(user_id)
+
+        # Score and combine
+        feed_items = []
+        feed_items.extend(FeedService._score_posts(posts, user_id))
+        feed_items.extend(FeedService._score_products(products, user_id))
+        feed_items.extend(trending)
+
+        # Apply ranking and diversity
+        ranked_items = FeedService._apply_ranking(feed_items)
+
+        # Cache results
+        FeedService._cache_feed(user_id, ranked_items)
+
+        return ranked_items
+
+    @staticmethod
+    def _get_followed_posts(user_id):
+        """Get posts from followed sellers"""
+        with session_scope() as session:
             followed_sellers = (
-                session.query(Follow.followee_id)
+                session.query(Seller.id)
+                .join(Follow, Follow.followee_id == Seller.user_id)
                 .filter(
                     Follow.follower_id == user_id,
                     Follow.follow_type == FollowType.CUSTOMER,
@@ -218,25 +316,206 @@ class FeedService:
                 .subquery()
             )
 
-            posts = (
+            return (
                 session.query(Post)
-                .filter(Post.user_id.in_(followed_sellers))
+                .options(
+                    joinedload(Post.seller).joinedload(Seller.user),
+                    joinedload(Post.media),
+                    joinedload(Post.tagged_products).joinedload(PostProduct.product),
+                )
+                .filter(Post.seller_id.in_(followed_sellers), Post.status == "active")
                 .order_by(Post.created_at.desc())
                 .limit(100)
                 .all()
             )
 
-            # Convert to feed items format
-            feed_items = [
-                {"type": "post", "data": post, "created_at": post.created_at}
-                for post in posts
-            ]
+    @staticmethod
+    def _score_posts(posts, user_id):
+        """Calculate scores for posts"""
+        return [
+            {
+                "type": "post",
+                "data": post,
+                "score": FeedService._calculate_post_score(post, user_id),
+                "created_at": post.created_at,
+            }
+            for post in posts
+        ]
 
-            # Cache in Redis
+    @staticmethod
+    def _calculate_post_score(post, user_id):
+        """Calculate composite score for a post"""
+        score = 0
+
+        # 1. Base score for followed accounts
+        score += 15 if FeedService._is_from_followed_seller(post, user_id) else 5
+
+        # 2. Engagement signals with logarithmic scaling
+        score += math.log1p(post.like_count) * 2
+        score += math.log1p(post.comment_count) * 1.5
+
+        # 3. Recency decay (halflife of 3 days)
+        hours_old = (datetime.utcnow() - post.created_at).total_seconds() / 3600
+        score *= 0.5 ** (hours_old / 72)
+
+        # 4. Personalization bonus
+        if FeedService._matches_user_interests(post, user_id):
+            score *= 1.5
+
+        return score
+
+    @staticmethod
+    def _score_products(products, user_id):
+        """Calculate scores for products"""
+        return [
+            {
+                "type": "product",
+                "data": product,
+                "score": FeedService._calculate_product_score(product, user_id),
+                "created_at": product.created_at,
+            }
+            for product in products
+        ]
+
+    @staticmethod
+    def _calculate_product_score(product, user_id):
+        """Calculate composite score for a product"""
+        score = 0
+
+        # 1. Base score
+        score += 10
+
+        # 2. Popularity signals
+        score += math.log1p(product.view_count) * 1.2
+        score += math.log1p(product.like_count) * 1.5
+
+        # 3. Commerce signals
+        if product.seller.verification_status == "verified":
+            score += 5
+
+        # 4. Personalization
+        if FeedService._matches_user_preferences(product, user_id):
+            score *= 2
+
+        return score
+
+    @staticmethod
+    def _apply_ranking(items):
+        """Apply ranking and diversity rules"""
+        # Sort by score descending
+        items.sort(key=lambda x: x["score"], reverse=True)
+
+        # Apply diversity - don't show more than 3 similar items in a row
+        ranked_items = []
+        last_types = []
+
+        for item in items:
+            if len(last_types) >= 3 and all(t == item["type"] for t in last_types[-3:]):
+                continue  # Skip to maintain diversity
+
+            ranked_items.append(item)
+            last_types.append(item["type"])
+
+        return ranked_items
+
+    @staticmethod
+    def _cache_feed(user_id, feed_items):
+        """Cache feed in Redis"""
+        with redis_client.pipeline() as pipe:
+            pipe.delete(f"user:{user_id}:feed")
             for item in feed_items:
-                redis_client.zadd(
+                pipe.zadd(
                     f"user:{user_id}:feed",
-                    {str(item["data"].id): int(item["created_at"].timestamp())},
+                    {item["data"].id: int(item["created_at"].timestamp())},
                 )
+            pipe.expire(f"user:{user_id}:feed", 86400)  # 24h cache
+            pipe.execute()
 
-            return feed_items
+    @staticmethod
+    def _paginate_feed(feed_items, page, per_page):
+        """Paginate feed results"""
+        paginator = Paginator(feed_items, page=page, per_page=per_page)
+        result = paginator.paginate()
+        return {
+            "items": result["items"],
+            "pagination": {
+                "page": result["page"],
+                "per_page": result["per_page"],
+                "total_items": result["total_items"],
+                "total_pages": result["total_pages"],
+            },
+        }
+
+    @staticmethod
+    def _is_from_followed_seller(post, user_id):
+        """Check if post is from a followed seller"""
+        # Implementation would query follow relationships
+        # Can be optimized with cached follow data
+        with session_scope() as session:
+            return (
+                session.query(Follow)
+                .filter(
+                    Follow.follower_id == user_id,
+                    Follow.followee_id == post.seller.user_id,
+                    Follow.follow_type == FollowType.CUSTOMER,
+                )
+                .first()
+                is not None
+            )
+
+    @staticmethod
+    def _matches_user_interests(post, user_id):
+        """Check if post matches user's interests"""
+        # Placeholder - would analyze:
+        # - User's liked posts/categories
+        # - Past engagement patterns
+        return False
+
+    @staticmethod
+    def _matches_user_preferences(product, user_id):
+        """Check if product matches user's preferences"""
+        # Placeholder - would analyze:
+        # - Purchase history
+        # - Viewed products
+        # - Saved items
+        return False
+
+
+class TrendingService:
+    @staticmethod
+    def get_trending_content(user_id=None, limit=5):
+        """Get trending content personalized for user"""
+        try:
+            trending = []
+
+            # Get globally popular posts
+            post_ids = redis_client.zrevrange("popular_posts", 0, limit - 1)
+            if post_ids:
+                with session_scope() as session:
+                    posts = (
+                        session.query(Post)
+                        .filter(Post.id.in_(post_ids))
+                        .options(
+                            joinedload(Post.seller).joinedload(Seller.user),
+                            joinedload(Post.media),
+                        )
+                        .all()
+                    )
+
+                    trending.extend(
+                        [
+                            {
+                                "type": "post",
+                                "data": p,
+                                "score": redis_client.zscore("popular_posts", p.id),
+                                "created_at": p.created_at,
+                            }
+                            for p in posts
+                        ]
+                    )
+
+            return trending
+
+        except Exception as e:
+            logger.error(f"Trending content error: {str(e)}")
+            return []

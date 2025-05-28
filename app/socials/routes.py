@@ -3,19 +3,24 @@ from flask_smorest import Blueprint
 from flask.views import MethodView
 from flask_login import login_required, current_user
 
+# project imports
+from app.libs.schemas import PaginationQueryArgs
+from app.libs.decorators import seller_required
+
 # app imports
 from .schemas import (
     StorySchema,
     CollectionSchema,
     PostCreateSchema,
-    PostSchema,
+    SellerPostsSchema,
     PostDetailSchema,
     PostLikeSchema,
     PostCommentSchema,
     FollowSchema,
     FeedItemSchema,
+    HybridFeedSchema,
 )
-from .services import PostService, FollowService, FeedService
+from .services import PostService, FollowService, FeedService, TrendingService
 
 
 bp = Blueprint(
@@ -52,6 +57,7 @@ class UserCollections(MethodView):
 @bp.route("/posts")
 class PostList(MethodView):
     @login_required
+    @seller_required
     @bp.arguments(PostCreateSchema)
     @bp.response(201, PostDetailSchema)
     def post(self, post_data):
@@ -85,10 +91,34 @@ class FollowUser(MethodView):
         return FollowService.follow_user(current_user.id, user_id)
 
 
+@bp.route("/sellers/<seller_id>/posts")
+class SellerPosts(MethodView):
+    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.response(200, SellerPostsSchema)
+    def get(self, args, seller_id):
+        """Get posts by a specific seller"""
+        return PostService.get_seller_posts(
+            seller_id, page=args.get("page", 1), per_page=args.get("per_page", 20)
+        )
+
+
 @bp.route("/feed")
 class UserFeed(MethodView):
     @login_required
+    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.response(200, HybridFeedSchema)
+    def get(self, args):
+        """Get personalized hybrid feed"""
+        return FeedService.get_hybrid_feed(
+            current_user.id, page=args.get("page", 1), per_page=args.get("per_page", 20)
+        )
+
+
+@bp.route("/feed/trending")
+class TrendingFeed(MethodView):
     @bp.response(200, FeedItemSchema(many=True))
     def get(self):
-        """Get personalized feed"""
-        return FeedService.get_user_feed(current_user.id)
+        """Get trending feed"""
+        return TrendingService.get_trending_content(
+            current_user.id if current_user.is_authenticated else None
+        )

@@ -1,5 +1,6 @@
 from enum import Enum
 from flask_login import UserMixin
+from datetime import datetime
 
 from app.libs.models import BaseModel
 from app.libs.helpers import UniqueIdMixin
@@ -139,6 +140,8 @@ class Seller(BaseModel):
     verification_status = db.Column(
         db.Enum(SellerVerificationStatus), default=SellerVerificationStatus.UNVERIFIED
     )
+    is_active = db.Column(db.Boolean, default=True)
+    deactivated_at = db.Column(db.DateTime)
 
     # Relationships
     user = db.relationship("User", back_populates="seller_account")
@@ -179,6 +182,16 @@ class Seller(BaseModel):
             query = query.join(Order).filter(Order.created_at >= date_filter)
 
         return query.scalar() or 0
+
+    def deactivate(self):
+        """Deactivate user account"""
+        self.is_active = False
+        self.deactivated_at = datetime.utcnow()
+
+    def activate(self):
+        """Reactivate user account"""
+        self.is_active = True
+        self.deactivated_at = None
 
 
 class UserAddress(BaseModel):
