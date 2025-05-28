@@ -17,6 +17,8 @@ from app.libs.errors import NotFoundError, ValidationError, ConflictError
 from app.users.models import User, Seller
 from app.products.models import Product
 from app.products.services import ProductService
+from app.notifications.models import NotificationType
+from app.notifications.services import NotificationService
 
 # app imports
 from .models import (
@@ -124,6 +126,17 @@ class PostService:
                 redis_client.zincrby(f"post:{post_id}:likes", 1, user_id)
                 redis_client.zincrby(f"user:{user_id}:liked_posts", 1, post_id)
 
+                # Get post owner
+                post = session.query(Post).get(post_id)
+                if post.seller.user_id != user_id:  # Don't notify for self-likes
+                    NotificationService.create_notification(
+                        user_id=post.seller.user_id,
+                        notification_type=NotificationType.POST_LIKE,
+                        actor_id=user_id,
+                        reference_type="post",
+                        reference_id=post_id,
+                    )
+
                 return like
         except SQLAlchemyError as e:
             logger.error(f"Error liking post: {str(e)}")
@@ -182,6 +195,14 @@ class FollowService:
                 # Update Redis counters
                 redis_client.hincrby(f"user:{followee_id}", "followers_count", 1)
                 redis_client.hincrby(f"user:{follower_id}", "following_count", 1)
+
+                NotificationService.create_notification(
+                    user_id=followee_id,
+                    notification_type=NotificationType.NEW_FOLLOWER,
+                    actor_id=follower_id,
+                    reference_type="user",
+                    reference_id=follower_id,
+                )
 
                 return follow
         except SQLAlchemyError as e:

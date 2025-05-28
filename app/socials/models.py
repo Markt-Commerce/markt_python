@@ -73,20 +73,6 @@ class ProductView(BaseModel):
     product = db.relationship("Product", back_populates="views")
 
 
-class Notification(BaseModel):
-    __tablename__ = "notifications"
-
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.String(12), db.ForeignKey("users.id"))
-    message = db.Column(db.Text)
-    is_read = db.Column(db.Boolean, default=False)
-    notification_type = db.Column(db.String(50))  # 'like', 'comment', 'order', etc.
-    reference_id = db.Column(db.Integer)  # ID of related entity
-    created_at = db.Column(db.DateTime, server_default=db.func.now())
-
-    user = db.relationship("User", back_populates="notifications")
-
-
 class Post(BaseModel, UniqueIdMixin):
     __tablename__ = "posts"
     id = db.Column(db.String(12), primary_key=True)
