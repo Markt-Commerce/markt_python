@@ -47,6 +47,11 @@ def configure_app(app):
         manage_session=False,
     )
 
+    # Initialize Celery
+    from main.tasks import create_celery_app
+
+    create_celery_app(app)
+
     # Register error handler
     app.register_error_handler(Exception, handle_error)
 
@@ -81,6 +86,11 @@ def create_app():
 
         # Register socket namespaces
         register_socket_namespaces(socketio)
+
+        # Configure schedules
+        from main.schedules import configure_schedules
+
+        configure_schedules(app)
 
     logger.info("Application initialized")
     return app, socketio

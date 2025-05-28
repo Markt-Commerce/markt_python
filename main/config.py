@@ -19,6 +19,7 @@ class Config:
         # Redis
         self.REDIS_HOST = config("REDIS_HOST", default="localhost")
         self.REDIS_PORT = config("REDIS_PORT", default=6379, cast=int)
+        self.REDIS_DB = config("REDIS_DB", default=0, cast=int)
 
         # Auth
         self.SECRET_KEY = config("SECRET_KEY", default="dev-secret-key")
@@ -45,9 +46,43 @@ class Config:
             default="https://cdn.jsdelivr.net/npm/swagger-ui-dist/",
         )
 
+        # Build Redis URL
+        REDIS_URL = f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+
+        # Celery Configuration
+        self.CELERY_BROKER_URL = config("CELERY_BROKER_URL", default=REDIS_URL)
+        self.CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", default=REDIS_URL)
+        self.CELERY_TASK_SERIALIZER = "json"
+        self.CELERY_RESULT_SERIALIZER = "json"
+        self.CELERY_ACCEPT_CONTENT = ["json"]
+        self.CELERY_TIMEZONE = "UTC"
+        self.CELERY_TASK_TRACK_STARTED = True
+        self.CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes
+
+        # Queue Configuration
+        self.CELERY_TASK_ROUTES = {
+            "app.socials.tasks.*": {"queue": "social"},
+            # 'app.products.tasks.*': {'queue': 'products'},
+        }
+
     @property
     def SQLALCHEMY_DATABASE_URI(self):
         return f"postgresql+psycopg2://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+
+    @property
+    def CELERY_CONFIG(self):
+        """Explicit config dict for Celery"""
+        return {
+            "broker_url": self.CELERY_BROKER_URL,
+            "result_backend": self.CELERY_RESULT_BACKEND,
+            "task_serializer": self.CELERY_TASK_SERIALIZER,
+            "result_serializer": self.CELERY_RESULT_SERIALIZER,
+            "accept_content": self.CELERY_ACCEPT_CONTENT,
+            "timezone": self.CELERY_TIMEZONE,
+            "task_track_started": self.CELERY_TASK_TRACK_STARTED,
+            "task_time_limit": self.CELERY_TASK_TIME_LIMIT,
+            "task_routes": self.CELERY_TASK_ROUTES,
+        }
 
 
 settings = Config()
