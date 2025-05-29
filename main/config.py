@@ -58,10 +58,18 @@ class Config:
         self.CELERY_TIMEZONE = "UTC"
         self.CELERY_TASK_TRACK_STARTED = True
         self.CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes
+        self.CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60  # 25 minutes (grace period)
+        self.CELERY_WORKER_PREFETCH_MULTIPLIER = 1  # Better for long-running tasks
+        self.CELERY_TASK_ACKS_LATE = True  # Acknowledge after completion
+        self.CELERY_WORKER_DISABLE_RATE_LIMITS = False
+        self.CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 
         # Queue Configuration
         self.CELERY_TASK_ROUTES = {
-            "app.socials.tasks.*": {"queue": "social"},
+            "app.socials.tasks.generate_all_feeds": {"queue": "social_priority"},
+            "app.socials.tasks.generate_user_feed": {"queue": "social"},
+            "app.socials.tasks.update_popular_content": {"queue": "social"},
+            # "app.socials.tasks.cleanup_old_feed_cache": {"queue": "maintenance"},
             # 'app.products.tasks.*': {'queue': 'products'},
         }
 
@@ -81,7 +89,12 @@ class Config:
             "timezone": self.CELERY_TIMEZONE,
             "task_track_started": self.CELERY_TASK_TRACK_STARTED,
             "task_time_limit": self.CELERY_TASK_TIME_LIMIT,
+            "task_soft_time_limit": self.CELERY_TASK_SOFT_TIME_LIMIT,
+            "worker_prefetch_multiplier": self.CELERY_WORKER_PREFETCH_MULTIPLIER,
+            "task_acks_late": self.CELERY_TASK_ACKS_LATE,
+            "worker_disable_rate_limits": self.CELERY_WORKER_DISABLE_RATE_LIMITS,
             "task_routes": self.CELERY_TASK_ROUTES,
+            "broker_connection_retry_on_startup": self.CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP,
         }
 
 

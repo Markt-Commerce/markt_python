@@ -48,9 +48,9 @@ def configure_app(app):
     )
 
     # Initialize Celery
-    from main.tasks import create_celery_app
+    # from main.tasks import create_celery_app
 
-    create_celery_app(app)
+    # create_celery_app(app)
 
     # Register error handler
     app.register_error_handler(Exception, handle_error)
