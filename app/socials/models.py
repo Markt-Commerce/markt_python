@@ -1,4 +1,5 @@
 from enum import Enum
+from sqlalchemy import text
 
 from external.database import db
 from app.libs.models import BaseModel
@@ -100,10 +101,10 @@ class Post(BaseModel, UniqueIdMixin):
     __table_args__ = (
         # Seller post history
         db.Index("idx_seller_posts", "seller_id", "created_at"),
-        # Full-text search for captions
+        # Full-text search for captions - using text() to handle REGCONFIG
         db.Index(
             "idx_post_search",
-            db.func.to_tsvector("english", "caption"),
+            text("to_tsvector('english', caption)"),
             postgresql_using="gin",
         ),
     )
