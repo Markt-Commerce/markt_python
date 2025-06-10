@@ -147,7 +147,7 @@ class NotificationService:
                 query = query.order_by(Notification.created_at.desc())
 
                 paginator = Paginator(query, page=page, per_page=per_page)
-                result = paginator.paginate()
+                result = paginator.paginate({})
 
                 return {
                     "items": result["items"],

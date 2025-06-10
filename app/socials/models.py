@@ -1,5 +1,6 @@
 from enum import Enum
-from sqlalchemy import text
+from sqlalchemy import text, func, select
+from sqlalchemy.ext.hybrid import hybrid_property
 
 from external.database import db
 from app.libs.models import BaseModel
@@ -74,13 +75,21 @@ class ProductView(BaseModel):
     product = db.relationship("Product", back_populates="views")
 
 
+class PostStatus(Enum):
+    DRAFT = "draft"  # Created but not published
+    ACTIVE = "active"  # Live and visible
+    ARCHIVED = "archived"  # Hidden but preserved
+    DELETED = "deleted"  # Deleted
+
+
 class Post(BaseModel, UniqueIdMixin):
     __tablename__ = "posts"
-    id = db.Column(db.String(12), primary_key=True)
     id_prefix = "PST_"
 
+    id = db.Column(db.String(12), primary_key=True)
     seller_id = db.Column(db.Integer, db.ForeignKey("sellers.id"))
     caption = db.Column(db.Text)
+    status = db.Column(db.Enum(PostStatus), default=PostStatus.DRAFT, nullable=False)
     created_at = db.Column(db.DateTime, server_default=db.func.now())
 
     # Relationships
@@ -97,6 +106,35 @@ class Post(BaseModel, UniqueIdMixin):
     comments = db.relationship(
         "PostComment", back_populates="post", cascade="all, delete-orphan"
     )
+
+    # Computed count properties
+    @hybrid_property
+    def like_count(self):
+        """Get the count of likes for this post"""
+        return len(self.likes) if self.likes else 0
+
+    @like_count.expression
+    def like_count(cls):
+        """SQL expression for like count"""
+        return (
+            db.session.query(func.count(PostLike.post_id))
+            .filter(PostLike.post_id == cls.id)
+            .label("like_count")
+        )
+
+    @hybrid_property
+    def comment_count(self):
+        """Get the count of comments for this post"""
+        return len(self.comments) if self.comments else 0
+
+    @comment_count.expression
+    def comment_count(cls):
+        """SQL expression for comment count"""
+        return (
+            db.session.query(func.count(PostComment.post_id))
+            .filter(PostComment.post_id == cls.id)
+            .label("comment_count")
+        )
 
     __table_args__ = (
         # Seller post history

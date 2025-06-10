@@ -33,4 +33,4 @@ def create_celery_app(app: Flask = None) -> Celery:
     return celery
 
 
-celery_app = create_celery_app()
+# celery_app = create_celery_app()

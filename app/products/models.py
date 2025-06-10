@@ -1,7 +1,9 @@
 from enum import Enum
+
 from external.database import db
 from app.libs.models import BaseModel, StatusMixin
 from app.libs.helpers import UniqueIdMixin
+
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy import func, select
@@ -58,12 +60,15 @@ class Product(BaseModel, StatusMixin, UniqueIdMixin):
     def is_available(self):
         return self.status == self.Status.ACTIVE and self.stock > 0
 
+    # Computed count properties
     @hybrid_property
     def view_count(self):
-        return len(self.views)
+        """Get the count of likes for this product"""
+        return len(self.views) if self.views else 0
 
     @view_count.expression
     def view_count(cls):
+        """SQL expression for view count"""
         from app.socials.models import ProductView
 
         return (
@@ -71,6 +76,38 @@ class Product(BaseModel, StatusMixin, UniqueIdMixin):
             .where(ProductView.product_id == cls.id)
             .correlate(cls)
             .scalar_subquery()  # or `.as_scalar()` for older versions
+        )
+
+    @hybrid_property
+    def like_count(self):
+        """Get the count of likes for this product"""
+        return len(self.likes) if self.likes else 0
+
+    @like_count.expression
+    def like_count(cls):
+        """SQL expression for like count"""
+        from app.socials.models import ProductLike
+
+        return (
+            db.session.query(func.count(ProductLike.product_id))
+            .filter(ProductLike.product_id == cls.id)
+            .label("like_count")
+        )
+
+    @hybrid_property
+    def comment_count(self):
+        """Get the count of comments for this product"""
+        return len(self.comments) if self.comments else 0
+
+    @comment_count.expression
+    def comment_count(cls):
+        """SQL expression for comment count"""
+        from app.socials.models import ProductComment
+
+        return (
+            db.session.query(func.count(ProductComment.product_id))
+            .filter(ProductComment.product_id == cls.id)
+            .label("comment_count")
         )
 
 

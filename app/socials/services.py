@@ -344,7 +344,7 @@ class FeedService:
                     joinedload(Post.media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
                 )
-                .filter(Post.seller_id.in_(followed_sellers), Post.status == "active")
+                .filter(Post.seller_id.in_(followed_sellers))
                 .order_by(Post.created_at.desc())
                 .limit(100)
                 .all()
@@ -454,16 +454,25 @@ class FeedService:
 
     @staticmethod
     def _paginate_feed(feed_items, page, per_page):
-        """Paginate feed results"""
-        paginator = Paginator(feed_items, page=page, per_page=per_page)
-        result = paginator.paginate()
+        """Paginate feed results for in-memory list"""
+        from math import ceil
+
+        total_items = len(feed_items)
+        total_pages = ceil(total_items / per_page) if total_items else 0
+
+        # Calculate offset
+        offset = (page - 1) * per_page
+
+        # Slice the list for pagination
+        paginated_items = feed_items[offset : offset + per_page]
+
         return {
-            "items": result["items"],
+            "items": paginated_items,
             "pagination": {
-                "page": result["page"],
-                "per_page": result["per_page"],
-                "total_items": result["total_items"],
-                "total_pages": result["total_pages"],
+                "page": page,
+                "per_page": per_page,
+                "total_items": total_items,
+                "total_pages": total_pages,
             },
         }
 
