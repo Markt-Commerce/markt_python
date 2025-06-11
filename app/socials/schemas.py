@@ -1,5 +1,9 @@
 from marshmallow import Schema, fields, validate
 from app.libs.schemas import PaginationSchema
+from app.libs.errors import ValidationError
+
+from app.products.schemas import ProductSchema
+from .models import FollowType
 
 
 class ShareSchema(Schema):
@@ -78,13 +82,22 @@ class PostCommentSchema(Schema):
 class FollowSchema(Schema):
     follower_id = fields.Str(dump_only=True)
     followee_id = fields.Str(dump_only=True)
-    follow_type = fields.Str(dump_only=True)
+    follow_type = fields.Enum(FollowType, by_value=True)
     created_at = fields.DateTime(dump_only=True)
 
 
+class PostOrProductField(fields.Field):
+    def _serialize(self, value, attr, obj, **kwargs):
+        if obj["type"] == "post":
+            return PostSchema().dump(value)
+        elif obj["type"] == "product":
+            return ProductSchema().dump(value)
+        raise ValidationError("Unknown feed item type")
+    
+
 class FeedItemSchema(Schema):
     type = fields.Str(required=True)
-    data = fields.Dict(required=True)
+    data = fields.Nested(PostSchema)
     score = fields.Float(dump_only=True)
     created_at = fields.DateTime(dump_only=True)
 
