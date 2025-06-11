@@ -28,6 +28,7 @@ from .models import (
     Follow,
     PostLike,
     PostComment,
+    PostStatus,
     FollowType,
 )
 
@@ -105,6 +106,34 @@ class PostService:
             logger.error(f"Error fetching post {post_id}: {str(e)}")
             raise NotFoundError("Failed to fetch post")
 
+    @staticmethod
+    def get_seller_posts(seller_id, page=1, per_page=20):
+        """Get paginated posts by seller"""
+        with session_scope() as session:
+            base_query = (
+                session.query(Post)
+                .filter(Post.seller_id == seller_id, Post.status == PostStatus.ACTIVE)
+                .options(
+                    joinedload(Post.media),
+                    joinedload(Post.tagged_products).joinedload(PostProduct.product),
+                    # Add these to load the relationships needed for counting
+                    joinedload(Post.likes),
+                    joinedload(Post.comments),
+                )
+            )
+            paginator = Paginator(base_query, page=page, per_page=per_page)
+            result = paginator.paginate({})  # Pass empty dict if no filters
+            
+            return {
+                "items": result["items"],
+                "pagination": {
+                    "page": result["page"],
+                    "per_page": result["per_page"],
+                    "total_items": result["total_items"],
+                    "total_pages": result["total_pages"],
+                },
+            }
+        
     @staticmethod
     def like_post(user_id, post_id):
         try:
@@ -344,7 +373,7 @@ class FeedService:
                     joinedload(Post.media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
                 )
-                .filter(Post.seller_id.in_(followed_sellers))
+                .filter(Post.seller_id.in_(followed_sellers), Post.status == PostStatus.ACTIVE)
                 .order_by(Post.created_at.desc())
                 .limit(100)
                 .all()

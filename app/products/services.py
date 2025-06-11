@@ -17,7 +17,7 @@ from app.categories.models import ProductCategory, ProductTag
 from app.libs.errors import NotFoundError, ValidationError, ConflictError, APIError
 
 from app.users.models import Seller
-from app.socials.models import Follow, Post, PostProduct
+from app.socials.models import Follow, Post, PostProduct, PostStatus
 
 # app imports
 from .models import Product, ProductVariant, ProductInventory
@@ -269,32 +269,6 @@ class ProductService:
                 session.add(inventory)
 
             return inventory
-
-    @staticmethod
-    def get_seller_posts(seller_id, page=1, per_page=20):
-        """Get paginated posts by seller"""
-        with session_scope() as session:
-            base_query = (
-                session.query(Post)
-                .filter(Post.seller_id == seller_id, Post.status == "active")
-                .options(
-                    joinedload(Post.media),
-                    joinedload(Post.tagged_products).joinedload(PostProduct.product),
-                )
-            )
-
-            paginator = Paginator(base_query, page=page, per_page=per_page)
-            result = paginator.paginate({})  # Pass empty dict if no filters
-
-            return {
-                "items": result["items"],
-                "pagination": {
-                    "page": result["page"],
-                    "per_page": result["per_page"],
-                    "total_items": result["total_items"],
-                    "total_pages": result["total_pages"],
-                },
-            }
 
     @staticmethod
     def get_recommended_products(user_id, limit=10):

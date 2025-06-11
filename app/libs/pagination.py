@@ -75,7 +75,10 @@ class Paginator:
         if sort:
             self._apply_sorting(sort)
         elif hasattr(self.query.column_descriptions[0]["entity"], "created_at"):
-            self.query = self.query.order_by(desc("created_at"))
+            # Fix: Get the actual column reference instead of using string
+            entity = self.query.column_descriptions[0]["entity"]
+            created_at_column = getattr(entity, "created_at")
+            self.query = self.query.order_by(desc(created_at_column))
 
         # Execute paginated query
         items: List[T] = (
@@ -83,6 +86,7 @@ class Paginator:
             .offset((self.page - 1) * self.per_page)
             .all()
         )
+
         total: int = self.query.order_by(None).count()
 
         return {
@@ -104,6 +108,7 @@ class Paginator:
     def _apply_filters(self, filters: Dict[str, Any]) -> None:
         """Apply filters to query"""
         conditions: List[Union[BinaryExpression, BooleanClauseList]] = []
+
         for field, value in filters.items():
             if not hasattr(self.query.column_descriptions[0]["entity"], field):
                 continue
@@ -136,11 +141,8 @@ class Paginator:
                 field_name = field
 
             if hasattr(self.query.column_descriptions[0]["entity"], field_name):
-                sort_conditions.append(
-                    direction(
-                        getattr(self.query.column_descriptions[0]["entity"], field_name)
-                    )
-                )
+                column = getattr(self.query.column_descriptions[0]["entity"], field_name)
+                sort_conditions.append(direction(column))
 
         if sort_conditions:
             self.query = self.query.order_by(*sort_conditions)
@@ -149,5 +151,6 @@ class Paginator:
         """Validate pagination parameters"""
         if self.page < 1:
             abort(400, message="Page must be positive integer")
+
         if self.per_page < 1 or self.per_page > self.max_per_page:
             abort(400, message=f"per_page must be between 1 and {self.max_per_page}")

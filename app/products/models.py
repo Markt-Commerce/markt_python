@@ -89,9 +89,10 @@ class Product(BaseModel, StatusMixin, UniqueIdMixin):
         from app.socials.models import ProductLike
 
         return (
-            db.session.query(func.count(ProductLike.product_id))
-            .filter(ProductLike.product_id == cls.id)
-            .label("like_count")
+            select(func.count(ProductLike.id))
+            .where(ProductLike.product_id == cls.id)
+            .correlate(cls)
+            .scalar_subquery()  # or `.as_scalar()` for older versions
         )
 
     @hybrid_property
@@ -105,9 +106,10 @@ class Product(BaseModel, StatusMixin, UniqueIdMixin):
         from app.socials.models import ProductComment
 
         return (
-            db.session.query(func.count(ProductComment.product_id))
-            .filter(ProductComment.product_id == cls.id)
-            .label("comment_count")
+            select(func.count(ProductComment.id))
+            .where(ProductComment.product_id == cls.id)
+            .correlate(cls)
+            .scalar_subquery()  # or `.as_scalar()` for older versions
         )
 
 
