@@ -8,7 +8,13 @@ from marshmallow import fields
 from app.libs.schemas import PaginationQueryArgs
 
 # app imports
-from .schemas import NotificationSchema, NotificationPaginationSchema
+from .schemas import (
+    NotificationSchema,
+    NotificationPaginationSchema,
+    UnreadCountSchema,
+    MarkAsReadRequestSchema,
+    MarkAsReadResponseSchema,
+)
 from .services import NotificationService
 
 bp = Blueprint(
@@ -34,7 +40,7 @@ class NotificationList(MethodView):
 @bp.route("/unread/count")
 class UnreadCount(MethodView):
     @login_required
-    @bp.response(200, {"count": fields.Int()})
+    @bp.response(200, UnreadCountSchema)
     def get(self):
         """Get count of unread notifications"""
         notifications = NotificationService.get_user_notifications(
@@ -46,8 +52,8 @@ class UnreadCount(MethodView):
 @bp.route("/mark-read")
 class MarkAsRead(MethodView):
     @login_required
-    @bp.arguments({"notification_ids": fields.List(fields.Int())}, location="json")
-    @bp.response(200, {"updated": fields.Int()})
+    @bp.arguments(MarkAsReadRequestSchema, location="json")
+    @bp.response(200, MarkAsReadResponseSchema)
     def post(self, data):
         """Mark notifications as read"""
         updated = NotificationService.mark_as_read(

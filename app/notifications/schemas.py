@@ -1,4 +1,5 @@
 from marshmallow import Schema, fields, validate
+from app.libs.schemas import PaginationSchema
 
 
 class NotificationSchema(Schema):
@@ -15,4 +16,16 @@ class NotificationSchema(Schema):
 
 class NotificationPaginationSchema(Schema):
     items = fields.List(fields.Nested(NotificationSchema))
-    pagination = fields.Dict()
+    pagination = fields.Nested(PaginationSchema)
+
+
+class UnreadCountSchema(Schema):
+    count = fields.Int()
+
+
+class MarkAsReadRequestSchema(Schema):
+    notification_ids = fields.List(fields.Int(), required=True)
+
+
+class MarkAsReadResponseSchema(Schema):
+    updated = fields.Int()
