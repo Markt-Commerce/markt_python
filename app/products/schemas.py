@@ -34,6 +34,8 @@ class ProductSchema(ProductCreateSchema):
     updated_at = fields.DateTime(dump_only=True)
     seller_id = fields.Int(dump_only=True)
     view_count = fields.Int(dump_only=True)
+    like_count = fields.Int(dump_only=True)
+    comment_count = fields.Int(dump_only=True)
 
 
 class ProductSearchSchema(Schema):

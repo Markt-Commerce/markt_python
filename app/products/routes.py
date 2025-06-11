@@ -2,10 +2,18 @@
 from flask_smorest import Blueprint, abort
 from flask.views import MethodView
 from flask_login import login_required, current_user
+from flask import request
 
 # project imports
 from app.socials.schemas import ShareSchema, CommentSchema
 from app.libs.decorators import seller_required, buyer_required
+from app.libs.schemas import PaginationQueryArgs
+from app.socials.services import ProductSocialService
+from app.socials.schemas import (
+    ProductLikeSchema,
+    ProductCommentSchema,
+    ProductCommentsSchema,
+)
 
 # app imports
 from .services import ProductService
@@ -99,17 +107,50 @@ class TrendingProducts(MethodView):
 
 # -----------------------------------------------
 
-# Social Commerce Features
-# -----------------------------------------------
+
 @bp.route("/<product_id>/like")
-class LikeProduct(MethodView):
+class ProductLike(MethodView):
     @login_required
-    @bp.response(204)
+    @bp.response(201, ProductLikeSchema)
     def post(self, product_id):
         """Like a product"""
-        # TODO: Track likes
-        # TODO: Add to user's favorites
-        # TODO: Notification to seller
+        return ProductSocialService.like_product(current_user.id, product_id)
+
+
+@bp.route("/<product_id>/comments")
+class ProductComments(MethodView):
+    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.response(200, ProductCommentsSchema)
+    def get(self, args, product_id):
+        """Get product comments"""
+        return ProductSocialService.get_product_comments(
+            product_id, page=args.get("page", 1), per_page=args.get("per_page", 20)
+        )
+
+    @login_required
+    @bp.arguments(ProductCommentSchema)
+    @bp.response(201, ProductCommentSchema)
+    def post(self, comment_data, product_id):
+        """Add comment to product"""
+        return ProductSocialService.add_product_comment(
+            current_user.id,
+            product_id,
+            comment_data["content"],
+            comment_data.get("parent_id"),
+        )
+
+
+@bp.route("/<product_id>/view")
+class ProductView(MethodView):
+    @bp.response(204)
+    def post(self, product_id):
+        """Track product view"""
+        ProductSocialService.track_product_view(
+            product_id,
+            current_user.id if current_user.is_authenticated else None,
+            request.remote_addr,
+        )
+        return "", 204
 
 
 @bp.route("/<product_id>/share")
@@ -121,16 +162,6 @@ class ShareProduct(MethodView):
         # TODO: Generate share links
         # TODO: Track shares
         # TODO: Reward system for shares
-
-
-@bp.route("/<product_id>/comments")
-class ProductComments(MethodView):
-    @bp.response(200, CommentSchema(many=True))
-    def get(self, product_id):
-        """Get product comments"""
-        # TODO: Paginated comments
-        # TODO: Nested replies
-        # TODO: Sorting options
 
 
 # -----------------------------------------------

@@ -154,3 +154,24 @@ class FeedItemSchema(Schema):
 class HybridFeedSchema(Schema):
     items = fields.List(fields.Nested(FeedItemSchema))
     pagination = fields.Nested(PaginationSchema)
+
+
+class ProductLikeSchema(Schema):
+    user_id = fields.Str(dump_only=True)
+    product_id = fields.Str(dump_only=True)
+    created_at = fields.DateTime(dump_only=True)
+
+
+class ProductCommentSchema(Schema):
+    id = fields.Int(dump_only=True)
+    user_id = fields.Str(dump_only=True)
+    product_id = fields.Str(dump_only=True)
+    content = fields.Str(required=True)
+    created_at = fields.DateTime(dump_only=True)
+    user = fields.Nested("UserProfileSchema")
+    replies = fields.List(fields.Nested(lambda: ProductCommentSchema()))
+
+
+class ProductCommentsSchema(Schema):
+    items = fields.List(fields.Nested(ProductCommentSchema))
+    pagination = fields.Nested(PaginationSchema)

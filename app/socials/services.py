@@ -30,6 +30,9 @@ from .models import (
     PostComment,
     PostStatus,
     FollowType,
+    ProductLike,
+    ProductComment,
+    ProductView,
 )
 from .constants import POST_STATUS_TRANSITIONS
 
@@ -411,6 +414,120 @@ class PostService:
             return paginator.paginate({})
 
 
+class ProductSocialService:
+    @staticmethod
+    def like_product(user_id, product_id):
+        try:
+            with session_scope() as session:
+                # Check if like already exists
+                existing_like = (
+                    session.query(ProductLike)
+                    .filter_by(user_id=user_id, product_id=product_id)
+                    .first()
+                )
+
+                if existing_like:
+                    raise ConflictError("Product already liked")
+
+                # Verify product exists and is active
+                product = session.query(Product).get(product_id)
+                if not product or product.status != Product.Status.ACTIVE:
+                    raise NotFoundError("Product not available")
+
+                like = ProductLike(user_id=user_id, product_id=product_id)
+                session.add(like)
+
+                # Update Redis counters
+                redis_client.zincrby(f"product:{product_id}:likes", 1, user_id)
+                redis_client.zincrby(f"user:{user_id}:liked_products", 1, product_id)
+
+                # Notify product owner if not self-like
+                if product.seller.user_id != user_id:
+                    NotificationService.create_notification(
+                        user_id=product.seller.user_id,
+                        notification_type=NotificationType.PRODUCT_LIKE,
+                        actor_id=user_id,
+                        reference_type="product",
+                        reference_id=product_id,
+                    )
+
+                return like
+        except SQLAlchemyError as e:
+            logger.error(f"Error liking product: {str(e)}")
+            raise ConflictError("Failed to like product")
+
+    @staticmethod
+    def add_product_comment(user_id, product_id, content, parent_id=None):
+        try:
+            with session_scope() as session:
+                product = session.query(Product).get(product_id)
+                if not product or product.status != Product.Status.ACTIVE:
+                    raise NotFoundError("Product not found or not active")
+
+                comment = ProductComment(
+                    user_id=user_id,
+                    product_id=product_id,
+                    content=content,
+                    parent_id=parent_id,
+                )
+                session.add(comment)
+
+                # Update Redis counters
+                redis_client.zincrby(f"product:{product_id}:comments", 1, user_id)
+
+                # Notify product owner if not self-comment
+                if product.seller.user_id != user_id:
+                    NotificationService.create_notification(
+                        user_id=product.seller.user_id,
+                        notification_type=NotificationType.PRODUCT_COMMENT,
+                        actor_id=user_id,
+                        reference_type="product",
+                        reference_id=product_id,
+                    )
+
+                return comment
+        except SQLAlchemyError as e:
+            logger.error(f"Error adding product comment: {str(e)}")
+            raise ConflictError("Failed to add comment")
+
+    @staticmethod
+    def get_product_comments(product_id, page=1, per_page=20):
+        """Get comments for a product"""
+        with session_scope() as session:
+            base_query = (
+                session.query(ProductComment)
+                .filter_by(product_id=product_id, parent_id=None)  # Only top-level
+                .options(
+                    joinedload(ProductComment.user),
+                    joinedload(ProductComment.replies).joinedload(ProductComment.user),
+                )
+                .order_by(ProductComment.created_at.desc())
+            )
+            paginator = Paginator(base_query, page=page, per_page=per_page)
+            return paginator.paginate({})
+
+    @staticmethod
+    def track_product_view(product_id, user_id=None, ip_address=None):
+        """Record a product view"""
+        try:
+            with session_scope() as session:
+                view = ProductView(
+                    product_id=product_id, user_id=user_id, ip_address=ip_address
+                )
+                session.add(view)
+
+                # Update Redis counters
+                if user_id:
+                    redis_client.zincrby(
+                        f"user:{user_id}:viewed_products", 1, product_id
+                    )
+                redis_client.zincrby("popular_products", 1, product_id)
+
+                return view
+        except SQLAlchemyError as e:
+            logger.error(f"Error tracking product view: {str(e)}")
+
+
 class FollowService:
     @staticmethod
     def follow_user(follower_id, followee_id):
@@ -540,7 +657,7 @@ class FeedService:
                 .options(joinedload(Product.seller), joinedload(Product.images))
                 .filter(
                     Product.id.in_(product_ids),
-                    Product.status == ProductStatus.ACTIVE,
+                    Product.status == Product.Status.ACTIVE,
                 )
                 .all()
                 if product_ids
