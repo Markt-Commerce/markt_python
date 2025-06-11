@@ -15,7 +15,7 @@ from app.libs.pagination import Paginator
 from app.libs.errors import NotFoundError, ValidationError, ConflictError
 
 from app.users.models import User, Seller
-from app.products.models import Product
+from app.products.models import Product, ProductStatus
 from app.products.services import ProductService
 from app.notifications.models import NotificationType
 from app.notifications.services import NotificationService
@@ -31,6 +31,7 @@ from .models import (
     PostStatus,
     FollowType,
 )
+from .constants import POST_STATUS_TRANSITIONS
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,12 @@ class PostService:
                 if not seller:
                     raise NotFoundError("Seller not found")
 
-                post = Post(seller_id=seller_id, caption=post_data.get("caption"))
+                # Set status from request or default to draft
+                status = PostStatus(post_data.get("status", "draft"))
+
+                post = Post(
+                    seller_id=seller_id, caption=post_data.get("caption"), status=status
+                )
                 session.add(post)
                 session.flush()
 
@@ -123,7 +129,7 @@ class PostService:
             )
             paginator = Paginator(base_query, page=page, per_page=per_page)
             result = paginator.paginate({})  # Pass empty dict if no filters
-            
+
             return {
                 "items": result["items"],
                 "pagination": {
@@ -133,7 +139,7 @@ class PostService:
                     "total_pages": result["total_pages"],
                 },
             }
-        
+
     @staticmethod
     def like_post(user_id, post_id):
         try:
@@ -170,6 +176,239 @@ class PostService:
         except SQLAlchemyError as e:
             logger.error(f"Error liking post: {str(e)}")
             raise ConflictError("Failed to like post")
+
+    @staticmethod
+    def unlike_post(user_id, post_id):
+        try:
+            with session_scope() as session:
+                like = (
+                    session.query(PostLike)
+                    .filter_by(user_id=user_id, post_id=post_id)
+                    .first()
+                )
+                if like:
+                    session.delete(like)
+                    redis_client.zincrby(f"post:{post_id}:likes", -1, user_id)
+                    redis_client.zincrby(f"user:{user_id}:liked_posts", -1, post_id)
+        except SQLAlchemyError as e:
+            logger.error(f"Error unliking post: {str(e)}")
+            raise ConflictError("Failed to unlike post")
+
+    @staticmethod
+    def update_post(post_id, seller_id, update_data):
+        """Update post details (caption, media, products)"""
+        try:
+            with session_scope() as session:
+                post = session.query(Post).get(post_id)
+                if not post:
+                    raise NotFoundError("Post not found")
+                if post.seller_id != seller_id:
+                    raise ValidationError("You can only edit your own posts")
+                if post.status == PostStatus.DELETED:
+                    raise ValidationError("Cannot edit deleted posts")
+
+                # Update caption if provided
+                if "caption" in update_data:
+                    post.caption = update_data["caption"]
+
+                # Handle media updates
+                if "media" in update_data:
+                    # Clear existing media
+                    session.query(PostMedia).filter_by(post_id=post_id).delete()
+
+                    # Add new media
+                    for media_data in update_data["media"]:
+                        media = PostMedia(
+                            post_id=post.id,
+                            media_url=media_data["media_url"],
+                            media_type=media_data["media_type"],
+                            sort_order=media_data.get("sort_order", 0),
+                        )
+                        session.add(media)
+
+                # Handle product updates
+                if "products" in update_data:
+                    # Clear existing products
+                    session.query(PostProduct).filter_by(post_id=post_id).delete()
+
+                    # Add new products
+                    for product_data in update_data["products"]:
+                        product = session.query(Product).get(product_data["product_id"])
+                        if not product or product.seller_id != seller_id:
+                            raise ValidationError("Invalid product ID")
+
+                        post_product = PostProduct(
+                            post_id=post.id, product_id=product_data["product_id"]
+                        )
+                        session.add(post_product)
+
+                return post
+        except SQLAlchemyError as e:
+            logger.error(f"Error updating post {post_id}: {str(e)}")
+            raise ConflictError("Failed to update post")
+
+    @staticmethod
+    def change_post_status(post_id, seller_id, new_status):
+        """Change post status (publish, archive, etc)"""
+        try:
+            with session_scope() as session:
+                post = session.query(Post).get(post_id)
+                if not post:
+                    raise NotFoundError("Post not found")
+                if post.seller_id != seller_id:
+                    raise ValidationError("You can only modify your own posts")
+
+                status_mapping = POST_STATUS_TRANSITIONS
+
+                if new_status not in status_mapping:
+                    raise ValidationError("Invalid status transition")
+
+                current_status, target_status = status_mapping[new_status]
+
+                if current_status is not None and post.status != current_status:
+                    raise ValidationError(
+                        f"Cannot {new_status} a {post.status.value} post"
+                    )
+
+                post.status = target_status
+
+                # Handle Redis updates for status changes
+                if new_status == "publish":
+                    # Add to seller's active posts in Redis
+                    redis_client.zadd(
+                        f"seller:{seller_id}:posts",
+                        {post.id: int(post.created_at.timestamp())},
+                    )
+                elif new_status == "delete":
+                    # Remove from seller's posts in Redis
+                    redis_client.zrem(f"seller:{seller_id}:posts", post.id)
+
+                return post
+        except SQLAlchemyError as e:
+            logger.error(f"Error changing post status {post_id}: {str(e)}")
+            raise ConflictError("Failed to change post status")
+
+    @staticmethod
+    def get_seller_drafts(seller_id, page=1, per_page=20):
+        """Get seller's draft posts"""
+        with session_scope() as session:
+            base_query = (
+                session.query(Post)
+                .filter(Post.seller_id == seller_id, Post.status == PostStatus.DRAFT)
+                .options(
+                    joinedload(Post.media),
+                    joinedload(Post.tagged_products).joinedload(PostProduct.product),
+                )
+            )
+            paginator = Paginator(base_query, page=page, per_page=per_page)
+            return paginator.paginate({})
+
+    @staticmethod
+    def get_seller_archived(seller_id, page=1, per_page=20):
+        """Get seller's archived posts"""
+        with session_scope() as session:
+            base_query = (
+                session.query(Post)
+                .filter(Post.seller_id == seller_id, Post.status == PostStatus.ARCHIVED)
+                .options(
+                    joinedload(Post.media),
+                    joinedload(Post.tagged_products).joinedload(PostProduct.product),
+                )
+            )
+            paginator = Paginator(base_query, page=page, per_page=per_page)
+            return paginator.paginate({})
+
+    @staticmethod
+    def add_comment(user_id, post_id, content, parent_id=None):
+        """Add a comment to a post"""
+        try:
+            with session_scope() as session:
+                post = session.query(Post).get(post_id)
+                if not post or post.status != PostStatus.ACTIVE:
+                    raise NotFoundError("Post not found or not active")
+
+                comment = PostComment(
+                    user_id=user_id,
+                    post_id=post_id,
+                    content=content,
+                    parent_id=parent_id,
+                )
+                session.add(comment)
+
+                # Update Redis counters
+                redis_client.zincrby(f"post:{post_id}:comments", 1, user_id)
+
+                # Notify post owner if not self-comment
+                if post.seller.user_id != user_id:
+                    NotificationService.create_notification(
+                        user_id=post.seller.user_id,
+                        notification_type=NotificationType.POST_COMMENT,
+                        actor_id=user_id,
+                        reference_type="post",
+                        reference_id=post_id,
+                    )
+
+                return comment
+        except SQLAlchemyError as e:
+            logger.error(f"Error adding comment: {str(e)}")
+            raise ConflictError("Failed to add comment")
+
+    @staticmethod
+    def update_comment(comment_id, user_id, content):
+        """Update a comment"""
+        try:
+            with session_scope() as session:
+                comment = session.query(PostComment).get(comment_id)
+                if not comment:
+                    raise NotFoundError("Comment not found")
+                if comment.user_id != user_id:
+                    raise ValidationError("You can only edit your own comments")
+
+                comment.content = content
+                return comment
+        except SQLAlchemyError as e:
+            logger.error(f"Error updating comment: {str(e)}")
+            raise ConflictError("Failed to update comment")
+
+    @staticmethod
+    def delete_comment(comment_id, user_id):
+        """Delete a comment"""
+        try:
+            with session_scope() as session:
+                comment = session.query(PostComment).get(comment_id)
+                if not comment:
+                    raise NotFoundError("Comment not found")
+
+                # Allow post owner or comment author to delete
+                post_owner_id = comment.post.seller.user_id
+                if comment.user_id != user_id and post_owner_id != user_id:
+                    raise ValidationError("Not authorized to delete this comment")
+
+                session.delete(comment)
+
+                # Update Redis counters
+                redis_client.zincrby(
+                    f"post:{comment.post_id}:comments", -1, comment.user_id
+                )
+        except SQLAlchemyError as e:
+            logger.error(f"Error deleting comment: {str(e)}")
+            raise ConflictError("Failed to delete comment")
+
+    @staticmethod
+    def get_post_comments(post_id, page=1, per_page=20):
+        """Get comments for a post"""
+        with session_scope() as session:
+            base_query = (
+                session.query(PostComment)
+                .filter_by(post_id=post_id, parent_id=None)  # Only top-level comments
+                .options(
+                    joinedload(PostComment.user),
+                    joinedload(PostComment.replies).joinedload(PostComment.user),
+                )
+                .order_by(PostComment.created_at.desc())
+            )
+            paginator = Paginator(base_query, page=page, per_page=per_page)
+            return paginator.paginate({})
 
 
 class FollowService:
@@ -286,7 +525,10 @@ class FeedService:
                     joinedload(Post.media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
                 )
-                .filter(Post.id.in_(post_ids))
+                .filter(
+                    Post.id.in_(post_ids),
+                    Post.status == PostStatus.ACTIVE,
+                )
                 .all()
                 if post_ids
                 else []
@@ -296,7 +538,10 @@ class FeedService:
             products = (
                 session.query(Product)
                 .options(joinedload(Product.seller), joinedload(Product.images))
-                .filter(Product.id.in_(product_ids))
+                .filter(
+                    Product.id.in_(product_ids),
+                    Product.status == ProductStatus.ACTIVE,
+                )
                 .all()
                 if product_ids
                 else []
@@ -373,7 +618,10 @@ class FeedService:
                     joinedload(Post.media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
                 )
-                .filter(Post.seller_id.in_(followed_sellers), Post.status == PostStatus.ACTIVE)
+                .filter(
+                    Post.seller_id.in_(followed_sellers),
+                    Post.status == PostStatus.ACTIVE,
+                )
                 .order_by(Post.created_at.desc())
                 .limit(100)
                 .all()

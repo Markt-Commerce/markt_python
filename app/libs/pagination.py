@@ -141,7 +141,9 @@ class Paginator:
                 field_name = field
 
             if hasattr(self.query.column_descriptions[0]["entity"], field_name):
-                column = getattr(self.query.column_descriptions[0]["entity"], field_name)
+                column = getattr(
+                    self.query.column_descriptions[0]["entity"], field_name
+                )
                 sort_conditions.append(direction(column))
 
         if sort_conditions:

@@ -107,6 +107,17 @@ class Post(BaseModel, UniqueIdMixin):
         "PostComment", back_populates="post", cascade="all, delete-orphan"
     )
 
+    __table_args__ = (
+        # Seller post history
+        db.Index("idx_seller_posts", "seller_id", "created_at"),
+        # Full-text search for captions - using text() to handle REGCONFIG
+        db.Index(
+            "idx_post_search",
+            text("to_tsvector('english', caption)"),
+            postgresql_using="gin",
+        ),
+    )
+
     # Computed count properties
     @hybrid_property
     def like_count(self):
@@ -117,9 +128,10 @@ class Post(BaseModel, UniqueIdMixin):
     def like_count(cls):
         """SQL expression for like count"""
         return (
-            db.session.query(func.count(PostLike.post_id))
-            .filter(PostLike.post_id == cls.id)
-            .label("like_count")
+            select(func.count(PostLike.id))
+            .where(PostLike.post_id == cls.id)
+            .correlate(cls)
+            .scalar_subquery()
         )
 
     @hybrid_property
@@ -131,21 +143,11 @@ class Post(BaseModel, UniqueIdMixin):
     def comment_count(cls):
         """SQL expression for comment count"""
         return (
-            db.session.query(func.count(PostComment.post_id))
-            .filter(PostComment.post_id == cls.id)
-            .label("comment_count")
+            select(func.count(PostComment.id))
+            .where(PostComment.post_id == cls.id)
+            .correlate(cls)
+            .scalar_subquery()
         )
-
-    __table_args__ = (
-        # Seller post history
-        db.Index("idx_seller_posts", "seller_id", "created_at"),
-        # Full-text search for captions - using text() to handle REGCONFIG
-        db.Index(
-            "idx_post_search",
-            text("to_tsvector('english', caption)"),
-            postgresql_using="gin",
-        ),
-    )
 
 
 class PostMedia(BaseModel):

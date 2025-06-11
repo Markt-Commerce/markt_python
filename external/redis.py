@@ -90,6 +90,14 @@ class RedisClient:
         pubsub.psubscribe(*patterns)
         return pubsub
 
+    def sadd(self, name, *values):
+        """Wrapper for Redis sadd command"""
+        return self.client.sadd(name, *values)
+
+    def smembers(self, name):
+        """Wrapper for Redis smembers command"""
+        return self.client.smembers(name)
+
     def store_recovery_code(self, email: str, code: str, expires_in: int = 600):
         key = f"recovery:{email}"
         self.client.setex(key, expires_in, code)
