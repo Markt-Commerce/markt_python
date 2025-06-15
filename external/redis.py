@@ -51,6 +51,10 @@ class RedisClient:
         """Wrapper for Redis zscore command"""
         return self.client.zscore(name, value)
 
+    def zcard(self, name):
+        """Wrapper for Redis zcard command"""
+        return self.client.zcard(name)
+
     # Basic operations you might also need
     def get(self, name):
         """Wrapper for Redis get command"""
@@ -90,6 +94,7 @@ class RedisClient:
         pubsub.psubscribe(*patterns)
         return pubsub
 
+    # Set operations
     def sadd(self, name, *values):
         """Wrapper for Redis sadd command"""
         return self.client.sadd(name, *values)
@@ -98,6 +103,11 @@ class RedisClient:
         """Wrapper for Redis smembers command"""
         return self.client.smembers(name)
 
+    def scard(self, name):
+        """Wrapper for Redis scard command"""
+        return self.client.scard(name)
+
+    # Recovery code
     def store_recovery_code(self, email: str, code: str, expires_in: int = 600):
         key = f"recovery:{email}"
         self.client.setex(key, expires_in, code)
