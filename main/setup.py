@@ -37,20 +37,10 @@ def configure_app(app):
     # Initialize Flask-Smorest API
     api = Api(app)
 
-    socketio = SocketIO(
-        app,
-        cors_allowed_origins="*",
-        async_mode="gevent",
-        logger=settings.DEBUG,
-        engineio_logger=settings.DEBUG,
-        # Important: manage_session=False lets Flask handle the session
-        manage_session=False,
-    )
+    from .extensions import socketio
 
-    # Initialize Celery
-    # from main.tasks import create_celery_app
-
-    # create_celery_app(app)
+    # Initialize socketio
+    socketio.init_app(app, logger=settings.DEBUG, engineio_logger=settings.DEBUG)
 
     # Register error handler
     app.register_error_handler(Exception, handle_error)

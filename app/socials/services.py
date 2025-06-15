@@ -18,7 +18,8 @@ from app.users.models import User, Seller
 from app.products.models import Product, ProductStatus
 from app.products.services import ProductService
 from app.notifications.models import NotificationType
-from app.notifications.services import NotificationService
+
+# from app.notifications.services import NotificationService
 
 # app imports
 from .models import (
@@ -167,6 +168,8 @@ class PostService:
                 # Get post owner
                 post = session.query(Post).get(post_id)
                 if post.seller.user_id != user_id:  # Don't notify for self-likes
+                    from app.notifications.services import NotificationService
+
                     NotificationService.create_notification(
                         user_id=post.seller.user_id,
                         notification_type=NotificationType.POST_LIKE,
@@ -343,6 +346,8 @@ class PostService:
 
                 # Notify post owner if not self-comment
                 if post.seller.user_id != user_id:
+                    from app.notifications.services import NotificationService
+
                     NotificationService.create_notification(
                         user_id=post.seller.user_id,
                         notification_type=NotificationType.POST_COMMENT,
@@ -443,6 +448,8 @@ class ProductSocialService:
 
                 # Notify product owner if not self-like
                 if product.seller.user_id != user_id:
+                    from app.notifications.services import NotificationService
+
                     NotificationService.create_notification(
                         user_id=product.seller.user_id,
                         notification_type=NotificationType.PRODUCT_LIKE,
@@ -477,6 +484,8 @@ class ProductSocialService:
 
                 # Notify product owner if not self-comment
                 if product.seller.user_id != user_id:
+                    from app.notifications.services import NotificationService
+
                     NotificationService.create_notification(
                         user_id=product.seller.user_id,
                         notification_type=NotificationType.PRODUCT_COMMENT,
@@ -580,6 +589,8 @@ class FollowService:
                 # Update Redis counters
                 redis_client.hincrby(f"user:{followee_id}", "followers_count", 1)
                 redis_client.hincrby(f"user:{follower_id}", "following_count", 1)
+
+                from app.notifications.services import NotificationService
 
                 NotificationService.create_notification(
                     user_id=followee_id,

@@ -1,13 +1,13 @@
 # python imports
 import logging
+from typing import Optional, Dict, Any, List
+from enum import Enum
 
 # package imports
 from sqlalchemy.exc import SQLAlchemyError
 
 # project imports
-from external.database import db
 from external.redis import redis_client
-
 from app.libs.session import session_scope
 from app.libs.pagination import Paginator
 from app.libs.errors import NotFoundError
@@ -16,6 +16,12 @@ from app.libs.errors import NotFoundError
 from .models import Notification, NotificationType
 
 logger = logging.getLogger(__name__)
+
+
+class DeliveryChannel(Enum):
+    WEBSOCKET = "websocket"
+    PUSH = "push"
+    EMAIL = "email"
 
 
 class NotificationService:
@@ -45,18 +51,90 @@ class NotificationService:
             "title": "Order update",
             "message": "Your order #{order_id} status changed to {status}",
         },
+        NotificationType.SHIPMENT_UPDATE: {
+            "title": "Shipment update",
+            "message": "Your shipment for order #{order_id} is {status}",
+        },
+        NotificationType.PROMOTIONAL: {
+            "title": "Special offer",
+            "message": "{message}",
+        },
+        NotificationType.SYSTEM_ALERT: {
+            "title": "System notification",
+            "message": "{message}",
+        },
+    }
+
+    # Channel configuration by notification type
+    CHANNEL_CONFIG = {
+        NotificationType.POST_LIKE: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.POST_COMMENT: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.NEW_FOLLOWER: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.PRODUCT_LIKE: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.PRODUCT_COMMENT: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.ORDER_UPDATE: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,
+        },
+        NotificationType.SHIPMENT_UPDATE: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,
+        },
+        NotificationType.PROMOTIONAL: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": False,  # Don't spam with promotional push
+        },
+        NotificationType.SYSTEM_ALERT: {
+            "channels": [DeliveryChannel.EMAIL, DeliveryChannel.PUSH],
+            "immediate_websocket": False,  # System alerts via reliable channels
+            "always_email": True,
+            "always_push": True,
+        },
     }
 
     @staticmethod
     def create_notification(
-        user_id,
-        notification_type,
-        actor_id=None,
-        reference_type=None,
-        reference_id=None,
-        metadata_=None,
-    ):
-        """Create and deliver a notification"""
+        user_id: str,
+        notification_type: NotificationType,
+        actor_id: Optional[str] = None,
+        reference_type: Optional[str] = None,
+        reference_id: Optional[str] = None,
+        metadata_: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Notification]:
+        """Create notification with intelligent delivery strategy"""
         try:
             template = NotificationService.TEMPLATES.get(notification_type)
             if not template:
@@ -74,13 +152,20 @@ class NotificationService:
                     if actor:
                         actor_name = actor.username
 
-            # Format message
-            message = template["message"].format(
-                username=actor_name or "Someone",
-                product_name=metadata_.get("product_name") if metadata_ else None,
-                order_id=reference_id,
-                status=metadata_.get("status") if metadata_ else None,
-            )
+            # Format message with safe defaults
+            format_data = {
+                "username": actor_name or "Someone",
+                "product_name": metadata_.get("product_name", "your product")
+                if metadata_
+                else "your product",
+                "order_id": reference_id or "N/A",
+                "status": metadata_.get("status", "updated")
+                if metadata_
+                else "updated",
+                "message": metadata_.get("message", "") if metadata_ else "",
+            }
+
+            message = template["message"].format(**format_data)
 
             with session_scope() as session:
                 notification = Notification(
@@ -89,6 +174,7 @@ class NotificationService:
                     title=template["title"],
                     message=message,
                     is_read=False,
+                    is_seen=False,
                     reference_type=reference_type,
                     reference_id=reference_id,
                     metadata_=metadata_ or {},
@@ -96,9 +182,52 @@ class NotificationService:
                 session.add(notification)
                 session.flush()
 
-                # Real-time delivery
-                NotificationService._deliver_notification(notification)
+                notification_data = notification.to_dict()
 
+                # Hybrid delivery strategy
+                delivery_config = NotificationService.CHANNEL_CONFIG.get(
+                    notification_type, {}
+                )
+
+                # 1. Immediate WebSocket delivery if user is online
+                websocket_delivered = False
+                if delivery_config.get("immediate_websocket", True):
+                    websocket_delivered = (
+                        NotificationService._try_immediate_websocket_delivery(
+                            user_id, notification_data
+                        )
+                    )
+
+                # 2. Queue remaining channels for async delivery
+                remaining_channels = []
+                config_channels = delivery_config.get(
+                    "channels", [DeliveryChannel.WEBSOCKET]
+                )
+
+                for channel in config_channels:
+                    if channel == DeliveryChannel.WEBSOCKET and websocket_delivered:
+                        continue  # Already delivered via WebSocket
+                    elif channel == DeliveryChannel.PUSH:
+                        # Send push if offline OR if always_push is True
+                        if (
+                            not websocket_delivered
+                            and delivery_config.get("push_when_offline", True)
+                        ) or delivery_config.get("always_push", False):
+                            remaining_channels.append(channel)
+                    elif channel == DeliveryChannel.EMAIL:
+                        # Send email if always_email is True
+                        if delivery_config.get("always_email", False):
+                            remaining_channels.append(channel)
+
+                # Queue for async delivery
+                if remaining_channels:
+                    from .tasks import deliver_notification
+
+                    deliver_notification.delay(notification_data, remaining_channels)
+
+                logger.info(
+                    f"Notification created for user {user_id}, websocket_delivered={websocket_delivered}"
+                )
                 return notification
 
         except Exception as e:
@@ -106,34 +235,50 @@ class NotificationService:
             raise
 
     @staticmethod
-    def _deliver_notification(notification):
-        """Deliver notification via multiple channels"""
-        # 1. Real-time WebSocket
-        redis_client.publish(
-            f"notifications:{notification.user_id}", notification.to_dict()
-        )
+    def _try_immediate_websocket_delivery(
+        user_id: str, notification_data: Dict
+    ) -> bool:
+        """Attempt immediate WebSocket delivery, return True if successful"""
+        try:
+            # Check if user has active connections
+            if not redis_client.exists(f"online_users:{user_id}"):
+                return False
 
-        # 2. Push notification (placeholder)
-        if notification.type not in [NotificationType.SYSTEM_ALERT]:
-            NotificationService._send_push_notification(notification)
+            # Get all active sessions for this user (handles multiple devices/tabs)
+            user_room = f"user_{user_id}"
 
-        # 3. Email for important notifications (placeholder)
-        if notification.type in [
-            NotificationType.ORDER_UPDATE,
-            NotificationType.SYSTEM_ALERT,
-        ]:
-            NotificationService._send_email_notification(notification)
+            from main.extensions import socketio
+
+            # Emit notification
+            socketio.emit(
+                "notification",
+                notification_data,
+                room=user_room,
+                namespace="/notifications",
+            )
+
+            # Update unread count in real-time
+            unread_count = NotificationService.get_unread_count(user_id)
+            socketio.emit(
+                "unread_count_update",
+                {"count": unread_count},
+                room=user_room,
+                namespace="/notifications",
+            )
+
+            logger.info(f"Immediate WebSocket delivery successful for user {user_id}")
+            return True
+
+        except Exception as e:
+            logger.error(
+                f"Immediate WebSocket delivery failed for user {user_id}: {str(e)}"
+            )
+            return False
 
     @staticmethod
-    def _send_push_notification(notification):
-        """Placeholder for push notification service"""
-
-    @staticmethod
-    def _send_email_notification(notification):
-        """Placeholder for email notification service"""
-
-    @staticmethod
-    def get_user_notifications(user_id, page=1, per_page=20, unread_only=False):
+    def get_user_notifications(
+        user_id: str, page: int = 1, per_page: int = 20, unread_only: bool = False
+    ) -> Dict:
         """Get paginated notifications for user"""
         try:
             with session_scope() as session:
@@ -149,8 +294,14 @@ class NotificationService:
                 paginator = Paginator(query, page=page, per_page=per_page)
                 result = paginator.paginate({})
 
+                # Mark notifications as seen (appeared in UI)
+                if not unread_only:
+                    NotificationService._mark_as_seen(
+                        session, user_id, [item.id for item in result["items"]]
+                    )
+
                 return {
-                    "items": result["items"],
+                    "items": [item.to_dict() for item in result["items"]],
                     "pagination": {
                         "page": result["page"],
                         "per_page": result["per_page"],
@@ -163,7 +314,7 @@ class NotificationService:
             raise NotFoundError("Failed to fetch notifications")
 
     @staticmethod
-    def mark_as_read(user_id, notification_ids=None):
+    def mark_as_read(user_id: str, notification_ids: Optional[List[int]] = None) -> int:
         """Mark notifications as read"""
         try:
             with session_scope() as session:
@@ -177,13 +328,48 @@ class NotificationService:
                 updated = query.update({"is_read": True}, synchronize_session=False)
                 session.commit()
 
-                # Send read receipt
+                # Emit real-time unread count update
                 if updated > 0:
-                    redis_client.publish(
-                        f"notifications:{user_id}:read", {"count": updated}
+                    from main.extensions import socketio
+
+                    unread_count = NotificationService.get_unread_count(user_id)
+                    socketio.emit(
+                        "unread_count_update",
+                        {"count": unread_count},
+                        room=f"user_{user_id}",
+                        namespace="/notifications",
                     )
 
                 return updated
+
         except SQLAlchemyError as e:
             logger.error(f"Error marking notifications as read: {str(e)}")
             raise
+
+    @staticmethod
+    def get_unread_count(user_id: str) -> int:
+        """Get count of unread notifications"""
+        try:
+            with session_scope() as session:
+                return (
+                    session.query(Notification)
+                    .filter(
+                        Notification.user_id == user_id, Notification.is_read == False
+                    )
+                    .count()
+                )
+        except SQLAlchemyError as e:
+            logger.error(f"Error getting unread count: {str(e)}")
+            return 0
+
+    @staticmethod
+    def _mark_as_seen(session, user_id: str, notification_ids: List[int]):
+        """Mark notifications as seen (internal helper)"""
+        try:
+            session.query(Notification).filter(
+                Notification.user_id == user_id,
+                Notification.id.in_(notification_ids),
+                Notification.is_seen == False,
+            ).update({"is_seen": True}, synchronize_session=False)
+        except Exception as e:
+            logger.error(f"Error marking notifications as seen: {str(e)}")
