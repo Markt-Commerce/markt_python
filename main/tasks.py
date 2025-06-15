@@ -21,6 +21,7 @@ def create_celery_app(app: Flask = None) -> Celery:
     celery.autodiscover_tasks(
         [
             "app.socials.tasks",
+            "app.notifications.tasks",
             # add more task modules here
         ]
     )

@@ -64,15 +64,6 @@ class Config:
         self.CELERY_WORKER_DISABLE_RATE_LIMITS = False
         self.CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 
-        # Queue Configuration
-        self.CELERY_TASK_ROUTES = {
-            "app.socials.tasks.generate_all_feeds": {"queue": "social_priority"},
-            "app.socials.tasks.generate_user_feed": {"queue": "social"},
-            "app.socials.tasks.update_popular_content": {"queue": "social"},
-            # "app.socials.tasks.cleanup_old_feed_cache": {"queue": "maintenance"},
-            # 'app.products.tasks.*': {'queue': 'products'},
-        }
-
     @property
     def SQLALCHEMY_DATABASE_URI(self):
         return f"postgresql+psycopg2://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
@@ -93,7 +84,6 @@ class Config:
             "worker_prefetch_multiplier": self.CELERY_WORKER_PREFETCH_MULTIPLIER,
             "task_acks_late": self.CELERY_TASK_ACKS_LATE,
             "worker_disable_rate_limits": self.CELERY_WORKER_DISABLE_RATE_LIMITS,
-            "task_routes": self.CELERY_TASK_ROUTES,
             "broker_connection_retry_on_startup": self.CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP,
         }
 
