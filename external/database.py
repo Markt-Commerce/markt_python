@@ -33,8 +33,7 @@ class Database:
             from app.orders.models import Order, Shipment
             from app.payments.models import Payment, Transaction
             from app.socials.models import (
-                ProductLike,
-                ProductComment,
+                ProductReview,
                 ProductView,
                 Follow,
                 Post,
