@@ -52,8 +52,7 @@ class Product(BaseModel, StatusMixin, UniqueIdMixin):
     tags = db.relationship("ProductTag", back_populates="product")
 
     # Social features
-    likes = db.relationship("ProductLike", back_populates="product")
-    comments = db.relationship("ProductComment", back_populates="product")
+    reviews = db.relationship("ProductReview", back_populates="product")
     # shares = db.relationship("ProductShare", back_populates="product")
     views = db.relationship("ProductView", back_populates="product")
 
@@ -79,37 +78,38 @@ class Product(BaseModel, StatusMixin, UniqueIdMixin):
         )
 
     @hybrid_property
-    def like_count(self):
-        """Get the count of likes for this product"""
-        return len(self.likes) if self.likes else 0
+    def average_rating(self):
+        if not self.reviews:
+            return 0
+        ratings = [r.rating for r in self.reviews if r.rating is not None]
+        return sum(ratings) / len(ratings) if ratings else 0
 
-    @like_count.expression
-    def like_count(cls):
-        """SQL expression for like count"""
-        from app.socials.models import ProductLike
+    @average_rating.expression
+    def average_rating(cls):
+        from app.socials.models import ProductReview
 
         return (
-            select(func.count(ProductLike.id))
-            .where(ProductLike.product_id == cls.id)
+            select(func.avg(ProductReview.rating))
+            .where(ProductReview.product_id == cls.id)
             .correlate(cls)
-            .scalar_subquery()  # or `.as_scalar()` for older versions
+            .scalar_subquery()
         )
 
     @hybrid_property
-    def comment_count(self):
-        """Get the count of comments for this product"""
-        return len(self.comments) if self.comments else 0
+    def review_count(self):
+        return len([r for r in self.reviews if r.content])
 
-    @comment_count.expression
-    def comment_count(cls):
-        """SQL expression for comment count"""
-        from app.socials.models import ProductComment
+    @review_count.expression
+    def review_count(cls):
+        from app.socials.models import ProductReview
 
         return (
-            select(func.count(ProductComment.id))
-            .where(ProductComment.product_id == cls.id)
+            select(func.count(ProductReview.id))
+            .where(
+                ProductReview.product_id == cls.id, ProductReview.content.isnot(None)
+            )
             .correlate(cls)
-            .scalar_subquery()  # or `.as_scalar()` for older versions
+            .scalar_subquery()
         )
 
 

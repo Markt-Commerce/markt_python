@@ -39,13 +39,13 @@ class NotificationService:
             "title": "New follower",
             "message": "{username} started following you",
         },
-        NotificationType.PRODUCT_LIKE: {
-            "title": "Product liked",
-            "message": "{username} liked your product {product_name}",
+        NotificationType.PRODUCT_REVIEW: {
+            "title": "New Review",
+            "message": "{username} reviewed {product_name} with {rating} stars",
         },
-        NotificationType.PRODUCT_COMMENT: {
-            "title": "New product comment",
-            "message": "{username} commented on your product {product_name}",
+        NotificationType.REVIEW_UPVOTE: {
+            "title": "Review Upvoted",
+            "message": "{username} found your review helpful",
         },
         NotificationType.ORDER_UPDATE: {
             "title": "Order update",
@@ -82,12 +82,12 @@ class NotificationService:
             "immediate_websocket": True,
             "push_when_offline": True,
         },
-        NotificationType.PRODUCT_LIKE: {
+        NotificationType.PRODUCT_REVIEW: {
             "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
             "immediate_websocket": True,
             "push_when_offline": True,
         },
-        NotificationType.PRODUCT_COMMENT: {
+        NotificationType.REVIEW_UPVOTE: {
             "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
             "immediate_websocket": True,
             "push_when_offline": True,
@@ -158,6 +158,7 @@ class NotificationService:
                 "product_name": metadata_.get("product_name", "your product")
                 if metadata_
                 else "your product",
+                "rating": metadata_.get("rating", 0) if metadata_ else 0,
                 "order_id": reference_id or "N/A",
                 "status": metadata_.get("status", "updated")
                 if metadata_
@@ -223,7 +224,8 @@ class NotificationService:
                 if remaining_channels:
                     from .tasks import deliver_notification
 
-                    deliver_notification.delay(notification_data, remaining_channels)
+                    channel_values = [channel.value for channel in remaining_channels]
+                    deliver_notification.delay(notification_data, channel_values)
 
                 logger.info(
                     f"Notification created for user {user_id}, websocket_delivered={websocket_delivered}"

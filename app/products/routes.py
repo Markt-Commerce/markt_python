@@ -10,9 +10,9 @@ from app.libs.decorators import seller_required, buyer_required
 from app.libs.schemas import PaginationQueryArgs
 from app.socials.services import ProductSocialService
 from app.socials.schemas import (
-    ProductLikeSchema,
-    ProductCommentSchema,
-    ProductCommentsSchema,
+    ProductReviewSchema,
+    ProductReviewsSchema,
+    ReviewUpvoteSchema,
 )
 
 # app imports
@@ -94,50 +94,44 @@ class ProductBulkCreate(MethodView):
         )
 
 
-# Product Discovery
-# -----------------------------------------------
 @bp.route("/trending")
 class TrendingProducts(MethodView):
-    @bp.response(200, ProductSchema(many=True))
-    def get(self):
-        """Get trending products"""
-        # TODO: Algorithm based on views, purchases, likes
-        # TODO: Time-bound trending window
-
-
-# -----------------------------------------------
-
-
-@bp.route("/<product_id>/like")
-class ProductLike(MethodView):
-    @login_required
-    @bp.response(201, ProductLikeSchema)
-    def post(self, product_id):
-        """Like a product"""
-        return ProductSocialService.like_product(current_user.id, product_id)
-
-
-@bp.route("/<product_id>/comments")
-class ProductComments(MethodView):
+    # @cache.cached(timeout=300)  # 5 minute cache
     @bp.arguments(PaginationQueryArgs, location="query")
-    @bp.response(200, ProductCommentsSchema)
+    @bp.response(200, ProductSchema(many=True))
+    def get(self, args):
+        """Get trending products with smart personalization"""
+        return ProductService.get_trending_products(
+            user_id=current_user.id if current_user.is_authenticated else None,
+            limit=min(args.get("per_page", 10), 50),
+        )
+
+
+@bp.route("/<product_id>/reviews")
+class ProductReviews(MethodView):
+    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.response(200, ProductReviewsSchema)
     def get(self, args, product_id):
-        """Get product comments"""
-        return ProductSocialService.get_product_comments(
-            product_id, page=args.get("page", 1), per_page=args.get("per_page", 20)
+        """Get product reviews"""
+        return ProductSocialService.get_product_reviews(
+            product_id, page=args.get("page", 1), per_page=args.get("per_page", 10)
         )
 
     @login_required
-    @bp.arguments(ProductCommentSchema)
-    @bp.response(201, ProductCommentSchema)
-    def post(self, comment_data, product_id):
-        """Add comment to product"""
-        return ProductSocialService.add_product_comment(
-            current_user.id,
-            product_id,
-            comment_data["content"],
-            comment_data.get("parent_id"),
-        )
+    @bp.arguments(ProductReviewSchema)
+    @bp.response(201, ProductReviewSchema)
+    def post(self, data, product_id):
+        """Create product review"""
+        return ProductSocialService.create_review(current_user.id, product_id, data)
+
+
+@bp.route("/reviews/<review_id>/upvote")
+class ReviewUpvote(MethodView):
+    @login_required
+    @bp.response(200, ReviewUpvoteSchema)
+    def post(self, review_id):
+        """Upvote a review"""
+        return ProductSocialService.upvote_review(current_user.id, review_id)
 
 
 @bp.route("/<product_id>/view")

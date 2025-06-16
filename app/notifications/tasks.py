@@ -22,13 +22,11 @@ def deliver_notification(self, notification_data: Dict, channels: List[str]):
 
         for channel in channels:
             try:
-                from .services import DeliveryChannel
-
-                if channel == DeliveryChannel.PUSH.value:
+                if channel == "push":  # DeliveryChannel.PUSH.value
                     send_push_notification.delay(notification_data)
-                elif channel == DeliveryChannel.EMAIL.value:
+                elif channel == "email":  # DeliveryChannel.EMAIL.value
                     send_email_notification.delay(notification_data)
-                elif channel == DeliveryChannel.WEBSOCKET.value:
+                elif channel == "websocket":  # DeliveryChannel.WEBSOCKET.value
                     from main.extensions import socketio
 
                     # Fallback WebSocket delivery (if immediate delivery failed)
