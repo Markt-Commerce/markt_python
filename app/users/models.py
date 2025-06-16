@@ -25,18 +25,21 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
     address = db.relationship("UserAddress", uselist=False, back_populates="user")
     buyer_account = db.relationship("Buyer", uselist=False, back_populates="user")
     seller_account = db.relationship("Seller", uselist=False, back_populates="user")
+    settings = db.relationship(
+        "UserSettings",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
     requests = db.relationship("BuyerRequest", back_populates="user", lazy="dynamic")
+    product_reviews = db.relationship(
+        "ProductReview", back_populates="user", lazy="dynamic"
+    )
+
     notifications = db.relationship(
         "Notification", back_populates="user", lazy="dynamic"
     )
     transactions = db.relationship("Transaction", back_populates="user", lazy="dynamic")
-    product_likes = db.relationship(
-        "ProductLike", back_populates="user", lazy="dynamic"
-    )
-    product_comments = db.relationship(
-        "ProductComment", back_populates="user", lazy="dynamic"
-    )
-
     post_likes = db.relationship("PostLike", back_populates="user", lazy="dynamic")
     post_comments = db.relationship(
         "PostComment", back_populates="user", lazy="dynamic"
@@ -209,3 +212,16 @@ class UserAddress(BaseModel):
     postal_code = db.Column(db.String(20))
 
     user = db.relationship("User", back_populates="address")
+
+
+class UserSettings(BaseModel):
+    __tablename__ = "user_settings"
+
+    user_id = db.Column(db.String(12), db.ForeignKey("users.id"), primary_key=True)
+    email_notifications = db.Column(db.Boolean, default=True)
+    push_notifications = db.Column(db.Boolean, default=True)
+    sms_notifications = db.Column(db.Boolean, default=False)
+    privacy_public_profile = db.Column(db.Boolean, default=False)
+    preferred_language = db.Column(db.String(5), default="en")
+
+    user = db.relationship("User", back_populates="settings", uselist=False)

@@ -20,12 +20,18 @@ from .schemas import (
     PasswordResetConfirmSchema,
     UserPaginationSchema,
     UserProfileSchema,
-    FeedSchema,
     PublicProfileSchema,
     UsernameAvailableSchema,
     UsernameCheckSchema,
+    BuyerCreateSchema,
+    SellerCreateSchema,
+    UserUpdateSchema,
+    BuyerUpdateSchema,
+    SellerUpdateSchema,
+    SettingsSchema,
+    SettingsUpdateSchema,
 )
-from .services import AuthService, UserService
+from .services import AuthService, UserService, AccountService
 from .models import User
 
 bp = Blueprint("users", __name__, description="User operations", url_prefix="/users")
@@ -87,8 +93,84 @@ class UserProfile(MethodView):
         except ValueError as e:
             abort(400, message=str(e))
 
-    def patch(self):
-        pass
+    @login_required
+    @bp.arguments(UserUpdateSchema)
+    @bp.response(200, UserProfileSchema)
+    def patch(self, data):
+        """Update user profile"""
+        try:
+            updated_user = UserService.update_user_profile(current_user.id, data)
+            return UserService.get_user_profile(updated_user.id)
+        except AuthError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/create-buyer")
+class CreateBuyerAccount(MethodView):
+    @login_required
+    @bp.arguments(BuyerCreateSchema)
+    @bp.response(201, UserProfileSchema)
+    def post(self, data):
+        """Create buyer account for existing user"""
+        try:
+            if current_user.is_buyer:
+                abort(400, message="Buyer account already exists")
+
+            AccountService.create_buyer_account(current_user.id, data)
+            return UserService.get_user_profile(current_user.id)
+        except AuthError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/create-seller")
+class CreateSellerAccount(MethodView):
+    @login_required
+    @bp.arguments(SellerCreateSchema)
+    @bp.response(201, UserProfileSchema)
+    def post(self, data):
+        """Create seller account for existing user"""
+        try:
+            if current_user.is_seller:
+                abort(400, message="Seller account already exists")
+
+            AccountService.create_seller_account(current_user.id, data)
+            return UserService.get_user_profile(current_user.id)
+        except AuthError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/profile/buyer")
+class BuyerProfile(MethodView):
+    @login_required
+    @bp.arguments(BuyerUpdateSchema)
+    @bp.response(200, UserProfileSchema)
+    def patch(self, data):
+        """Update buyer profile"""
+        try:
+            if not current_user.is_buyer:
+                abort(400, message="Buyer account not found")
+
+            UserService.update_buyer_profile(current_user.id, data)
+            return UserService.get_user_profile(current_user.id)
+        except AuthError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/profile/seller")
+class SellerProfile(MethodView):
+    @login_required
+    @bp.arguments(SellerUpdateSchema)
+    @bp.response(200, UserProfileSchema)
+    def patch(self, data):
+        """Update seller profile"""
+        try:
+            if not current_user.is_seller:
+                abort(400, message="Seller account not found")
+
+            UserService.update_seller_profile(current_user.id, data)
+            return UserService.get_user_profile(current_user.id)
+        except AuthError as e:
+            abort(e.status_code, message=e.message)
 
 
 @bp.route("/switch-role")
@@ -145,34 +227,20 @@ class UserList(MethodView):
             abort(500, message=str(e))
 
 
-# Social Features
-# -----------------------------------------------
-@bp.route("/<user_id>/follow")
-class FollowUser(MethodView):
+@bp.route("/settings")
+class UserSettings(MethodView):
     @login_required
-    @bp.response(204)
-    def post(self, user_id):
-        """Follow another user"""
-        # TODO: Implement follow logic
-        # TODO: Add notification to followed user
-        # TODO: Update follower/following counts
-
-
-@bp.route("/feed")
-class UserFeed(MethodView):
-    @login_required
-    @bp.response(200, FeedSchema(many=True))
+    @bp.response(200, SettingsSchema)
     def get(self):
-        """Get personalized feed (products + social content)"""
-        # TODO: Mix products from followed sellers + social content
-        # TODO: Implement algorithmic feed ranking
-        # TODO: Add pagination
+        """Get user settings"""
+
+    @login_required
+    @bp.arguments(SettingsUpdateSchema)
+    @bp.response(200, SettingsSchema)
+    def patch(self, data):
+        """Update user settings"""
 
 
-# -----------------------------------------------
-
-# Profile Enhancements
-# -----------------------------------------------
 @bp.route("/profile/picture", methods=["POST"])
 class ProfilePictureUpload(MethodView):
     @login_required
