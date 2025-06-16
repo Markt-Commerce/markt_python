@@ -24,12 +24,24 @@ def upgrade():
     followtype_enum.create(op.get_bind())
     
     notificationtype_enum = postgresql.ENUM(
-        'POST_LIKE', 'POST_COMMENT', 'NEW_FOLLOWER', 'PRODUCT_LIKE', 
-        'PRODUCT_COMMENT', 'ORDER_UPDATE', 'SHIPMENT_UPDATE', 
+        'POST_LIKE', 'POST_COMMENT', 'NEW_FOLLOWER', 'PRODUCT_REVIEW', 
+        'REVIEW_UPVOTE', 'ORDER_UPDATE', 'SHIPMENT_UPDATE', 
         'PROMOTIONAL', 'SYSTEM_ALERT', name='notificationtype'
     )
     notificationtype_enum.create(op.get_bind())
 
+    op.create_table('user_settings',
+    sa.Column('user_id', sa.String(length=12), nullable=False),
+    sa.Column('email_notifications', sa.Boolean(), nullable=True),
+    sa.Column('push_notifications', sa.Boolean(), nullable=True),
+    sa.Column('sms_notifications', sa.Boolean(), nullable=True),
+    sa.Column('privacy_public_profile', sa.Boolean(), nullable=True),
+    sa.Column('preferred_language', sa.String(length=5), nullable=True),
+    sa.Column('created_at', sa.DateTime(), nullable=False),
+    sa.Column('updated_at', sa.DateTime(), nullable=False),
+    sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
+    sa.PrimaryKeyConstraint('user_id')
+    )
     op.create_table('posts',
     sa.Column('id', sa.String(length=12), nullable=False),
     sa.Column('seller_id', sa.Integer(), nullable=True),
@@ -86,12 +98,31 @@ def upgrade():
     sa.ForeignKeyConstraint(['product_id'], ['products.id'], ),
     sa.PrimaryKeyConstraint('post_id', 'product_id')
     )
+    op.create_table('product_reviews',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('user_id', sa.String(length=12), nullable=True),
+    sa.Column('product_id', sa.String(length=12), nullable=True),
+    sa.Column('order_id', sa.String(length=12), nullable=True),
+    sa.Column('rating', sa.Integer(), nullable=True),
+    sa.Column('title', sa.String(length=100), nullable=True),
+    sa.Column('content', sa.Text(), nullable=True),
+    sa.Column('upvotes', sa.Integer(), nullable=True),
+    sa.Column('is_verified', sa.Boolean(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), nullable=False),
+    sa.Column('updated_at', sa.DateTime(), nullable=False),
+    sa.ForeignKeyConstraint(['order_id'], ['orders.id'], ),
+    sa.ForeignKeyConstraint(['product_id'], ['products.id'], ),
+    sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.drop_table('product_comments')
+    op.drop_table('product_likes')
     with op.batch_alter_table('follows', schema=None) as batch_op:
         batch_op.add_column(sa.Column('follow_type', sa.Enum('CUSTOMER', 'PEER', name='followtype'), nullable=True))
         batch_op.create_index('idx_followee_follower', ['followee_id', 'follower_id'], unique=False)
 
     with op.batch_alter_table('notifications', schema=None) as batch_op:
-        batch_op.add_column(sa.Column('type', sa.Enum('POST_LIKE', 'POST_COMMENT', 'NEW_FOLLOWER', 'PRODUCT_LIKE', 'PRODUCT_COMMENT', 'ORDER_UPDATE', 'SHIPMENT_UPDATE', 'PROMOTIONAL', 'SYSTEM_ALERT', name='notificationtype'), nullable=False))
+        batch_op.add_column(sa.Column('type', sa.Enum('POST_LIKE', 'POST_COMMENT', 'NEW_FOLLOWER', 'PRODUCT_REVIEW', 'REVIEW_UPVOTE', 'ORDER_UPDATE', 'SHIPMENT_UPDATE', 'PROMOTIONAL', 'SYSTEM_ALERT', name='notificationtype'), nullable=False))
         batch_op.add_column(sa.Column('title', sa.String(length=100), nullable=True))
         batch_op.add_column(sa.Column('is_seen', sa.Boolean(), nullable=True))
         batch_op.add_column(sa.Column('reference_type', sa.String(length=50), nullable=True))
@@ -130,7 +161,7 @@ def downgrade():
         # FIXED: Use explicit USING clause for type conversion
         # First, clear any non-numeric data to avoid casting errors
         op.execute("UPDATE notifications SET reference_id = NULL WHERE reference_id !~ '^[0-9]+$'")
-        
+
         # Now safely cast to integer with USING clause
         batch_op.alter_column('reference_id',
                existing_type=sa.String(length=12),
@@ -153,6 +184,29 @@ def downgrade():
         batch_op.drop_index('idx_followee_follower')
         batch_op.drop_column('follow_type')
 
+    op.create_table('product_likes',
+    sa.Column('user_id', sa.VARCHAR(length=12), autoincrement=False, nullable=False),
+    sa.Column('product_id', sa.VARCHAR(length=12), autoincrement=False, nullable=False),
+    sa.Column('created_at', postgresql.TIMESTAMP(), server_default=sa.text('now()'), autoincrement=False, nullable=True),
+    sa.Column('updated_at', postgresql.TIMESTAMP(), autoincrement=False, nullable=False),
+    sa.ForeignKeyConstraint(['product_id'], ['products.id'], name='product_likes_product_id_fkey'),
+    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name='product_likes_user_id_fkey'),
+    sa.PrimaryKeyConstraint('user_id', 'product_id', name='product_likes_pkey')
+    )
+    op.create_table('product_comments',
+    sa.Column('id', sa.INTEGER(), autoincrement=True, nullable=False),
+    sa.Column('user_id', sa.VARCHAR(length=12), autoincrement=False, nullable=True),
+    sa.Column('product_id', sa.VARCHAR(length=12), autoincrement=False, nullable=True),
+    sa.Column('content', sa.TEXT(), autoincrement=False, nullable=True),
+    sa.Column('parent_id', sa.INTEGER(), autoincrement=False, nullable=True),
+    sa.Column('created_at', postgresql.TIMESTAMP(), autoincrement=False, nullable=False),
+    sa.Column('updated_at', postgresql.TIMESTAMP(), autoincrement=False, nullable=False),
+    sa.ForeignKeyConstraint(['parent_id'], ['product_comments.id'], name='product_comments_parent_id_fkey'),
+    sa.ForeignKeyConstraint(['product_id'], ['products.id'], name='product_comments_product_id_fkey'),
+    sa.ForeignKeyConstraint(['user_id'], ['users.id'], name='product_comments_user_id_fkey'),
+    sa.PrimaryKeyConstraint('id', name='product_comments_pkey')
+    )
+    op.drop_table('product_reviews')
     op.drop_table('post_products')
     op.drop_table('post_media')
     op.drop_table('post_likes')
@@ -162,6 +216,7 @@ def downgrade():
         batch_op.drop_index('idx_post_search', postgresql_using='gin')
 
     op.drop_table('posts')
+    op.drop_table('user_settings')
 
     # Drop enum types
     notificationtype_enum = postgresql.ENUM(name='notificationtype')
