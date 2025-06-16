@@ -1,10 +1,12 @@
 import logging
 import math
 from datetime import datetime
+import time
 
 # package imports
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import joinedload
+from redis.exceptions import RedisError, ConnectionError as RedisConnectionError
 
 # project imports
 from external.database import db
@@ -12,11 +14,12 @@ from external.redis import redis_client
 
 from app.libs.session import session_scope
 from app.libs.pagination import Paginator
-from app.libs.errors import NotFoundError, ValidationError, ConflictError
+from app.libs.errors import NotFoundError, ValidationError, ConflictError, APIError
 
-from app.users.models import User, Seller
+from app.users.models import User, Seller, SellerVerificationStatus
 from app.products.models import Product, ProductStatus
-from app.products.services import ProductService
+from app.products.services import ProductService, ProductStatsService
+from app.orders.models import Order, OrderStatus, OrderItem
 from app.notifications.models import NotificationType
 
 # from app.notifications.services import NotificationService
@@ -31,8 +34,7 @@ from .models import (
     PostComment,
     PostStatus,
     FollowType,
-    ProductLike,
-    ProductComment,
+    ProductReview,
     ProductView,
 )
 from .constants import POST_STATUS_TRANSITIONS
@@ -93,6 +95,8 @@ class PostService:
         except SQLAlchemyError as e:
             logger.error(f"Error creating post: {str(e)}")
             raise ConflictError("Failed to create post")
+        except (RedisError, RedisConnectionError) as e:
+            logger.warning(f"Redis error while creating post: {str(e)}")
 
     @staticmethod
     def get_post(post_id):
@@ -182,6 +186,8 @@ class PostService:
         except SQLAlchemyError as e:
             logger.error(f"Error liking post: {str(e)}")
             raise ConflictError("Failed to like post")
+        except (RedisError, RedisConnectionError) as e:
+            logger.warning(f"Redis error while liking post: {str(e)}")
 
     @staticmethod
     def unlike_post(user_id, post_id):
@@ -199,6 +205,8 @@ class PostService:
         except SQLAlchemyError as e:
             logger.error(f"Error unliking post: {str(e)}")
             raise ConflictError("Failed to unlike post")
+        except (RedisError, RedisConnectionError) as e:
+            logger.warning(f"Redis error while unliking post: {str(e)}")
 
     @staticmethod
     def update_post(post_id, seller_id, update_data):
@@ -293,6 +301,8 @@ class PostService:
         except SQLAlchemyError as e:
             logger.error(f"Error changing post status {post_id}: {str(e)}")
             raise ConflictError("Failed to change post status")
+        except (RedisError, RedisConnectionError) as e:
+            logger.warning(f"Redis error while changing post status: {str(e)}")
 
     @staticmethod
     def get_seller_drafts(seller_id, page=1, per_page=20):
@@ -360,6 +370,8 @@ class PostService:
         except SQLAlchemyError as e:
             logger.error(f"Error adding comment: {str(e)}")
             raise ConflictError("Failed to add comment")
+        except (RedisError, RedisConnectionError) as e:
+            logger.warning(f"Redis error while adding comment: {str(e)}")
 
     @staticmethod
     def update_comment(comment_id, user_id, content):
@@ -421,97 +433,157 @@ class PostService:
 
 class ProductSocialService:
     @staticmethod
-    def like_product(user_id, product_id):
+    def create_review(user_id, product_id, data):
         try:
             with session_scope() as session:
-                # Check if like already exists
-                existing_like = (
-                    session.query(ProductLike)
+                product = session.query(Product).get(product_id)
+                if not product:
+                    raise NotFoundError("Product not found")
+
+                # Verify purchase if order_id provided
+                if data.get("order_id"):
+                    order = (
+                        session.query(Order)
+                        .filter_by(
+                            id=data["order_id"],
+                            buyer_id=user_id,
+                            status=OrderStatus.DELIVERED,
+                        )
+                        .join(OrderItem)
+                        .filter_by(product_id=product_id)
+                        .first()
+                    )
+
+                    if not order:
+                        raise APIError(
+                            "You must purchase this product before reviewing", 403
+                        )
+
+                    data["is_verified"] = True
+
+                # Check for existing review
+                existing = (
+                    session.query(ProductReview)
                     .filter_by(user_id=user_id, product_id=product_id)
                     .first()
                 )
 
-                if existing_like:
-                    raise ConflictError("Product already liked")
+                if existing:
+                    raise APIError("You've already reviewed this product", 400)
 
-                # Verify product exists and is active
-                product = session.query(Product).get(product_id)
-                if not product or product.status != Product.Status.ACTIVE:
-                    raise NotFoundError("Product not available")
+                # Create rating
+                review = ProductReview(user_id=user_id, product_id=product_id, **data)
+                session.add(review)
+                session.flush()
 
-                like = ProductLike(user_id=user_id, product_id=product_id)
-                session.add(like)
+                # Update Redis
+                redis_key = f"product:{product_id}:stats"
 
-                # Update Redis counters
-                redis_client.zincrby(f"product:{product_id}:likes", 1, user_id)
-                redis_client.zincrby(f"user:{user_id}:liked_products", 1, product_id)
+                with redis_client.pipeline() as pipe:
+                    if data.get("rating"):
+                        pipe.hincrby(redis_key, "rating_sum", data["rating"])
+                        pipe.hincrby(redis_key, "rating_count", 1)
 
-                # Notify product owner if not self-like
-                if product.seller.user_id != user_id:
-                    from app.notifications.services import NotificationService
+                    pipe.hincrby(redis_key, "review_count", 1)
+                    pipe.execute()
 
-                    NotificationService.create_notification(
-                        user_id=product.seller.user_id,
-                        notification_type=NotificationType.PRODUCT_LIKE,
-                        actor_id=user_id,
-                        reference_type="product",
-                        reference_id=product_id,
-                    )
+                # Update all derived stats
+                ProductStatsService.update_product_stats(product_id)
 
-                return like
+                # Trigger notification
+                from app.notifications.services import NotificationService
+
+                NotificationService.create_notification(
+                    user_id=product.seller.user_id,
+                    notification_type=NotificationType.PRODUCT_REVIEW,
+                    actor_id=user_id,
+                    reference_type="product",
+                    reference_id=product_id,
+                    metadata_={
+                        "product_name": product.name,
+                        "rating": data.get("rating", 0),
+                    },
+                )
+
+                # Trigger socket event
+                # from main.extensions import socketio
+                # socketio.emit('review_added', {
+                #     'product_id': product_id,
+                #     'review_count': int(redis_client.hget(redis_key, "review_count")),
+                #     'avg_rating': float(redis_client.hget(redis_key, "avg_rating") or 0),
+                #     'user_id': user_id,
+                #     'rating': data.get('rating')
+                # }, room=f"product_{product_id}")
+
+                return review
+        except Exception as e:
+            logger.error(f"Error adding review: {str(e)}")
+            raise APIError("Failed to add review", 500)
         except SQLAlchemyError as e:
-            logger.error(f"Error liking product: {str(e)}")
-            raise ConflictError("Failed to like product")
+            logger.error(f"Error adding review: {str(e)}")
+            raise ConflictError("Failed to add review")
+        except (RedisError, RedisConnectionError) as e:
+            logger.warning(f"Redis error while adding review: {str(e)}")
 
     @staticmethod
-    def add_product_comment(user_id, product_id, content, parent_id=None):
+    def upvote_review(user_id, review_id):
         try:
             with session_scope() as session:
-                product = session.query(Product).get(product_id)
-                if not product or product.status != Product.Status.ACTIVE:
-                    raise NotFoundError("Product not found or not active")
+                review = session.query(ProductReview).get(review_id)
+                if not review:
+                    raise NotFoundError("Review not found")
 
-                comment = ProductComment(
-                    user_id=user_id,
-                    product_id=product_id,
-                    content=content,
-                    parent_id=parent_id,
+                # Prevent self-upvoting
+                if review.user_id == user_id:
+                    raise APIError("Cannot upvote your own review", 400)
+
+                review.upvotes += 1
+
+                # Update Redis
+                redis_client.zincrby(
+                    f"product:{review.product_id}:helpful_reviews", 1, review_id
                 )
-                session.add(comment)
+                redis_client.zincrby(f"user:{user_id}:upvoted_reviews", 1, review_id)
 
-                # Update Redis counters
-                redis_client.zincrby(f"product:{product_id}:comments", 1, user_id)
-
-                # Notify product owner if not self-comment
-                if product.seller.user_id != user_id:
+                # Notify review author if different from upvoter
+                if review.user_id != user_id:
                     from app.notifications.services import NotificationService
 
                     NotificationService.create_notification(
-                        user_id=product.seller.user_id,
-                        notification_type=NotificationType.PRODUCT_COMMENT,
+                        user_id=review.user_id,
+                        notification_type=NotificationType.REVIEW_UPVOTE,
                         actor_id=user_id,
-                        reference_type="product",
-                        reference_id=product_id,
+                        reference_type="review",
+                        reference_id=review_id,
+                        metadata_={},  # No metadata needed for upvote template
                     )
 
-                return comment
+                # Trigger socket event
+                # from main.extensions import socketio
+                # socketio.emit('review_upvoted', {
+                #     'review_id': review_id,
+                #     'user_id': user_id,
+                #     'upvotes': review.upvotes,
+                #     'product_id': review.product_id
+                # }, room=f"product_{review.product_id}")
+
+                return review
         except SQLAlchemyError as e:
-            logger.error(f"Error adding product comment: {str(e)}")
-            raise ConflictError("Failed to add comment")
+            logger.error(f"Error upvoting review: {str(e)}")
+            raise ConflictError("Failed to upvote review")
+        except (RedisError, RedisConnectionError) as e:
+            logger.warning(f"Redis error while upvoting review: {str(e)}")
 
     @staticmethod
-    def get_product_comments(product_id, page=1, per_page=20):
-        """Get comments for a product"""
+    def get_product_reviews(product_id, page=1, per_page=10):
         with session_scope() as session:
             base_query = (
-                session.query(ProductComment)
-                .filter_by(product_id=product_id, parent_id=None)  # Only top-level
-                .options(
-                    joinedload(ProductComment.user),
-                    joinedload(ProductComment.replies).joinedload(ProductComment.user),
-                )
-                .order_by(ProductComment.created_at.desc())
+                session.query(ProductReview)
+                .filter_by(product_id=product_id)
+                .options(joinedload(ProductReview.user))
+                .order_by(ProductReview.upvotes.desc(), ProductReview.created_at.desc())
             )
+
             paginator = Paginator(base_query, page=page, per_page=per_page)
             return paginator.paginate({})
 
@@ -525,12 +597,17 @@ class ProductSocialService:
                 )
                 session.add(view)
 
-                # Update Redis counters
-                if user_id:
-                    redis_client.zincrby(
-                        f"user:{user_id}:viewed_products", 1, product_id
-                    )
-                redis_client.zincrby("popular_products", 1, product_id)
+                # Update Redis
+                redis_key = f"product:{product_id}:stats"
+
+                with redis_client.pipeline() as pipe:
+                    if user_id:
+                        pipe.zincrby(f"user:{user_id}:viewed_products", 1, product_id)
+
+                    pipe.zincrby("trending_products", 1, product_id)
+                    pipe.hincrby(redis_key, "view_count", 1)
+                    pipe.hset(redis_key, "last_viewed", time.time())
+                    pipe.execute()
 
                 return view
         except SQLAlchemyError as e:
@@ -805,23 +882,29 @@ class FeedService:
 
     @staticmethod
     def _calculate_product_score(product, user_id):
-        """Calculate composite score for a product"""
+        """Updated scoring algorithm"""
         score = 0
 
         # 1. Base score
         score += 10
 
-        # 2. Popularity signals
+        # 2. Engagement signals
         score += math.log1p(product.view_count) * 1.2
-        score += math.log1p(product.like_count) * 1.5
+        score += math.log1p(product.review_count) * 1.5
 
-        # 3. Commerce signals
-        if product.seller.verification_status == "verified":
+        # 3. Rating quality
+        if product.average_rating >= 4:
+            score += 10
+        elif product.average_rating >= 3:
             score += 5
 
-        # 4. Personalization
+        # 4. Seller reputation
+        if product.seller.verification_status == SellerVerificationStatus.VERIFIED:
+            score += 5
+
+        # 5. Personalization
         if FeedService._matches_user_preferences(product, user_id):
-            score *= 2
+            score *= 1.5
 
         return score
 

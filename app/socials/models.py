@@ -29,38 +29,25 @@ class Follow(BaseModel):
     )
 
 
-class ProductLike(BaseModel):
-    __tablename__ = "product_likes"
-
-    user_id = db.Column(db.String(12), db.ForeignKey("users.id"), primary_key=True)
-    product_id = db.Column(
-        db.String(12), db.ForeignKey("products.id"), primary_key=True
-    )
-    created_at = db.Column(db.DateTime, server_default=db.func.now())
-
-    product = db.relationship("Product", back_populates="likes")
-    user = db.relationship("User", back_populates="product_likes")
-
-
-class ProductComment(BaseModel):
-    __tablename__ = "product_comments"
+class ProductReview(BaseModel):
+    __tablename__ = "product_reviews"
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.String(12), db.ForeignKey("users.id"))
     product_id = db.Column(db.String(12), db.ForeignKey("products.id"))
+    order_id = db.Column(
+        db.String(12), db.ForeignKey("orders.id"), nullable=True
+    )  # Optional purchase verification
+    rating = db.Column(db.Integer)  # 1-5, nullable for questions
+    title = db.Column(db.String(100))
     content = db.Column(db.Text)
-    parent_id = db.Column(
-        db.Integer, db.ForeignKey("product_comments.id"), nullable=True
-    )
+    upvotes = db.Column(db.Integer, default=0)
+    is_verified = db.Column(db.Boolean, default=False)
 
-    product = db.relationship("Product", back_populates="comments")
-    user = db.relationship("User", back_populates="product_comments")
-    replies = db.relationship(
-        "ProductComment", back_populates="parent", remote_side=[parent_id]
-    )
-    parent = db.relationship(
-        "ProductComment", back_populates="replies", remote_side=[id]
-    )
+    # Relationships
+    user = db.relationship("User", back_populates="product_reviews")
+    product = db.relationship("Product", back_populates="reviews")
+    order = db.relationship("Order")
 
 
 class ProductView(BaseModel):

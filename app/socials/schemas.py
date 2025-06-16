@@ -1,8 +1,11 @@
 from marshmallow import Schema, fields, validate
+
 from app.libs.schemas import PaginationSchema
 from app.libs.errors import ValidationError
 
 from app.products.schemas import ProductSchema
+from app.users.schemas import UserSimpleSchema
+
 from .models import FollowType, PostStatus
 
 
@@ -68,12 +71,6 @@ class PostSchema(Schema):
             return 0
 
 
-class PostDetailSchema(PostSchema):
-    media = fields.List(fields.Nested(PostMediaSchema))
-    products = fields.List(fields.Nested(PostProductSchema))
-    user = fields.Nested("UserProfileSchema")
-
-
 class SellerPostsSchema(Schema):
     items = fields.List(fields.Nested(PostSchema))
     pagination = fields.Nested(PaginationSchema)
@@ -91,7 +88,7 @@ class PostCommentSchema(Schema):
     post_id = fields.Str(dump_only=True)
     content = fields.Str(required=True)
     created_at = fields.DateTime(dump_only=True)
-    user = fields.Nested("UserProfileSchema")
+    user = fields.Nested("UserSimpleSchema")
 
 
 class PostStatusUpdateSchema(Schema):
@@ -119,7 +116,7 @@ class CommentUpdateSchema(Schema):
 class PostDetailSchema(PostSchema):
     media = fields.List(fields.Nested(PostMediaSchema))
     products = fields.List(fields.Nested(PostProductSchema))
-    user = fields.Nested("UserProfileSchema")
+    user = fields.Nested("UserSimpleSchema")
     status = fields.Enum(PostStatus, by_value=True, dump_only=True)
 
 
@@ -156,22 +153,26 @@ class HybridFeedSchema(Schema):
     pagination = fields.Nested(PaginationSchema)
 
 
-class ProductLikeSchema(Schema):
-    user_id = fields.Str(dump_only=True)
-    product_id = fields.Str(dump_only=True)
-    created_at = fields.DateTime(dump_only=True)
-
-
-class ProductCommentSchema(Schema):
+class ProductReviewSchema(Schema):
     id = fields.Int(dump_only=True)
     user_id = fields.Str(dump_only=True)
     product_id = fields.Str(dump_only=True)
+    order_id = fields.Str(required=False)
+    rating = fields.Int(validate=validate.Range(min=1, max=5))
+    title = fields.Str(validate=validate.Length(max=100))
     content = fields.Str(required=True)
+    upvotes = fields.Int(dump_only=True)
+    is_verified = fields.Bool(dump_only=True)
     created_at = fields.DateTime(dump_only=True)
-    user = fields.Nested("UserProfileSchema")
-    replies = fields.List(fields.Nested(lambda: ProductCommentSchema()))
+
+    user = fields.Nested(lambda: UserSimpleSchema(), dump_only=True)
 
 
-class ProductCommentsSchema(Schema):
-    items = fields.List(fields.Nested(ProductCommentSchema))
+class ProductReviewsSchema(Schema):
+    items = fields.List(fields.Nested(ProductReviewSchema))
     pagination = fields.Nested(PaginationSchema)
+
+
+class ReviewUpvoteSchema(Schema):
+    success = fields.Bool()
+    new_count = fields.Int()
