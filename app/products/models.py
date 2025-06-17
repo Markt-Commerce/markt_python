@@ -82,7 +82,7 @@ class Product(BaseModel, StatusMixin, UniqueIdMixin):
         if not self.reviews:
             return 0
         ratings = [r.rating for r in self.reviews if r.rating is not None]
-        return sum(ratings) / len(ratings) if ratings else 0
+        return round(sum(ratings) / len(ratings), 2) if ratings else 0.0
 
     @average_rating.expression
     def average_rating(cls):

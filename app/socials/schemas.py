@@ -49,26 +49,8 @@ class PostSchema(Schema):
     seller_id = fields.Int(dump_only=True)
     caption = fields.Str()
     created_at = fields.DateTime(dump_only=True)
-    like_count = fields.Method("get_like_count")
-    comment_count = fields.Method("get_comment_count")
-
-    def get_like_count(self, obj):
-        # Handle both model instances and dictionaries
-        if hasattr(obj, "likes"):
-            return len(obj.likes) if obj.likes else 0
-        elif isinstance(obj, dict):
-            return obj.get("like_count", 0)
-        else:
-            return 0
-
-    def get_comment_count(self, obj):
-        # Handle both model instances and dictionaries
-        if hasattr(obj, "comments"):
-            return len(obj.comments) if obj.comments else 0
-        elif isinstance(obj, dict):
-            return obj.get("comment_count", 0)
-        else:
-            return 0
+    like_count = fields.Int(dump_only=True)
+    comment_count = fields.Int(dump_only=True)
 
 
 class SellerPostsSchema(Schema):

@@ -22,8 +22,6 @@ from app.products.services import ProductService, ProductStatsService
 from app.orders.models import Order, OrderStatus, OrderItem
 from app.notifications.models import NotificationType
 
-# from app.notifications.services import NotificationService
-
 # app imports
 from .models import (
     Post,
