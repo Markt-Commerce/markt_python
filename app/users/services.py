@@ -121,6 +121,58 @@ class UserService:
             return user
 
     @staticmethod
+    def update_user_profile(user_id, data):
+        with session_scope() as session:
+            user = session.query(User).get(user_id)
+            if not user:
+                raise AuthError("User not found")
+
+            if "phone_number" in data:
+                user.phone_number = data["phone_number"]
+            if "profile_picture" in data:
+                user.profile_picture = data["profile_picture"]
+            if "university" in data:
+                # Handle university info update
+                pass
+
+            session.commit()
+            return user
+
+    @staticmethod
+    def update_buyer_profile(user_id, data):
+        with session_scope() as session:
+            buyer = session.query(Buyer).filter_by(user_id=user_id).first()
+            if not buyer:
+                raise AuthError("Buyer account not found")
+
+            if "buyername" in data:
+                buyer.buyername = data["buyername"]
+            if "shipping_address" in data:
+                buyer.shipping_address = data["shipping_address"]
+
+            session.commit()
+            return buyer
+
+    @staticmethod
+    def update_seller_profile(user_id, data):
+        with session_scope() as session:
+            seller = session.query(Seller).filter_by(user_id=user_id).first()
+            if not seller:
+                raise AuthError("Seller account not found")
+
+            if "shop_name" in data:
+                seller.shop_name = data["shop_name"]
+            if "description" in data:
+                seller.description = data["description"]
+            if "category" in data:
+                seller.category = data["category"]
+            if "policies" in data:
+                seller.policies = data["policies"]
+
+            session.commit()
+            return seller
+
+    @staticmethod
     def list_users(args):
         """Get paginated list of users with filters"""
         from sqlalchemy import or_
@@ -163,10 +215,15 @@ class UserService:
 
     @staticmethod
     def check_username_availability(username):
+        username_lower = username.lower()
+
         with session_scope() as session:
+            # Check reserved names
+            if username_lower in [name.lower() for name in RESERVED_USERNAMES]:
+                return {"available": False, "message": "This username is reserved"}
             exists = session.query(
                 session.query(User)
-                .filter(func.lower(User.username) == func.lower(username))
+                .filter(func.lower(User.username) == username_lower)
                 .exists()
             ).scalar()
 
@@ -176,3 +233,53 @@ class UserService:
                 if exists
                 else "Username available",
             }
+
+
+class AccountService:
+    @staticmethod
+    def create_buyer_account(user_id, data):
+        with session_scope() as session:
+            user = session.query(User).get(user_id)
+            if not user:
+                raise AuthError("User not found")
+            if user.is_buyer:
+                raise AuthError("Buyer account already exists")
+
+            buyer = Buyer(
+                user_id=user.id,
+                buyername=data["buyername"],
+                shipping_address=data.get("shipping_address"),
+            )
+
+            if data.get("university"):
+                # Handle university verification logic
+                pass
+
+            session.add(buyer)
+            user.is_buyer = True
+            return buyer
+
+    @staticmethod
+    def create_seller_account(user_id, data):
+        with session_scope() as session:
+            user = session.query(User).get(user_id)
+            if not user:
+                raise AuthError("User not found")
+            if user.is_seller:
+                raise AuthError("Seller account already exists")
+
+            seller = Seller(
+                user_id=user.id,
+                shop_name=data["shop_name"],
+                description=data["description"],
+                category=data["category"],
+                policies=data.get("policies", {}),
+            )
+
+            if data.get("university"):
+                # Handle university verification logic
+                pass
+
+            session.add(seller)
+            user.is_seller = True
+            return seller

@@ -33,12 +33,16 @@ class Database:
             from app.orders.models import Order, Shipment
             from app.payments.models import Payment, Transaction
             from app.socials.models import (
-                ProductLike,
-                ProductComment,
+                ProductReview,
                 ProductView,
                 Follow,
-                Notification,
+                Post,
+                PostComment,
+                PostLike,
+                PostMedia,
+                PostProduct,
             )
+            from app.notifications.models import Notification
             from app.requests.models import BuyerRequest, SellerOffer, RequestImage
             from app.media.models import Media, MediaVariant, ProductImage
             from app.chats.models import ChatRoom, ChatMessage, ChatOffer

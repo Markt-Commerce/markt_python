@@ -1,7 +1,9 @@
 from enum import Enum
+
 from external.database import db
 from app.libs.models import BaseModel, StatusMixin
 from app.libs.helpers import UniqueIdMixin
+
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy import func, select
@@ -50,20 +52,22 @@ class Product(BaseModel, StatusMixin, UniqueIdMixin):
     tags = db.relationship("ProductTag", back_populates="product")
 
     # Social features
-    likes = db.relationship("ProductLike", back_populates="product")
-    comments = db.relationship("ProductComment", back_populates="product")
+    reviews = db.relationship("ProductReview", back_populates="product")
     # shares = db.relationship("ProductShare", back_populates="product")
     views = db.relationship("ProductView", back_populates="product")
 
     def is_available(self):
         return self.status == self.Status.ACTIVE and self.stock > 0
 
+    # Computed count properties
     @hybrid_property
     def view_count(self):
-        return len(self.views)
+        """Get the count of likes for this product"""
+        return len(self.views) if self.views else 0
 
     @view_count.expression
     def view_count(cls):
+        """SQL expression for view count"""
         from app.socials.models import ProductView
 
         return (
@@ -71,6 +75,41 @@ class Product(BaseModel, StatusMixin, UniqueIdMixin):
             .where(ProductView.product_id == cls.id)
             .correlate(cls)
             .scalar_subquery()  # or `.as_scalar()` for older versions
+        )
+
+    @hybrid_property
+    def average_rating(self):
+        if not self.reviews:
+            return 0
+        ratings = [r.rating for r in self.reviews if r.rating is not None]
+        return round(sum(ratings) / len(ratings), 2) if ratings else 0.0
+
+    @average_rating.expression
+    def average_rating(cls):
+        from app.socials.models import ProductReview
+
+        return (
+            select(func.avg(ProductReview.rating))
+            .where(ProductReview.product_id == cls.id)
+            .correlate(cls)
+            .scalar_subquery()
+        )
+
+    @hybrid_property
+    def review_count(self):
+        return len([r for r in self.reviews if r.content])
+
+    @review_count.expression
+    def review_count(cls):
+        from app.socials.models import ProductReview
+
+        return (
+            select(func.count(ProductReview.id))
+            .where(
+                ProductReview.product_id == cls.id, ProductReview.content.isnot(None)
+            )
+            .correlate(cls)
+            .scalar_subquery()
         )
 
 

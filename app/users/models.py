@@ -1,5 +1,6 @@
 from enum import Enum
 from flask_login import UserMixin
+from datetime import datetime
 
 from app.libs.models import BaseModel
 from app.libs.helpers import UniqueIdMixin
@@ -24,16 +25,24 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
     address = db.relationship("UserAddress", uselist=False, back_populates="user")
     buyer_account = db.relationship("Buyer", uselist=False, back_populates="user")
     seller_account = db.relationship("Seller", uselist=False, back_populates="user")
+    settings = db.relationship(
+        "UserSettings",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
     requests = db.relationship("BuyerRequest", back_populates="user", lazy="dynamic")
+    product_reviews = db.relationship(
+        "ProductReview", back_populates="user", lazy="dynamic"
+    )
+
     notifications = db.relationship(
         "Notification", back_populates="user", lazy="dynamic"
     )
     transactions = db.relationship("Transaction", back_populates="user", lazy="dynamic")
-    product_likes = db.relationship(
-        "ProductLike", back_populates="user", lazy="dynamic"
-    )
-    product_comments = db.relationship(
-        "ProductComment", back_populates="user", lazy="dynamic"
+    post_likes = db.relationship("PostLike", back_populates="user", lazy="dynamic")
+    post_comments = db.relationship(
+        "PostComment", back_populates="user", lazy="dynamic"
     )
 
     # Chat relationships
@@ -134,6 +143,8 @@ class Seller(BaseModel):
     verification_status = db.Column(
         db.Enum(SellerVerificationStatus), default=SellerVerificationStatus.UNVERIFIED
     )
+    is_active = db.Column(db.Boolean, default=True)
+    deactivated_at = db.Column(db.DateTime)
 
     # Relationships
     user = db.relationship("User", back_populates="seller_account")
@@ -141,6 +152,7 @@ class Seller(BaseModel):
     order_items = db.relationship("OrderItem", back_populates="seller")
     offers = db.relationship("SellerOffer", back_populates="seller", lazy="dynamic")
     transactions = db.relationship("Transaction", back_populates="seller")
+    posts = db.relationship("Post", back_populates="seller", lazy="dynamic")
 
     @property
     def pending_order_count(self):
@@ -174,6 +186,16 @@ class Seller(BaseModel):
 
         return query.scalar() or 0
 
+    def deactivate(self):
+        """Deactivate user account"""
+        self.is_active = False
+        self.deactivated_at = datetime.utcnow()
+
+    def activate(self):
+        """Reactivate user account"""
+        self.is_active = True
+        self.deactivated_at = None
+
 
 class UserAddress(BaseModel):
     __tablename__ = "user_addresses"
@@ -190,3 +212,16 @@ class UserAddress(BaseModel):
     postal_code = db.Column(db.String(20))
 
     user = db.relationship("User", back_populates="address")
+
+
+class UserSettings(BaseModel):
+    __tablename__ = "user_settings"
+
+    user_id = db.Column(db.String(12), db.ForeignKey("users.id"), primary_key=True)
+    email_notifications = db.Column(db.Boolean, default=True)
+    push_notifications = db.Column(db.Boolean, default=True)
+    sms_notifications = db.Column(db.Boolean, default=False)
+    privacy_public_profile = db.Column(db.Boolean, default=False)
+    preferred_language = db.Column(db.String(5), default="en")
+
+    user = db.relationship("User", back_populates="settings", uselist=False)

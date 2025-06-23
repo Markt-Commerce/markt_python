@@ -29,6 +29,9 @@ bcrypt==4.0.1
 python-dotenv==1.0.0
 loguru==0.7.0
 
+# Task Queue
+celery==5.3.6
+
 # Others
 boto3
 pillow

@@ -2,10 +2,18 @@
 from flask_smorest import Blueprint, abort
 from flask.views import MethodView
 from flask_login import login_required, current_user
+from flask import request
 
 # project imports
 from app.socials.schemas import ShareSchema, CommentSchema
 from app.libs.decorators import seller_required, buyer_required
+from app.libs.schemas import PaginationQueryArgs
+from app.socials.services import ProductSocialService
+from app.socials.schemas import (
+    ProductReviewSchema,
+    ProductReviewsSchema,
+    ReviewUpvoteSchema,
+)
 
 # app imports
 from .services import ProductService
@@ -86,30 +94,57 @@ class ProductBulkCreate(MethodView):
         )
 
 
-# Product Discovery
-# -----------------------------------------------
 @bp.route("/trending")
 class TrendingProducts(MethodView):
+    # @cache.cached(timeout=300)  # 5 minute cache
+    @bp.arguments(PaginationQueryArgs, location="query")
     @bp.response(200, ProductSchema(many=True))
-    def get(self):
-        """Get trending products"""
-        # TODO: Algorithm based on views, purchases, likes
-        # TODO: Time-bound trending window
+    def get(self, args):
+        """Get trending products with smart personalization"""
+        return ProductService.get_trending_products(
+            user_id=current_user.id if current_user.is_authenticated else None,
+            limit=min(args.get("per_page", 10), 50),
+        )
 
 
-# -----------------------------------------------
+@bp.route("/<product_id>/reviews")
+class ProductReviews(MethodView):
+    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.response(200, ProductReviewsSchema)
+    def get(self, args, product_id):
+        """Get product reviews"""
+        return ProductSocialService.get_product_reviews(
+            product_id, page=args.get("page", 1), per_page=args.get("per_page", 10)
+        )
 
-# Social Commerce Features
-# -----------------------------------------------
-@bp.route("/<product_id>/like")
-class LikeProduct(MethodView):
     @login_required
+    @bp.arguments(ProductReviewSchema)
+    @bp.response(201, ProductReviewSchema)
+    def post(self, data, product_id):
+        """Create product review"""
+        return ProductSocialService.create_review(current_user.id, product_id, data)
+
+
+@bp.route("/reviews/<review_id>/upvote")
+class ReviewUpvote(MethodView):
+    @login_required
+    @bp.response(200, ReviewUpvoteSchema)
+    def post(self, review_id):
+        """Upvote a review"""
+        return ProductSocialService.upvote_review(current_user.id, review_id)
+
+
+@bp.route("/<product_id>/view")
+class ProductView(MethodView):
     @bp.response(204)
     def post(self, product_id):
-        """Like a product"""
-        # TODO: Track likes
-        # TODO: Add to user's favorites
-        # TODO: Notification to seller
+        """Track product view"""
+        ProductSocialService.track_product_view(
+            product_id,
+            current_user.id if current_user.is_authenticated else None,
+            request.remote_addr,
+        )
+        return "", 204
 
 
 @bp.route("/<product_id>/share")
@@ -121,16 +156,6 @@ class ShareProduct(MethodView):
         # TODO: Generate share links
         # TODO: Track shares
         # TODO: Reward system for shares
-
-
-@bp.route("/<product_id>/comments")
-class ProductComments(MethodView):
-    @bp.response(200, CommentSchema(many=True))
-    def get(self, product_id):
-        """Get product comments"""
-        # TODO: Paginated comments
-        # TODO: Nested replies
-        # TODO: Sorting options
 
 
 # -----------------------------------------------

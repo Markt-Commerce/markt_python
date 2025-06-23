@@ -1,16 +1,24 @@
 # python imports
 import logging
+from datetime import datetime
+import time
 
 # package imports
 from sqlalchemy import or_, and_
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import joinedload
 
 # project imports
 from external.database import db
+from external.redis import redis_client
+
 from app.libs.session import session_scope
 from app.libs.pagination import Paginator
 from app.categories.models import ProductCategory, ProductTag
 from app.libs.errors import NotFoundError, ValidationError, ConflictError, APIError
+
+from app.users.models import Seller
+from app.socials.models import Follow, Post, PostProduct, PostStatus
 
 # app imports
 from .models import Product, ProductVariant, ProductInventory
@@ -263,4 +271,171 @@ class ProductService:
 
             return inventory
 
+    @staticmethod
+    def get_recommended_products(user_id, limit=10):
+        """Get personalized product recommendations"""
+        try:
+            with session_scope() as session:
+                # Base query - could be enhanced with ML later
+                query = (
+                    session.query(Product)
+                    .filter(Product.status == Product.Status.ACTIVE)
+                    .options(joinedload(Product.seller), joinedload(Product.images))
+                )
+
+                # Simple recommendation logic (will enhance later)
+                if user_id:
+                    # Get products from followed sellers
+                    followed_sellers = (
+                        session.query(Seller.id)
+                        .join(Follow, Follow.followee_id == Seller.user_id)
+                        .filter(Follow.follower_id == user_id)
+                        .subquery()
+                    )
+
+                    query = query.filter(Product.seller_id.in_(followed_sellers))
+
+                return query.order_by(Product.view_count.desc()).limit(limit).all()
+
+        except Exception as e:
+            logger.error(f"Product recommendations failed: {str(e)}")
+            return []
+
+    @staticmethod
+    def get_trending_products(user_id=None, limit=5):
+        """Get trending products with optional personalization"""
+        try:
+            # Get top products from Redis
+            product_ids = [
+                pid.decode()
+                for pid in redis_client.zrevrange("trending_products", 0, limit - 1)
+            ]
+
+            if not product_ids:
+                return []
+
+            # Get full product data
+            with session_scope() as session:
+                products = (
+                    session.query(Product)
+                    .filter(Product.id.in_(product_ids))
+                    .options(joinedload(Product.seller), joinedload(Product.images))
+                    .all()
+                )
+
+                # Sort in same order as Redis
+                products.sort(key=lambda p: product_ids.index(p.id))
+
+                # Basic personalization
+                if user_id:
+                    viewed = redis_client.zrange(
+                        f"user:{user_id}:viewed_products", 0, -1
+                    )
+                    viewed = {pid.decode() for pid in viewed}
+
+                    for p in products:
+                        if p.id in viewed:
+                            p._personalized_score = (
+                                redis_client.zscore("trending_products", p.id) * 0.7
+                            )  # Reduce score for seen products
+                        else:
+                            p._personalized_score = (
+                                redis_client.zscore("trending_products", p.id) * 1.3
+                            )  # Boost new products
+
+                    products.sort(key=lambda p: p._personalized_score, reverse=True)
+
+                return products[:limit]
+
+        except Exception as e:
+            logger.error(f"Trending fetch failed: {str(e)}")
+            return []
+
+    @staticmethod
+    def update_trending_products():
+        """Optimized trending products using complete Redis stats"""
+        try:
+            # Get all active products
+            product_ids = [
+                p.id
+                for p in Product.query.filter_by(status=Product.Status.ACTIVE).all()
+            ]
+
+            if not product_ids:
+                return
+
+            # Calculate scores in pipeline
+            with redis_client.pipeline() as pipe:
+                pipe.delete("trending_products_temp")
+
+                for pid in product_ids:
+                    # Get all stats in one call
+                    stats = redis_client.hgetall(f"product:{pid}:stats")
+
+                    # Default values
+                    view_count = int(stats.get(b"view_count", 0))
+                    avg_rating = float(stats.get(b"avg_rating", 0))
+                    last_viewed = float(stats.get(b"last_viewed", time.time()))
+
+                    # Calculate days since last view
+                    days_old = (
+                        datetime.now() - datetime.fromtimestamp(last_viewed)
+                    ).days
+
+                    # Calculate score (adjust weights as needed)
+                    score = (
+                        view_count * 0.6
+                        + avg_rating * 10  # 60% view count
+                        + max(0, (7 - days_old))  # 30% rating (scaled up)
+                        * 2  # 10% recency
+                    )
+
+                    pipe.zadd("trending_products_temp", {pid: score})
+
+                # Atomic update
+                pipe.rename("trending_products_temp", "trending_products")
+                pipe.execute()
+
+        except Exception as e:
+            logger.error(f"Trending update failed: {str(e)}")
+
     # TODO: Add search, filtering, pagination
+
+
+class ProductStatsService:
+    @staticmethod
+    def update_product_stats(product_id):
+        """
+        Updates derived stats for a product stored in Redis,
+        including average rating and last viewed timestamp.
+        """
+        redis_key = f"product:{product_id}:stats"
+
+        try:
+            # Use pipeline to get rating sum and count in one round trip
+            with redis_client.pipeline() as pipe:
+                pipe.hget(redis_key, "rating_sum")
+                pipe.hget(redis_key, "rating_count")
+                rating_sum_raw, rating_count_raw = pipe.execute()
+
+            # Decode if Redis returns bytes (depends on decode_responses=True)
+            if isinstance(rating_sum_raw, bytes):
+                rating_sum_raw = rating_sum_raw.decode()
+            if isinstance(rating_count_raw, bytes):
+                rating_count_raw = rating_count_raw.decode()
+
+            rating_sum = int(rating_sum_raw) if rating_sum_raw else 0
+            rating_count = int(rating_count_raw) if rating_count_raw else 0
+
+            avg_rating = (
+                round(rating_sum / rating_count, 2) if rating_count > 0 else 0.0
+            )
+
+            # Update stats in Redis
+            with redis_client.pipeline() as pipe:
+                pipe.hset(redis_key, "avg_rating", avg_rating)
+                # pipe.hset(redis_key, "last_updated", time.time())
+                pipe.execute()
+
+        except Exception as e:
+            logger.warning(f"Failed to update product stats for {product_id}: {e}")

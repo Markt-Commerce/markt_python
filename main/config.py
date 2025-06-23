@@ -19,6 +19,7 @@ class Config:
         # Redis
         self.REDIS_HOST = config("REDIS_HOST", default="localhost")
         self.REDIS_PORT = config("REDIS_PORT", default=6379, cast=int)
+        self.REDIS_DB = config("REDIS_DB", default=0, cast=int)
 
         # Auth
         self.SECRET_KEY = config("SECRET_KEY", default="dev-secret-key")
@@ -45,9 +46,46 @@ class Config:
             default="https://cdn.jsdelivr.net/npm/swagger-ui-dist/",
         )
 
+        # Build Redis URL
+        REDIS_URL = f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+
+        # Celery Configuration
+        self.CELERY_BROKER_URL = config("CELERY_BROKER_URL", default=REDIS_URL)
+        self.CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", default=REDIS_URL)
+        self.CELERY_TASK_SERIALIZER = "json"
+        self.CELERY_RESULT_SERIALIZER = "json"
+        self.CELERY_ACCEPT_CONTENT = ["json"]
+        self.CELERY_TIMEZONE = "UTC"
+        self.CELERY_TASK_TRACK_STARTED = True
+        self.CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes
+        self.CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60  # 25 minutes (grace period)
+        self.CELERY_WORKER_PREFETCH_MULTIPLIER = 1  # Better for long-running tasks
+        self.CELERY_TASK_ACKS_LATE = True  # Acknowledge after completion
+        self.CELERY_WORKER_DISABLE_RATE_LIMITS = False
+        self.CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+
     @property
     def SQLALCHEMY_DATABASE_URI(self):
         return f"postgresql+psycopg2://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+
+    @property
+    def CELERY_CONFIG(self):
+        """Explicit config dict for Celery"""
+        return {
+            "broker_url": self.CELERY_BROKER_URL,
+            "result_backend": self.CELERY_RESULT_BACKEND,
+            "task_serializer": self.CELERY_TASK_SERIALIZER,
+            "result_serializer": self.CELERY_RESULT_SERIALIZER,
+            "accept_content": self.CELERY_ACCEPT_CONTENT,
+            "timezone": self.CELERY_TIMEZONE,
+            "task_track_started": self.CELERY_TASK_TRACK_STARTED,
+            "task_time_limit": self.CELERY_TASK_TIME_LIMIT,
+            "task_soft_time_limit": self.CELERY_TASK_SOFT_TIME_LIMIT,
+            "worker_prefetch_multiplier": self.CELERY_WORKER_PREFETCH_MULTIPLIER,
+            "task_acks_late": self.CELERY_TASK_ACKS_LATE,
+            "worker_disable_rate_limits": self.CELERY_WORKER_DISABLE_RATE_LIMITS,
+            "broker_connection_retry_on_startup": self.CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP,
+        }
 
 
 settings = Config()
