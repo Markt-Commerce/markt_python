@@ -6,7 +6,163 @@ from app.libs.errors import ValidationError
 from app.products.schemas import ProductSchema
 from app.users.schemas import UserSimpleSchema
 
-from .models import FollowType, PostStatus
+from .models import (
+    FollowType,
+    PostStatus,
+    NicheStatus,
+    NicheVisibility,
+    NicheMembershipRole,
+)
+
+
+# Niche/Community Schemas
+class NicheSchema(Schema):
+    """Schema for niche communities"""
+
+    id = fields.Str(dump_only=True)
+    name = fields.Str(required=True, validate=validate.Length(min=1, max=100))
+    description = fields.Str(required=True, validate=validate.Length(min=10, max=2000))
+    slug = fields.Str(dump_only=True)
+    status = fields.Enum(NicheStatus, by_value=True, dump_only=True)
+    visibility = fields.Enum(NicheVisibility, by_value=True, dump_only=True)
+
+    # Community settings
+    allow_buyer_posts = fields.Bool(dump_only=True)
+    allow_seller_posts = fields.Bool(dump_only=True)
+    require_approval = fields.Bool(dump_only=True)
+    max_members = fields.Int(dump_only=True)
+
+    # Metadata
+    category_id = fields.Int(allow_none=True)
+    tags = fields.List(fields.Str(), dump_only=True)
+    rules = fields.List(fields.Str(), dump_only=True)
+    settings = fields.Dict(dump_only=True)
+
+    # Statistics
+    member_count = fields.Int(dump_only=True)
+    post_count = fields.Int(dump_only=True)
+
+    # Timestamps
+    created_at = fields.DateTime(dump_only=True)
+    updated_at = fields.DateTime(dump_only=True)
+
+    # Relationships
+    category = fields.Nested("CategorySchema", dump_only=True)
+
+
+class NicheCreateSchema(Schema):
+    """Schema for creating niche communities"""
+
+    name = fields.Str(required=True, validate=validate.Length(min=1, max=100))
+    description = fields.Str(required=True, validate=validate.Length(min=10, max=2000))
+    visibility = fields.Enum(NicheVisibility, by_value=True, missing="public")
+    allow_buyer_posts = fields.Bool(missing=True)
+    allow_seller_posts = fields.Bool(missing=True)
+    require_approval = fields.Bool(missing=False)
+    max_members = fields.Int(validate=validate.Range(min=1, max=100000), missing=10000)
+    category_id = fields.Int(allow_none=True)
+    tags = fields.List(fields.Str(), missing=[])
+    rules = fields.List(fields.Str(), missing=[])
+    settings = fields.Dict(missing={})
+
+
+class NicheUpdateSchema(Schema):
+    """Schema for updating niche communities"""
+
+    name = fields.Str(validate=validate.Length(min=1, max=100))
+    description = fields.Str(validate=validate.Length(min=10, max=2000))
+    visibility = fields.Enum(NicheVisibility, by_value=True)
+    allow_buyer_posts = fields.Bool()
+    allow_seller_posts = fields.Bool()
+    require_approval = fields.Bool()
+    max_members = fields.Int(validate=validate.Range(min=1, max=100000))
+    category_id = fields.Int(allow_none=True)
+    tags = fields.List(fields.Str())
+    rules = fields.List(fields.Str())
+    settings = fields.Dict()
+
+
+class NicheSearchSchema(Schema):
+    """Schema for searching niche communities"""
+
+    search = fields.Str(allow_none=True)
+    category_id = fields.Int(allow_none=True)
+    visibility = fields.Enum(NicheVisibility, by_value=True, allow_none=True)
+    page = fields.Int(validate=validate.Range(min=1), missing=1)
+    per_page = fields.Int(validate=validate.Range(min=1, max=100), missing=20)
+
+
+class NicheMembershipSchema(Schema):
+    """Schema for niche memberships"""
+
+    id = fields.Int(dump_only=True)
+    niche_id = fields.Str(dump_only=True)
+    user_id = fields.Str(dump_only=True)
+    role = fields.Enum(NicheMembershipRole, by_value=True, dump_only=True)
+
+    # Membership details
+    joined_at = fields.DateTime(dump_only=True)
+    invited_by = fields.Str(dump_only=True)
+    is_active = fields.Bool(dump_only=True)
+
+    # Moderation flags
+    is_banned = fields.Bool(dump_only=True)
+    banned_until = fields.DateTime(dump_only=True)
+    ban_reason = fields.Str(dump_only=True)
+
+    # Activity tracking
+    last_activity = fields.DateTime(dump_only=True)
+    post_count = fields.Int(dump_only=True)
+    comment_count = fields.Int(dump_only=True)
+
+    # Relationships
+    user = fields.Nested("UserSimpleSchema", dump_only=True)
+    inviter = fields.Nested("UserSimpleSchema", dump_only=True)
+    niche = fields.Nested(NicheSchema, dump_only=True)
+
+
+class NicheModerationActionSchema(Schema):
+    """Schema for niche moderation actions"""
+
+    id = fields.Int(dump_only=True)
+    niche_id = fields.Str(dump_only=True)
+    moderator_id = fields.Str(dump_only=True)
+    target_user_id = fields.Str(dump_only=True)
+
+    # Action details
+    action_type = fields.Str(dump_only=True)
+    reason = fields.Str(dump_only=True)
+    duration = fields.TimeDelta(dump_only=True)
+
+    # Target details
+    target_type = fields.Str(dump_only=True)
+    target_id = fields.Str(dump_only=True)
+
+    # Action metadata
+    is_active = fields.Bool(dump_only=True)
+    expires_at = fields.DateTime(dump_only=True)
+
+    created_at = fields.DateTime(dump_only=True)
+
+    # Relationships
+    moderator = fields.Nested("UserSimpleSchema", dump_only=True)
+    target_user = fields.Nested("UserSimpleSchema", dump_only=True)
+
+
+class ModerationActionSchema(Schema):
+    """Schema for creating moderation actions"""
+
+    target_user_id = fields.Str(required=True)
+    action_type = fields.Str(
+        required=True, validate=validate.OneOf(["ban", "warn", "remove_post"])
+    )
+    reason = fields.Str(required=True, validate=validate.Length(min=1, max=500))
+    duration = fields.TimeDelta(allow_none=True)
+    target_type = fields.Str(
+        validate=validate.OneOf(["user", "post", "comment"]), missing="user"
+    )
+    target_id = fields.Str(allow_none=True)
+    banned_until = fields.DateTime(allow_none=True)
 
 
 class ShareSchema(Schema):

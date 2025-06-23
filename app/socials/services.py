@@ -2,6 +2,8 @@ import logging
 import math
 from datetime import datetime
 import time
+import re
+from typing import Any, Dict, Optional
 
 # package imports
 from sqlalchemy.exc import SQLAlchemyError
@@ -14,7 +16,13 @@ from external.redis import redis_client
 
 from app.libs.session import session_scope
 from app.libs.pagination import Paginator
-from app.libs.errors import NotFoundError, ValidationError, ConflictError, APIError
+from app.libs.errors import (
+    NotFoundError,
+    ValidationError,
+    ConflictError,
+    APIError,
+    ForbiddenError,
+)
 
 from app.users.models import User, Seller, SellerVerificationStatus
 from app.products.models import Product, ProductStatus
@@ -34,10 +42,463 @@ from .models import (
     FollowType,
     ProductReview,
     ProductView,
+    Niche,
+    NicheMembership,
+    NichePost,
+    NicheModerationAction,
+    NicheStatus,
+    NicheVisibility,
+    NicheMembershipRole,
 )
 from .constants import POST_STATUS_TRANSITIONS
 
 logger = logging.getLogger(__name__)
+
+
+class NicheService:
+    """Service for managing niche communities with role-based access control"""
+
+    # Cache keys
+    CACHE_KEYS = {
+        "niche": "niche:{niche_id}",
+        "niche_members": "niche:{niche_id}:members",
+        "niche_posts": "niche:{niche_id}:posts",
+        "user_niches": "user:{user_id}:niches",
+        "trending_niches": "trending:niches",
+    }
+
+    @staticmethod
+    def create_niche(user_id: str, data: Dict[str, Any]) -> Niche:
+        """Create a new niche community"""
+        with session_scope() as session:
+            # Validate user has seller account (sellers can create niches)
+            user = session.query(User).get(user_id)
+            if not user or not user.is_seller:
+                raise ForbiddenError("Only sellers can create niche communities")
+
+            # Validate niche data
+            if not data.get("name") or not data.get("description"):
+                raise ValidationError("Name and description are required")
+
+            # Generate slug from name
+            slug = NicheService._generate_slug(data["name"])
+
+            # Check if slug already exists
+            existing = session.query(Niche).filter_by(slug=slug).first()
+            if existing:
+                raise ConflictError("A community with this name already exists")
+
+            # Create niche
+            niche = Niche(
+                name=data["name"],
+                description=data["description"],
+                slug=slug,
+                visibility=NicheVisibility(data.get("visibility", "public")),
+                allow_buyer_posts=data.get("allow_buyer_posts", True),
+                allow_seller_posts=data.get("allow_seller_posts", True),
+                require_approval=data.get("require_approval", False),
+                max_members=data.get("max_members", 10000),
+                category_id=data.get("category_id"),
+                tags=data.get("tags", []),
+                rules=data.get("rules", []),
+                settings=data.get("settings", {}),
+            )
+
+            session.add(niche)
+            session.flush()
+
+            # Add creator as owner
+            membership = NicheMembership(
+                niche_id=niche.id,
+                user_id=user_id,
+                role=NicheMembershipRole.OWNER,
+                is_active=True,
+            )
+            session.add(membership)
+
+            # Update member count
+            niche.member_count = 1
+
+            # Cache invalidation
+            NicheService._invalidate_user_cache(user_id)
+
+            return niche
+
+    @staticmethod
+    def get_niche(niche_id: str, user_id: Optional[str] = None) -> Niche:
+        """Get niche details with access control"""
+        cache_key = NicheService.CACHE_KEYS["niche"].format(niche_id=niche_id)
+
+        # Try cache first
+        cached = redis_client.get(cache_key)
+        if cached:
+            return cached
+
+        with session_scope() as session:
+            niche = (
+                session.query(Niche)
+                .options(
+                    joinedload(Niche.category),
+                    joinedload(Niche.members).joinedload(NicheMembership.user),
+                )
+                .get(niche_id)
+            )
+
+            if not niche:
+                raise NotFoundError("Community not found")
+
+            # Check visibility and access
+            if niche.visibility == NicheVisibility.PRIVATE:
+                if not user_id:
+                    raise ForbiddenError("This community is private")
+
+                membership = (
+                    session.query(NicheMembership)
+                    .filter_by(niche_id=niche_id, user_id=user_id, is_active=True)
+                    .first()
+                )
+                if not membership:
+                    raise ForbiddenError("You don't have access to this community")
+
+            # Cache for 10 minutes
+            redis_client.setex(cache_key, 600, niche)
+
+            return niche
+
+    @staticmethod
+    def join_niche(
+        niche_id: str, user_id: str, invited_by: Optional[str] = None
+    ) -> NicheMembership:
+        """Join a niche community"""
+        with session_scope() as session:
+            niche = session.query(Niche).get(niche_id)
+            if not niche:
+                raise NotFoundError("Community not found")
+
+            # Check if user is already a member
+            existing_membership = (
+                session.query(NicheMembership)
+                .filter_by(niche_id=niche_id, user_id=user_id)
+                .first()
+            )
+
+            if existing_membership:
+                if existing_membership.is_active:
+                    raise ConflictError("You are already a member of this community")
+                else:
+                    # Reactivate membership
+                    existing_membership.is_active = True
+                    existing_membership.is_banned = False
+                    existing_membership.banned_until = None
+                    existing_membership.ban_reason = None
+                    existing_membership.joined_at = datetime.utcnow()
+                    membership = existing_membership
+            else:
+                # Check member limit
+                if niche.member_count >= niche.max_members:
+                    raise ValidationError("This community has reached its member limit")
+
+                # Create new membership
+                membership = NicheMembership(
+                    niche_id=niche_id,
+                    user_id=user_id,
+                    role=NicheMembershipRole.MEMBER,
+                    invited_by=invited_by,
+                    is_active=True,
+                )
+                session.add(membership)
+
+                # Update member count
+                niche.member_count += 1
+
+            # Cache invalidation
+            NicheService._invalidate_niche_cache(niche_id)
+            NicheService._invalidate_user_cache(user_id)
+
+            return membership
+
+    @staticmethod
+    def leave_niche(niche_id: str, user_id: str) -> bool:
+        """Leave a niche community"""
+        with session_scope() as session:
+            membership = (
+                session.query(NicheMembership)
+                .filter_by(niche_id=niche_id, user_id=user_id, is_active=True)
+                .first()
+            )
+
+            if not membership:
+                raise NotFoundError("You are not a member of this community")
+
+            # Owners cannot leave (must transfer ownership first)
+            if membership.role == NicheMembershipRole.OWNER:
+                raise ValidationError("Owners cannot leave. Transfer ownership first.")
+
+            # Deactivate membership
+            membership.is_active = False
+
+            # Update member count
+            niche = session.query(Niche).get(niche_id)
+            if niche and niche.member_count > 0:
+                niche.member_count -= 1
+
+            # Cache invalidation
+            NicheService._invalidate_niche_cache(niche_id)
+            NicheService._invalidate_user_cache(user_id)
+
+            return True
+
+    @staticmethod
+    def get_niche_members(niche_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get paginated list of niche members with role filtering"""
+        with session_scope() as session:
+            base_query = (
+                session.query(NicheMembership)
+                .filter_by(niche_id=niche_id, is_active=True)
+                .options(
+                    joinedload(NicheMembership.user),
+                    joinedload(NicheMembership.inviter),
+                )
+                .order_by(NicheMembership.role.desc(), NicheMembership.joined_at.asc())
+            )
+
+            # Apply role filter
+            if args.get("role"):
+                base_query = base_query.filter(NicheMembership.role == args["role"])
+
+            paginator = Paginator(
+                base_query, page=args.get("page", 1), per_page=args.get("per_page", 20)
+            )
+            return paginator.paginate(args)
+
+    @staticmethod
+    def get_user_niches(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get user's niche memberships"""
+        cache_key = NicheService.CACHE_KEYS["user_niches"].format(user_id=user_id)
+
+        # Try cache for first page
+        if args.get("page", 1) == 1:
+            cached = redis_client.get(cache_key)
+            if cached:
+                return cached
+
+        with session_scope() as session:
+            base_query = (
+                session.query(NicheMembership)
+                .filter_by(user_id=user_id, is_active=True)
+                .options(
+                    joinedload(NicheMembership.niche).joinedload(Niche.category),
+                )
+                .order_by(NicheMembership.last_activity.desc())
+            )
+
+            paginator = Paginator(
+                base_query, page=args.get("page", 1), per_page=args.get("per_page", 20)
+            )
+            result = paginator.paginate(args)
+
+            # Cache first page for 5 minutes
+            if args.get("page", 1) == 1:
+                redis_client.setex(cache_key, 300, result)
+
+            return result
+
+    @staticmethod
+    def search_niches(
+        args: Dict[str, Any], user_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Search niches with visibility filtering"""
+        with session_scope() as session:
+            base_query = session.query(Niche).filter(Niche.status == NicheStatus.ACTIVE)
+
+            # Apply visibility filter
+            if user_id:
+                # Logged in users can see public and restricted niches
+                base_query = base_query.filter(
+                    Niche.visibility.in_(
+                        [NicheVisibility.PUBLIC, NicheVisibility.RESTRICTED]
+                    )
+                )
+            else:
+                # Anonymous users can only see public niches
+                base_query = base_query.filter(
+                    Niche.visibility == NicheVisibility.PUBLIC
+                )
+
+            # Apply search filters
+            if args.get("search"):
+                search_term = f"%{args['search']}%"
+                base_query = base_query.filter(
+                    db.or_(
+                        Niche.name.ilike(search_term),
+                        Niche.description.ilike(search_term),
+                    )
+                )
+
+            if args.get("category_id"):
+                base_query = base_query.filter(Niche.category_id == args["category_id"])
+
+            # Order by relevance (member count, activity)
+            base_query = base_query.order_by(
+                Niche.member_count.desc(),
+                Niche.post_count.desc(),
+                Niche.created_at.desc(),
+            )
+
+            paginator = Paginator(
+                base_query, page=args.get("page", 1), per_page=args.get("per_page", 20)
+            )
+            return paginator.paginate(args)
+
+    @staticmethod
+    def moderate_user(
+        niche_id: str,
+        moderator_id: str,
+        target_user_id: str,
+        action_data: Dict[str, Any],
+    ) -> NicheModerationAction:
+        """Perform moderation action on a user"""
+        with session_scope() as session:
+            # Validate moderator permissions
+            moderator_membership = (
+                session.query(NicheMembership)
+                .filter_by(niche_id=niche_id, user_id=moderator_id, is_active=True)
+                .first()
+            )
+
+            if not moderator_membership or moderator_membership.role not in [
+                NicheMembershipRole.MODERATOR,
+                NicheMembershipRole.ADMIN,
+                NicheMembershipRole.OWNER,
+            ]:
+                raise ForbiddenError("You don't have moderation permissions")
+
+            # Validate target user membership
+            target_membership = (
+                session.query(NicheMembership)
+                .filter_by(niche_id=niche_id, user_id=target_user_id, is_active=True)
+                .first()
+            )
+
+            if not target_membership:
+                raise NotFoundError("Target user is not a member of this community")
+
+            # Prevent moderating users with higher roles
+            if target_membership.role.value >= moderator_membership.role.value:
+                raise ForbiddenError(
+                    "You cannot moderate users with equal or higher roles"
+                )
+
+            # Create moderation action
+            action = NicheModerationAction(
+                niche_id=niche_id,
+                moderator_id=moderator_id,
+                target_user_id=target_user_id,
+                action_type=action_data["action_type"],
+                reason=action_data["reason"],
+                duration=action_data.get("duration"),
+                target_type=action_data.get("target_type", "user"),
+                target_id=action_data.get("target_id"),
+                is_active=True,
+            )
+
+            # Apply action
+            if action_data["action_type"] == "ban":
+                target_membership.is_banned = True
+                target_membership.banned_until = action_data.get("banned_until")
+                target_membership.ban_reason = action_data["reason"]
+
+                if action_data.get("banned_until"):
+                    action.expires_at = action_data["banned_until"]
+
+            elif action_data["action_type"] == "warn":
+                # Warning is just logged
+                pass
+
+            session.add(action)
+
+            # Cache invalidation
+            NicheService._invalidate_niche_cache(niche_id)
+            NicheService._invalidate_user_cache(target_user_id)
+
+            return action
+
+    @staticmethod
+    def can_user_post_in_niche(niche_id: str, user_id: str) -> Dict[str, Any]:
+        """Check if user can post in niche with role-based rules"""
+        with session_scope() as session:
+            niche = session.query(Niche).get(niche_id)
+            if not niche:
+                return {"can_post": False, "reason": "Community not found"}
+
+            user = session.query(User).get(user_id)
+            if not user:
+                return {"can_post": False, "reason": "User not found"}
+
+            # Check membership
+            membership = (
+                session.query(NicheMembership)
+                .filter_by(niche_id=niche_id, user_id=user_id, is_active=True)
+                .first()
+            )
+
+            if not membership:
+                return {"can_post": False, "reason": "You must be a member to post"}
+
+            # Check if banned
+            if membership.is_banned:
+                if (
+                    membership.banned_until
+                    and membership.banned_until > datetime.utcnow()
+                ):
+                    return {
+                        "can_post": False,
+                        "reason": f"You are banned until {membership.banned_until}",
+                    }
+                elif not membership.banned_until:
+                    return {"can_post": False, "reason": "You are permanently banned"}
+
+            # Check role-based posting rules
+            if user.is_buyer and not niche.allow_buyer_posts:
+                return {
+                    "can_post": False,
+                    "reason": "Buyers cannot post in this community",
+                }
+
+            if user.is_seller and not niche.allow_seller_posts:
+                return {
+                    "can_post": False,
+                    "reason": "Sellers cannot post in this community",
+                }
+
+            return {"can_post": True, "requires_approval": niche.require_approval}
+
+    # Private helper methods
+    @staticmethod
+    def _generate_slug(name: str) -> str:
+        """Generate URL-friendly slug from name"""
+        # Convert to lowercase and replace spaces with hyphens
+        slug = re.sub(r"[^\w\s-]", "", name.lower())
+        slug = re.sub(r"[-\s]+", "-", slug)
+        return slug.strip("-")
+
+    @staticmethod
+    def _invalidate_niche_cache(niche_id: str):
+        """Invalidate niche-related caches"""
+        redis_client.delete(NicheService.CACHE_KEYS["niche"].format(niche_id=niche_id))
+        redis_client.delete(
+            NicheService.CACHE_KEYS["niche_members"].format(niche_id=niche_id)
+        )
+        redis_client.delete(
+            NicheService.CACHE_KEYS["niche_posts"].format(niche_id=niche_id)
+        )
+
+    @staticmethod
+    def _invalidate_user_cache(user_id: str):
+        """Invalidate user-related caches"""
+        redis_client.delete(
+            NicheService.CACHE_KEYS["user_niches"].format(user_id=user_id)
+        )
 
 
 class PostService:

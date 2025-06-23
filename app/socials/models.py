@@ -12,6 +12,13 @@ class FollowType(Enum):
     PEER = "peer"  # Seller following another seller
 
 
+class PostStatus(Enum):
+    DRAFT = "draft"  # Created but not published
+    ACTIVE = "active"  # Live and visible
+    ARCHIVED = "archived"  # Hidden but preserved
+    DELETED = "deleted"  # Deleted
+
+
 class Follow(BaseModel):
     __tablename__ = "follows"
     follower_id = db.Column(db.String(12), db.ForeignKey("users.id"), primary_key=True)
@@ -26,6 +33,189 @@ class Follow(BaseModel):
     )
     followee = db.relationship(
         "User", foreign_keys=[followee_id], back_populates="followers"
+    )
+
+
+# Niche/Community Models
+class NicheStatus(Enum):
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    MODERATED = "moderated"
+    ARCHIVED = "archived"
+
+
+class NicheVisibility(Enum):
+    PUBLIC = "public"
+    PRIVATE = "private"
+    RESTRICTED = "restricted"
+
+
+class NicheMembershipRole(Enum):
+    MEMBER = "member"
+    MODERATOR = "moderator"
+    ADMIN = "admin"
+    OWNER = "owner"
+
+
+class Niche(BaseModel, UniqueIdMixin):
+    __tablename__ = "niches"
+    id_prefix = "NCH_"
+
+    id = db.Column(db.String(12), primary_key=True)
+    name = db.Column(db.String(100), nullable=False, unique=True)
+    description = db.Column(db.Text)
+    slug = db.Column(db.String(100), unique=True, nullable=False)
+    status = db.Column(db.Enum(NicheStatus), default=NicheStatus.ACTIVE)
+    visibility = db.Column(db.Enum(NicheVisibility), default=NicheVisibility.PUBLIC)
+
+    # Community settings
+    allow_buyer_posts = db.Column(db.Boolean, default=True)
+    allow_seller_posts = db.Column(db.Boolean, default=True)
+    require_approval = db.Column(db.Boolean, default=False)
+    max_members = db.Column(db.Integer, default=10000)
+
+    # Metadata
+    category_id = db.Column(db.Integer, db.ForeignKey("categories.id"))
+    tags = db.Column(db.JSON)  # Array of tags
+    rules = db.Column(db.JSON)  # Community rules
+    settings = db.Column(db.JSON)  # Additional settings
+
+    # Statistics
+    member_count = db.Column(db.Integer, default=0)
+    post_count = db.Column(db.Integer, default=0)
+
+    # Timestamps
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+    updated_at = db.Column(db.DateTime, onupdate=db.func.now())
+
+    # Relationships
+    category = db.relationship("Category")
+    members = db.relationship(
+        "NicheMembership", back_populates="niche", cascade="all, delete-orphan"
+    )
+    posts = db.relationship(
+        "NichePost", back_populates="niche", cascade="all, delete-orphan"
+    )
+    moderation_actions = db.relationship(
+        "NicheModerationAction", back_populates="niche", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        db.Index("idx_niche_slug", "slug"),
+        db.Index("idx_niche_status", "status"),
+        db.Index("idx_niche_category", "category_id"),
+        db.Index("idx_niche_visibility", "visibility"),
+    )
+
+
+class NicheMembership(BaseModel):
+    __tablename__ = "niche_memberships"
+
+    id = db.Column(db.Integer, primary_key=True)
+    niche_id = db.Column(db.String(12), db.ForeignKey("niches.id"), nullable=False)
+    user_id = db.Column(db.String(12), db.ForeignKey("users.id"), nullable=False)
+    role = db.Column(db.Enum(NicheMembershipRole), default=NicheMembershipRole.MEMBER)
+
+    # Membership details
+    joined_at = db.Column(db.DateTime, server_default=db.func.now())
+    invited_by = db.Column(db.String(12), db.ForeignKey("users.id"), nullable=True)
+    is_active = db.Column(db.Boolean, default=True)
+
+    # Moderation flags
+    is_banned = db.Column(db.Boolean, default=False)
+    banned_until = db.Column(db.DateTime, nullable=True)
+    ban_reason = db.Column(db.Text, nullable=True)
+
+    # Activity tracking
+    last_activity = db.Column(db.DateTime, server_default=db.func.now())
+    post_count = db.Column(db.Integer, default=0)
+    comment_count = db.Column(db.Integer, default=0)
+
+    # Relationships
+    niche = db.relationship("Niche", back_populates="members")
+    user = db.relationship("User", foreign_keys=[user_id])
+    inviter = db.relationship("User", foreign_keys=[invited_by])
+
+    __table_args__ = (
+        db.UniqueConstraint("niche_id", "user_id", name="uq_niche_membership"),
+        db.Index("idx_niche_membership_user", "user_id"),
+        db.Index("idx_niche_membership_role", "role"),
+        db.Index("idx_niche_membership_active", "is_active"),
+    )
+
+
+class NichePost(BaseModel):
+    __tablename__ = "niche_posts"
+
+    id = db.Column(db.Integer, primary_key=True)
+    niche_id = db.Column(db.String(12), db.ForeignKey("niches.id"), nullable=False)
+    post_id = db.Column(db.String(12), db.ForeignKey("posts.id"), nullable=False)
+
+    # Post status within niche
+    status = db.Column(db.Enum(PostStatus), default=PostStatus.ACTIVE)
+    is_pinned = db.Column(db.Boolean, default=False)
+    is_featured = db.Column(db.Boolean, default=False)
+
+    # Moderation
+    is_approved = db.Column(db.Boolean, default=True)  # For communities with approval
+    moderated_by = db.Column(db.String(12), db.ForeignKey("users.id"), nullable=True)
+    moderated_at = db.Column(db.DateTime, nullable=True)
+
+    # Engagement within niche
+    niche_likes = db.Column(db.Integer, default=0)
+    niche_comments = db.Column(db.Integer, default=0)
+
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+    updated_at = db.Column(db.DateTime, onupdate=db.func.now())
+
+    # Relationships
+    niche = db.relationship("Niche", back_populates="posts")
+    post = db.relationship("Post")
+    moderator = db.relationship("User", foreign_keys=[moderated_by])
+
+    __table_args__ = (
+        db.UniqueConstraint("niche_id", "post_id", name="uq_niche_post"),
+        db.Index("idx_niche_post_status", "status"),
+        db.Index("idx_niche_post_pinned", "is_pinned"),
+        db.Index("idx_niche_post_featured", "is_featured"),
+    )
+
+
+class NicheModerationAction(BaseModel):
+    __tablename__ = "niche_moderation_actions"
+
+    id = db.Column(db.Integer, primary_key=True)
+    niche_id = db.Column(db.String(12), db.ForeignKey("niches.id"), nullable=False)
+    moderator_id = db.Column(db.String(12), db.ForeignKey("users.id"), nullable=False)
+    target_user_id = db.Column(db.String(12), db.ForeignKey("users.id"), nullable=False)
+
+    # Action details
+    action_type = db.Column(
+        db.String(50), nullable=False
+    )  # ban, warn, remove_post, etc.
+    reason = db.Column(db.Text, nullable=False)
+    duration = db.Column(db.Interval, nullable=True)  # For temporary actions
+
+    # Target details
+    target_type = db.Column(db.String(50), nullable=False)  # user, post, comment
+    target_id = db.Column(db.String(12), nullable=True)  # ID of affected content
+
+    # Action metadata
+    is_active = db.Column(db.Boolean, default=True)
+    expires_at = db.Column(db.DateTime, nullable=True)
+
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+    # Relationships
+    niche = db.relationship("Niche", back_populates="moderation_actions")
+    moderator = db.relationship("User", foreign_keys=[moderator_id])
+    target_user = db.relationship("User", foreign_keys=[target_user_id])
+
+    __table_args__ = (
+        db.Index("idx_moderation_niche", "niche_id"),
+        db.Index("idx_moderation_target", "target_user_id"),
+        db.Index("idx_moderation_type", "action_type"),
+        db.Index("idx_moderation_active", "is_active"),
     )
 
 
@@ -60,13 +250,6 @@ class ProductView(BaseModel):
     viewed_at = db.Column(db.DateTime, server_default=db.func.now())
 
     product = db.relationship("Product", back_populates="views")
-
-
-class PostStatus(Enum):
-    DRAFT = "draft"  # Created but not published
-    ACTIVE = "active"  # Live and visible
-    ARCHIVED = "archived"  # Hidden but preserved
-    DELETED = "deleted"  # Deleted
 
 
 class Post(BaseModel, UniqueIdMixin):
@@ -109,7 +292,9 @@ class Post(BaseModel, UniqueIdMixin):
     @hybrid_property
     def like_count(self):
         """Get the count of likes for this post"""
-        return len(self.likes) if self.likes else 0
+        if hasattr(self, "likes") and self.likes is not None:
+            return len(self.likes)
+        return 0
 
     @like_count.expression
     def like_count(cls):
@@ -117,14 +302,16 @@ class Post(BaseModel, UniqueIdMixin):
         return (
             select(func.count(PostLike.id))
             .where(PostLike.post_id == cls.id)
-            .correlate(cls)
+            .correlate(None)
             .scalar_subquery()
         )
 
     @hybrid_property
     def comment_count(self):
         """Get the count of comments for this post"""
-        return len(self.comments) if self.comments else 0
+        if hasattr(self, "comments") and self.comments is not None:
+            return len(self.comments)
+        return 0
 
     @comment_count.expression
     def comment_count(cls):
@@ -132,7 +319,7 @@ class Post(BaseModel, UniqueIdMixin):
         return (
             select(func.count(PostComment.id))
             .where(PostComment.post_id == cls.id)
-            .correlate(cls)
+            .correlate(None)
             .scalar_subquery()
         )
 

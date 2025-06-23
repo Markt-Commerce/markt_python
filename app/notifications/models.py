@@ -14,6 +14,12 @@ class NotificationType(Enum):
     SHIPMENT_UPDATE = "shipment_update"
     PROMOTIONAL = "promotional"
     SYSTEM_ALERT = "system_alert"
+    # Buyer request notifications
+    REQUEST_OFFER = "request_offer"
+    OFFER_ACCEPTED = "offer_accepted"
+    OFFER_REJECTED = "offer_rejected"
+    REQUEST_CLOSED = "request_closed"
+    REQUEST_STATUS_CHANGE = "request_status_change"
 
 
 class Notification(BaseModel):

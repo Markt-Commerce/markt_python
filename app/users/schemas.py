@@ -189,3 +189,9 @@ class SettingsUpdateSchema(Schema):
 
 class PublicProfileSchema(Schema):
     pass
+
+
+# Legacy schema for backward compatibility
+class SellerSchema(SellerCreateSchema):
+    """Legacy schema alias"""
+
