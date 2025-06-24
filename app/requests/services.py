@@ -1,7 +1,7 @@
 # python imports
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 from enum import Enum
 
 # package imports
@@ -467,6 +467,263 @@ class BuyerRequestService:
             BuyerRequestService._invalidate_request_cache(request_id)
 
             return {"upvotes": request.upvotes}
+
+    @staticmethod
+    def update_request(
+        request_id: str, user_id: str, data: Dict[str, Any]
+    ) -> BuyerRequest:
+        """Update request details (owner only)"""
+        with session_scope() as session:
+            request = session.query(BuyerRequest).get(request_id)
+            if not request:
+                raise NotFoundError("Request not found")
+
+            # Validate ownership
+            if request.user_id != user_id:
+                raise ForbiddenError("Only request owner can update request")
+
+            # Validate request is still editable
+            if request.status != RequestStatus.OPEN:
+                raise ValidationError("Cannot update closed or fulfilled request")
+
+            # Update fields
+            if data.get("title"):
+                request.title = data["title"]
+            if data.get("description"):
+                request.description = data["description"]
+            if data.get("category_id"):
+                request.category_id = data["category_id"]
+            if data.get("budget"):
+                request.budget = data["budget"]
+            if data.get("metadata"):
+                request.request_metadata.update(data["metadata"])
+            if data.get("expires_at"):
+                request.expires_at = data["expires_at"]
+
+            # Handle images if provided
+            if data.get("images"):
+                # Remove existing images
+                session.query(RequestImage).filter_by(request_id=request_id).delete()
+
+                # Add new images
+                for i, image_data in enumerate(data["images"]):
+                    image = RequestImage(
+                        request_id=request.id,
+                        image_url=image_data["url"],
+                        is_primary=(i == 0),
+                    )
+                    session.add(image)
+
+            session.flush()
+
+            # Cache invalidation
+            BuyerRequestService._invalidate_request_cache(request_id)
+            BuyerRequestService._invalidate_user_cache(user_id)
+            BuyerRequestService._invalidate_category_cache(request.category_id)
+
+            return request
+
+    @staticmethod
+    def delete_request(request_id: str, user_id: str) -> bool:
+        """Delete request (owner only)"""
+        with session_scope() as session:
+            request = session.query(BuyerRequest).get(request_id)
+            if not request:
+                raise NotFoundError("Request not found")
+
+            # Validate ownership
+            if request.user_id != user_id:
+                raise ForbiddenError("Only request owner can delete request")
+
+            # Check if request has accepted offers
+            accepted_offers = (
+                session.query(SellerOffer)
+                .filter_by(request_id=request_id, status=OfferStatus.ACCEPTED)
+                .count()
+            )
+            if accepted_offers > 0:
+                raise ValidationError("Cannot delete request with accepted offers")
+
+            # Delete related data
+            session.query(RequestImage).filter_by(request_id=request_id).delete()
+            session.query(SellerOffer).filter_by(request_id=request_id).delete()
+            session.delete(request)
+
+            # Cache invalidation
+            BuyerRequestService._invalidate_request_cache(request_id)
+            BuyerRequestService._invalidate_user_cache(user_id)
+            BuyerRequestService._invalidate_category_cache(request.category_id)
+
+            return True
+
+    @staticmethod
+    def reject_offer(offer_id: int, user_id: str) -> SellerOffer:
+        """Reject an offer (request owner only)"""
+        with session_scope() as session:
+            offer = (
+                session.query(SellerOffer)
+                .options(joinedload(SellerOffer.request))
+                .get(offer_id)
+            )
+            if not offer:
+                raise NotFoundError("Offer not found")
+
+            # Validate request ownership
+            if offer.request.user_id != user_id:
+                raise ForbiddenError("Only request owner can reject offers")
+
+            # Validate offer status
+            if offer.status != OfferStatus.PENDING:
+                raise ValidationError("Can only reject pending offers")
+
+            # Update offer status
+            offer.status = OfferStatus.REJECTED
+            offer.updated_at = datetime.utcnow()
+
+            # Notify seller
+            NotificationService.create_notification(
+                user_id=offer.seller.user_id,
+                notification_type=NotificationType.OFFER_REJECTED,
+                reference_type="offer",
+                reference_id=offer.id,
+                metadata_={
+                    "request_title": offer.request.title,
+                    "price": offer.price,
+                },
+            )
+
+            # Cache invalidation
+            BuyerRequestService._invalidate_request_cache(offer.request_id)
+
+            return offer
+
+    @staticmethod
+    def withdraw_offer(offer_id: int, seller_id: int) -> SellerOffer:
+        """Withdraw an offer (offer creator only)"""
+        with session_scope() as session:
+            offer = (
+                session.query(SellerOffer)
+                .options(joinedload(SellerOffer.request))
+                .get(offer_id)
+            )
+            if not offer:
+                raise NotFoundError("Offer not found")
+
+            # Validate offer ownership
+            if offer.seller_id != seller_id:
+                raise ForbiddenError("Only offer creator can withdraw offer")
+
+            # Validate offer status
+            if offer.status != OfferStatus.PENDING:
+                raise ValidationError("Can only withdraw pending offers")
+
+            # Update offer status
+            offer.status = OfferStatus.WITHDRAWN
+            offer.updated_at = datetime.utcnow()
+
+            # Notify request owner
+            NotificationService.create_notification(
+                user_id=offer.request.user_id,
+                notification_type=NotificationType.OFFER_WITHDRAWN,
+                reference_type="offer",
+                reference_id=offer.id,
+                metadata_={
+                    "request_title": offer.request.title,
+                    "seller_name": offer.seller.shop_name,
+                },
+            )
+
+            # Cache invalidation
+            BuyerRequestService._invalidate_request_cache(offer.request_id)
+
+            return offer
+
+    @staticmethod
+    def list_request_offers(request_id: str, user_id: str) -> List[SellerOffer]:
+        """Get offers for a request with access control"""
+        with session_scope() as session:
+            request = session.query(BuyerRequest).get(request_id)
+            if not request:
+                raise NotFoundError("Request not found")
+
+            # Get user for access control
+            user = session.query(User).get(user_id)
+            if not user:
+                raise ForbiddenError("Authentication required")
+
+            # Access control: request owner sees all offers, offer creators see their own
+            if request.user_id == user_id:
+                # Request owner can see all offers
+                offers = (
+                    session.query(SellerOffer)
+                    .filter_by(request_id=request_id)
+                    .options(joinedload(SellerOffer.seller))
+                    .order_by(SellerOffer.created_at.desc())
+                    .all()
+                )
+            elif user.is_seller:
+                # Sellers can only see their own offers
+                offers = (
+                    session.query(SellerOffer)
+                    .filter_by(request_id=request_id, seller_id=user.seller_account.id)
+                    .options(joinedload(SellerOffer.seller))
+                    .order_by(SellerOffer.created_at.desc())
+                    .all()
+                )
+            else:
+                raise ForbiddenError("Access denied")
+
+            return offers
+
+    @staticmethod
+    def handle_request_expiration():
+        """Background task to handle expired requests"""
+        with session_scope() as session:
+            expired_requests = (
+                session.query(BuyerRequest)
+                .filter(
+                    and_(
+                        BuyerRequest.status == RequestStatus.OPEN,
+                        BuyerRequest.expires_at < datetime.utcnow(),
+                    )
+                )
+                .all()
+            )
+
+            for request in expired_requests:
+                BuyerRequestService._handle_request_expiration(request, session)
+
+    @staticmethod
+    def smart_seller_matching(request_id: str) -> List[Seller]:
+        """Find relevant sellers for a request based on criteria"""
+        with session_scope() as session:
+            request = session.query(BuyerRequest).get(request_id)
+            if not request:
+                raise NotFoundError("Request not found")
+
+            # Get sellers in the same category
+            base_query = session.query(Seller).filter(Seller.is_verified == True)
+
+            if request.category_id:
+                base_query = base_query.filter(
+                    Seller.category_id == request.category_id
+                )
+
+            # Filter by budget range if specified
+            if request.budget:
+                # Find sellers with products in similar price range
+                base_query = base_query.join(Product).filter(
+                    Product.price.between(request.budget * 0.5, request.budget * 1.5)
+                )
+
+            # Order by relevance (rating, completion rate, etc.)
+            sellers = (
+                base_query.order_by(Seller.rating.desc(), Seller.completion_rate.desc())
+                .limit(20)
+                .all()
+            )
+
+            return sellers
 
     # Private helper methods
     @staticmethod

@@ -84,8 +84,9 @@ class RequestDetail(MethodView):
     def put(self, request_data, request_id):
         """Update request (owner only)"""
         try:
-            # TODO: Implement request update logic
-            abort(501, message="Request updates not yet implemented")
+            return BuyerRequestService.update_request(
+                request_id, current_user.id, request_data
+            )
         except APIError as e:
             abort(e.status_code, message=e.message)
 
@@ -95,8 +96,8 @@ class RequestDetail(MethodView):
     def delete(self, request_id):
         """Delete request (owner only)"""
         try:
-            # TODO: Implement request deletion logic
-            abort(501, message="Request deletion not yet implemented")
+            BuyerRequestService.delete_request(request_id, current_user.id)
+            return None
         except APIError as e:
             abort(e.status_code, message=e.message)
 
@@ -139,8 +140,7 @@ class RequestOffers(MethodView):
     def get(self, request_id):
         """Get offers for a request (request owner and offer creators only)"""
         try:
-            # TODO: Implement offer listing with access control
-            abort(501, message="Offer listing not yet implemented")
+            return BuyerRequestService.list_request_offers(request_id, current_user.id)
         except APIError as e:
             abort(e.status_code, message=e.message)
 
@@ -179,8 +179,7 @@ class OfferReject(MethodView):
     def post(self, offer_id):
         """Reject an offer (request owner only)"""
         try:
-            # TODO: Implement offer rejection logic
-            abort(501, message="Offer rejection not yet implemented")
+            return BuyerRequestService.reject_offer(offer_id, current_user.id)
         except APIError as e:
             abort(e.status_code, message=e.message)
 
@@ -193,7 +192,8 @@ class OfferWithdraw(MethodView):
     def post(self, offer_id):
         """Withdraw an offer (offer creator only)"""
         try:
-            # TODO: Implement offer withdrawal logic
-            abort(501, message="Offer withdrawal not yet implemented")
+            return BuyerRequestService.withdraw_offer(
+                offer_id, current_user.seller_account.id
+            )
         except APIError as e:
             abort(e.status_code, message=e.message)
