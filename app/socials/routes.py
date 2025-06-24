@@ -265,7 +265,7 @@ class PostStatusUpdate(MethodView):
             if post.seller_id != current_user.seller_account.id:
                 abort(403, message="You can only update your own posts")
             return PostService.update_post_status(
-                post_id, current_user.seller_account.id, status_data["status"]
+                post_id, current_user.seller_account.id, status_data["action"]
             )
         except APIError as e:
             abort(e.status_code, message=e.message)

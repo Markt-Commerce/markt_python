@@ -64,6 +64,10 @@ class RedisClient:
         """Wrapper for Redis set command"""
         return self.client.set(name, value, ex=ex, px=px, nx=nx, xx=xx)
 
+    def setex(self, name, time, value):
+        """Wrapper for Redis setex command"""
+        return self.client.setex(name, time, value)
+
     def delete(self, *names):
         """Wrapper for Redis delete command"""
         return self.client.delete(*names)

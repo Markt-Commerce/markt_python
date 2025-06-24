@@ -55,7 +55,9 @@ class NicheCreateSchema(Schema):
 
     name = fields.Str(required=True, validate=validate.Length(min=1, max=100))
     description = fields.Str(required=True, validate=validate.Length(min=10, max=2000))
-    visibility = fields.Enum(NicheVisibility, by_value=True, missing="public")
+    visibility = fields.Enum(
+        NicheVisibility, by_value=True, missing=NicheVisibility.PUBLIC
+    )
     allow_buyer_posts = fields.Bool(missing=True)
     allow_seller_posts = fields.Bool(missing=True)
     require_approval = fields.Bool(missing=False)
