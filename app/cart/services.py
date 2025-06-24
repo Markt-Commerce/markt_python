@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import joinedload
 
 # project imports
 from external.redis import redis_client
@@ -50,7 +51,7 @@ class CartService:
                 session.query(Cart)
                 .filter_by(buyer_id=user.buyer_account.id)
                 .filter(Cart.expires_at > datetime.utcnow())
-                .options(joinedload(Cart.items).joinedload(CartItem.product))
+                .options(joinedload("items").joinedload("product"))
                 .first()
             )
 
@@ -247,8 +248,8 @@ class CartService:
                 .filter_by(buyer_id=user.buyer_account.id)
                 .filter(Cart.expires_at > datetime.utcnow())
                 .options(
-                    joinedload(Cart.items).joinedload(CartItem.product),
-                    joinedload(Cart.items).joinedload(CartItem.variant),
+                    joinedload("items").joinedload("product"),
+                    joinedload("items").joinedload("variant"),
                 )
                 .first()
             )
@@ -283,8 +284,7 @@ class CartService:
             order.subtotal = cart.subtotal()
             order.shipping_address = checkout_data.get("shipping_address")
             order.billing_address = checkout_data.get("billing_address")
-            order.payment_method = checkout_data.get("payment_method")
-            order.notes = checkout_data.get("notes")
+            order.customer_note = checkout_data.get("notes")
             session.add(order)
             session.flush()
 
@@ -295,8 +295,8 @@ class CartService:
                 order_item.product_id = cart_item.product_id
                 order_item.variant_id = cart_item.variant_id
                 order_item.quantity = cart_item.quantity
-                order_item.unit_price = cart_item.product_price
-                order_item.total_price = cart_item.product_price * cart_item.quantity
+                order_item.price = cart_item.product_price
+                order_item.seller_id = cart_item.product.seller_id
                 session.add(order_item)
 
             # Clear cart
@@ -354,8 +354,9 @@ class CartService:
     @staticmethod
     def _cache_cart(cart: Cart):
         """Cache cart data in Redis"""
-        cache_key = CartService.CART_CACHE_KEY.format(buyer_id=cart.buyer_id)
-        redis_client.setex(cache_key, CartService.CACHE_EXPIRY, cart)
+        if cart:
+            cache_key = CartService.CART_CACHE_KEY.format(buyer_id=cart.buyer_id)
+            redis_client.set(cache_key, cart, ex=CartService.CACHE_EXPIRY)
 
     @staticmethod
     def _invalidate_cart_cache(buyer_id: int):
