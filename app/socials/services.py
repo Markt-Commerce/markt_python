@@ -889,6 +889,186 @@ class PostService:
             paginator = Paginator(base_query, page=page, per_page=per_page)
             return paginator.paginate({})
 
+    @staticmethod
+    def get_posts(args):
+        """Get paginated posts with filtering"""
+        with session_scope() as session:
+            base_query = (
+                session.query(Post)
+                .filter(Post.status == PostStatus.ACTIVE)
+                .options(
+                    joinedload(Post.seller).joinedload(Seller.user),
+                    joinedload(Post.media),
+                    joinedload(Post.tagged_products).joinedload(PostProduct.product),
+                    joinedload(Post.likes),
+                    joinedload(Post.comments),
+                )
+            )
+
+            # Apply filters
+            if args.get("seller_id"):
+                base_query = base_query.filter(Post.seller_id == args["seller_id"])
+
+            if args.get("category_id"):
+                base_query = base_query.join(Seller).filter(
+                    Seller.category_id == args["category_id"]
+                )
+
+            # Order by creation date
+            base_query = base_query.order_by(Post.created_at.desc())
+
+            paginator = Paginator(
+                base_query, page=args.get("page", 1), per_page=args.get("per_page", 20)
+            )
+            result = paginator.paginate(args)
+
+            return {
+                "items": result["items"],
+                "pagination": {
+                    "page": result["page"],
+                    "per_page": result["per_page"],
+                    "total_items": result["total_items"],
+                    "total_pages": result["total_pages"],
+                },
+            }
+
+    @staticmethod
+    def delete_post(post_id, seller_id):
+        """Delete post (seller only)"""
+        with session_scope() as session:
+            post = session.query(Post).get(post_id)
+            if not post:
+                raise NotFoundError("Post not found")
+
+            if post.seller_id != seller_id:
+                raise ForbiddenError("You can only delete your own posts")
+
+            # Soft delete by changing status
+            post.status = PostStatus.DELETED
+            post.updated_at = datetime.utcnow()
+
+            # Remove from Redis
+            redis_client.zrem(f"seller:{seller_id}:posts", post_id)
+
+            return True
+
+    @staticmethod
+    def update_post_status(post_id, seller_id, new_status):
+        """Update post status (seller only)"""
+        with session_scope() as session:
+            post = session.query(Post).get(post_id)
+            if not post:
+                raise NotFoundError("Post not found")
+
+            if post.seller_id != seller_id:
+                raise ForbiddenError("You can only update your own posts")
+
+            # Validate status transition
+            valid_transitions = {
+                PostStatus.DRAFT: [PostStatus.ACTIVE, PostStatus.ARCHIVED],
+                PostStatus.ACTIVE: [PostStatus.ARCHIVED, PostStatus.DELETED],
+                PostStatus.ARCHIVED: [PostStatus.ACTIVE, PostStatus.DELETED],
+            }
+
+            if new_status not in valid_transitions.get(post.status, []):
+                raise ValidationError(
+                    f"Invalid status transition from {post.status} to {new_status}"
+                )
+
+            post.status = PostStatus(new_status)
+            post.updated_at = datetime.utcnow()
+
+            return post
+
+    @staticmethod
+    def toggle_like(user_id, post_id):
+        """Toggle like on post"""
+        with session_scope() as session:
+            # Check if like already exists
+            existing_like = (
+                session.query(PostLike)
+                .filter_by(user_id=user_id, post_id=post_id)
+                .first()
+            )
+
+            if existing_like:
+                # Unlike
+                session.delete(existing_like)
+                redis_client.zincrby(f"post:{post_id}:likes", -1, user_id)
+                redis_client.zrem(f"user:{user_id}:liked_posts", post_id)
+                return {"liked": False, "message": "Post unliked"}
+            else:
+                # Like
+                like = PostLike(user_id=user_id, post_id=post_id)
+                session.add(like)
+                redis_client.zincrby(f"post:{post_id}:likes", 1, user_id)
+                redis_client.zadd(
+                    f"user:{user_id}:liked_posts",
+                    {post_id: int(datetime.utcnow().timestamp())},
+                )
+
+                # Notify post owner
+                post = session.query(Post).get(post_id)
+                if post.seller.user_id != user_id:
+                    from app.notifications.services import NotificationService
+
+                    NotificationService.create_notification(
+                        user_id=post.seller.user_id,
+                        notification_type=NotificationType.POST_LIKE,
+                        reference_type="post",
+                        reference_id=post_id,
+                        metadata_={"actor_id": user_id},
+                    )
+
+                return {"liked": True, "message": "Post liked"}
+
+    @staticmethod
+    def get_comment(comment_id):
+        """Get comment by ID"""
+        with session_scope() as session:
+            comment = (
+                session.query(PostComment)
+                .options(joinedload(PostComment.user))
+                .get(comment_id)
+            )
+            if not comment:
+                raise NotFoundError("Comment not found")
+            return comment
+
+    @staticmethod
+    def create_comment(user_id, post_id, comment_data):
+        """Create comment on post"""
+        with session_scope() as session:
+            # Verify post exists and is active
+            post = session.query(Post).get(post_id)
+            if not post:
+                raise NotFoundError("Post not found")
+            if post.status != PostStatus.ACTIVE:
+                raise ValidationError("Cannot comment on inactive post")
+
+            comment = PostComment(
+                user_id=user_id,
+                post_id=post_id,
+                content=comment_data["content"],
+                parent_id=comment_data.get("parent_id"),
+            )
+            session.add(comment)
+            session.flush()
+
+            # Notify post owner
+            if post.seller.user_id != user_id:
+                from app.notifications.services import NotificationService
+
+                NotificationService.create_notification(
+                    user_id=post.seller.user_id,
+                    notification_type=NotificationType.POST_COMMENT,
+                    reference_type="post",
+                    reference_id=post_id,
+                    metadata_={"comment_id": comment.id, "actor_id": user_id},
+                )
+
+            return comment
+
 
 class ProductSocialService:
     @staticmethod
@@ -1141,6 +1321,32 @@ class FollowService:
             logger.error(f"Error following user: {str(e)}")
             raise ConflictError("Failed to follow user")
 
+    @staticmethod
+    def unfollow_user(follower_id, followee_id):
+        """Unfollow a user"""
+        try:
+            with session_scope() as session:
+                follow = (
+                    session.query(Follow)
+                    .filter_by(follower_id=follower_id, followee_id=followee_id)
+                    .first()
+                )
+                if not follow:
+                    raise NotFoundError("Follow relationship not found")
+
+                session.delete(follow)
+
+                # Update Redis counters
+                redis_client.zrem(f"user:{follower_id}:following", followee_id)
+                redis_client.zrem(f"user:{followee_id}:followers", follower_id)
+
+                return True
+        except SQLAlchemyError as e:
+            logger.error(f"Error unfollowing user: {str(e)}")
+            raise ConflictError("Failed to unfollow user")
+        except (RedisError, RedisConnectionError) as e:
+            logger.warning(f"Redis error while unfollowing user: {str(e)}")
+
 
 class FeedService:
     @staticmethod
@@ -1204,7 +1410,7 @@ class FeedService:
                 .options(joinedload(Product.seller), joinedload(Product.images))
                 .filter(
                     Product.id.in_(product_ids),
-                    Product.status == Product.Status.ACTIVE,
+                    Product.status == ProductStatus.ACTIVE,
                 )
                 .all()
                 if product_ids

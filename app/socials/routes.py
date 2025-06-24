@@ -229,20 +229,28 @@ class PostDetail(MethodView):
     @bp.response(200, PostDetailSchema)
     def put(self, post_data, post_id):
         """Update post (owner only)"""
-        post = PostService.get_post(post_id)
-        if post.seller_id != current_user.seller_account.id:
-            abort(403, message="You can only update your own posts")
-        return PostService.update_post(post_id, post_data)
+        try:
+            post = PostService.get_post(post_id)
+            if post.seller_id != current_user.seller_account.id:
+                abort(403, message="You can only edit your own posts")
+            return PostService.update_post(
+                post_id, current_user.seller_account.id, post_data
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
 
     @login_required
     @bp.response(204)
     def delete(self, post_id):
         """Delete post (owner only)"""
-        post = PostService.get_post(post_id)
-        if post.seller_id != current_user.seller_account.id:
-            abort(403, message="You can only delete your own posts")
-        PostService.delete_post(post_id)
-        return None
+        try:
+            post = PostService.get_post(post_id)
+            if post.seller_id != current_user.seller_account.id:
+                abort(403, message="You can only delete your own posts")
+            PostService.delete_post(post_id, current_user.seller_account.id)
+            return None
+        except APIError as e:
+            abort(e.status_code, message=e.message)
 
 
 @bp.route("/posts/<post_id>/status")
@@ -252,10 +260,15 @@ class PostStatusUpdate(MethodView):
     @bp.response(200, PostDetailSchema)
     def put(self, status_data, post_id):
         """Update post status (owner only)"""
-        post = PostService.get_post(post_id)
-        if post.seller_id != current_user.seller_account.id:
-            abort(403, message="You can only update your own posts")
-        return PostService.update_post_status(post_id, status_data["status"])
+        try:
+            post = PostService.get_post(post_id)
+            if post.seller_id != current_user.seller_account.id:
+                abort(403, message="You can only update your own posts")
+            return PostService.update_post_status(
+                post_id, current_user.seller_account.id, status_data["status"]
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
 
 
 @bp.route("/posts/<post_id>/like")
@@ -263,8 +276,11 @@ class PostLike(MethodView):
     @login_required
     @bp.response(200, PostLikeSchema)
     def post(self, post_id):
-        """Like/unlike a post"""
-        return PostService.toggle_like(current_user.id, post_id)
+        """Toggle like on post"""
+        try:
+            return PostService.toggle_like(current_user.id, post_id)
+        except APIError as e:
+            abort(e.status_code, message=e.message)
 
 
 @bp.route("/posts/<post_id>/comments")
@@ -273,16 +289,22 @@ class PostComments(MethodView):
     @bp.response(200, PostCommentsSchema)
     def get(self, args, post_id):
         """Get post comments"""
-        return PostService.get_post_comments(
-            post_id, args.get("page", 1), args.get("per_page", 20)
-        )
+        try:
+            return PostService.get_post_comments(
+                post_id, args.get("page", 1), args.get("per_page", 20)
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
 
     @login_required
     @bp.arguments(CommentCreateSchema)
     @bp.response(201, PostCommentSchema)
     def post(self, comment_data, post_id):
         """Create comment on post"""
-        return PostService.create_comment(current_user.id, post_id, comment_data)
+        try:
+            return PostService.create_comment(current_user.id, post_id, comment_data)
+        except APIError as e:
+            abort(e.status_code, message=e.message)
 
 
 @bp.route("/comments/<comment_id>")
@@ -292,20 +314,28 @@ class CommentDetail(MethodView):
     @bp.response(200, PostCommentSchema)
     def put(self, comment_data, comment_id):
         """Update comment (owner only)"""
-        comment = PostService.get_comment(comment_id)
-        if comment.user_id != current_user.id:
-            abort(403, message="You can only update your own comments")
-        return PostService.update_comment(comment_id, comment_data)
+        try:
+            comment = PostService.get_comment(comment_id)
+            if comment.user_id != current_user.id:
+                abort(403, message="You can only edit your own comments")
+            return PostService.update_comment(
+                comment_id, current_user.id, comment_data["content"]
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
 
     @login_required
     @bp.response(204)
     def delete(self, comment_id):
         """Delete comment (owner only)"""
-        comment = PostService.get_comment(comment_id)
-        if comment.user_id != current_user.id:
-            abort(403, message="You can only delete your own comments")
-        PostService.delete_comment(comment_id)
-        return None
+        try:
+            comment = PostService.get_comment(comment_id)
+            if comment.user_id != current_user.id:
+                abort(403, message="You can only delete your own comments")
+            PostService.delete_comment(comment_id, current_user.id)
+            return None
+        except APIError as e:
+            abort(e.status_code, message=e.message)
 
 
 # Seller Posts
@@ -378,9 +408,14 @@ class UserFeed(MethodView):
     @bp.response(200, HybridFeedSchema)
     def get(self, args):
         """Get personalized feed"""
-        return FeedService.get_hybrid_feed(
-            current_user.id, page=args.get("page", 1), per_page=args.get("per_page", 20)
-        )
+        try:
+            return FeedService.get_hybrid_feed(
+                current_user.id,
+                page=args.get("page", 1),
+                per_page=args.get("per_page", 20),
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
 
 
 @bp.route("/feed/trending")
