@@ -29,6 +29,12 @@ class Config:
         self.BIND = config("BIND", default="127.0.0.1:8000")
         self.DEBUG = config("DEBUG", default=True, cast=bool)
 
+        # CORS Configuration
+        cors_origins = config(
+            "ALLOWED_ORIGINS", default="http://localhost:3000,http://127.0.0.1:3000"
+        )
+        self.ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins.split(",")]
+
         # Logging
         self.LOG_DIR = Path(config("LOG_DIR", default="logs"))
         self.LOG_LEVEL = config("LOG_LEVEL", default="INFO")
@@ -45,6 +51,13 @@ class Config:
             "OPENAPI_SWAGGER_UI_URL",
             default="https://cdn.jsdelivr.net/npm/swagger-ui-dist/",
         )
+
+        # Payment Gateway Configuration (Paystack for Nigeria)
+        self.PAYSTACK_SECRET_KEY = config("PAYSTACK_SECRET_KEY", default="")
+        self.PAYSTACK_PUBLIC_KEY = config("PAYSTACK_PUBLIC_KEY", default="")
+        self.PAYSTACK_WEBHOOK_SECRET = config("PAYSTACK_WEBHOOK_SECRET", default="")
+        self.PAYMENT_CURRENCY = config("PAYMENT_CURRENCY", default="NGN")
+        self.PAYMENT_GATEWAY = config("PAYMENT_GATEWAY", default="paystack")
 
         # Build Redis URL
         REDIS_URL = f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
@@ -85,6 +98,19 @@ class Config:
             "task_acks_late": self.CELERY_TASK_ACKS_LATE,
             "worker_disable_rate_limits": self.CELERY_WORKER_DISABLE_RATE_LIMITS,
             "broker_connection_retry_on_startup": self.CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP,
+        }
+
+    @property
+    def PAYMENT_CONFIG(self):
+        """Payment gateway configuration"""
+        return {
+            "gateway": self.PAYMENT_GATEWAY,
+            "currency": self.PAYMENT_CURRENCY,
+            "paystack": {
+                "secret_key": self.PAYSTACK_SECRET_KEY,
+                "public_key": self.PAYSTACK_PUBLIC_KEY,
+                "webhook_secret": self.PAYSTACK_WEBHOOK_SECRET,
+            },
         }
 
 
