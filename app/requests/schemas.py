@@ -1,7 +1,10 @@
 from marshmallow import Schema, fields, validate, validates, ValidationError
 from datetime import datetime
 
+# import pytz
+
 from app.categories.schemas import CategorySchema
+from app.libs.schemas import PaginationSchema
 
 # app imports
 from .models import RequestStatus
@@ -11,8 +14,8 @@ class RequestImageSchema(Schema):
     """Schema for request images"""
 
     id = fields.Int(dump_only=True)
-    image_url = fields.Str(required=True, validate=validate.URL())
-    is_primary = fields.Bool(dump_only=True)
+    url = fields.Str(required=True, validate=validate.URL())
+    is_primary = fields.Bool(allow_none=True)
 
 
 class SellerOfferSchema(Schema):
@@ -64,6 +67,11 @@ class BuyerRequestSchema(Schema):
     offers = fields.Nested(SellerOfferSchema, many=True, dump_only=True)
 
 
+class BuyerRequestSearchResultSchema(Schema):
+    items = fields.List(fields.Nested(BuyerRequestSchema))
+    pagination = fields.Nested(PaginationSchema)
+
+
 class BuyerRequestCreateSchema(Schema):
     """Schema for creating buyer requests"""
 
@@ -77,8 +85,14 @@ class BuyerRequestCreateSchema(Schema):
 
     @validates("expires_at")
     def validate_expires_at(self, value):
-        if value and value <= datetime.utcnow():
-            raise ValidationError("Expiration date must be in the future")
+        if value:
+            # Convert to UTC naive datetime for comparison
+            if value.tzinfo is not None:
+                value = value.replace(tzinfo=None)
+
+            current_time = datetime.utcnow()
+            if value <= current_time:
+                raise ValidationError("Expiration date must be in the future")
 
 
 class BuyerRequestUpdateSchema(Schema):
@@ -93,8 +107,14 @@ class BuyerRequestUpdateSchema(Schema):
 
     @validates("expires_at")
     def validate_expires_at(self, value):
-        if value and value <= datetime.utcnow():
-            raise ValidationError("Expiration date must be in the future")
+        if value:
+            # Convert to UTC naive datetime for comparison
+            if value.tzinfo is not None:
+                value = value.replace(tzinfo=None)
+
+            current_time = datetime.utcnow()
+            if value <= current_time:
+                raise ValidationError("Expiration date must be in the future")
 
 
 class BuyerRequestSearchSchema(Schema):
@@ -130,4 +150,3 @@ class RequestUpvoteSchema(Schema):
 # Legacy schema for backward compatibility
 class RequestSchema(BuyerRequestSchema):
     """Legacy schema alias"""
-

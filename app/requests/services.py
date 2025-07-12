@@ -1,5 +1,6 @@
 # python imports
 import logging
+import json
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, List
 from enum import Enum
@@ -61,6 +62,103 @@ class BuyerRequestService:
     }
 
     @staticmethod
+    def _normalize_datetime(dt):
+        """Convert datetime to UTC naive for consistent comparison"""
+        if dt is None:
+            return None
+        if dt.tzinfo is not None:
+            return dt.replace(tzinfo=None)
+        return dt
+
+    @staticmethod
+    def _serialize_request(request: BuyerRequest) -> Optional[str]:
+        """Serialize request object for Redis caching"""
+        try:
+            # Convert to dict with serializable data
+            request_data = {
+                "id": request.id,
+                "user_id": request.user_id,
+                "title": request.title,
+                "description": request.description,
+                "category_id": request.category_id,
+                "budget": float(request.budget) if request.budget else None,
+                "request_metadata": request.request_metadata or {},
+                "status": request.status.value if request.status else None,
+                "views": request.views,
+                "upvotes": request.upvotes,
+                "created_at": request.created_at.isoformat()
+                if request.created_at
+                else None,
+                "updated_at": request.updated_at.isoformat()
+                if request.updated_at
+                else None,
+                "expires_at": request.expires_at.isoformat()
+                if request.expires_at
+                else None,
+                "images": [
+                    {
+                        "id": img.id,
+                        "image_url": img.image_url,
+                        "is_primary": img.is_primary,
+                    }
+                    for img in getattr(request, "images", [])
+                ],
+                "offers_count": len(getattr(request, "offers", [])),
+            }
+            return json.dumps(request_data)
+        except Exception as e:
+            logger.error(f"Error serializing request: {e}")
+            return None
+
+    @staticmethod
+    def _serialize_paginated_result(result: Dict[str, Any]) -> Optional[str]:
+        """Serialize paginated result for Redis caching"""
+        try:
+            # Extract only the serializable parts
+            serializable_result = {
+                "items": [
+                    {
+                        "id": item.id,
+                        "user_id": item.user_id,
+                        "title": item.title,
+                        "description": item.description,
+                        "category_id": item.category_id,
+                        "budget": float(item.budget) if item.budget else None,
+                        "status": item.status.value if item.status else None,
+                        "views": item.views,
+                        "upvotes": item.upvotes,
+                        "created_at": item.created_at.isoformat()
+                        if item.created_at
+                        else None,
+                        "expires_at": item.expires_at.isoformat()
+                        if item.expires_at
+                        else None,
+                        "images_count": len(item.images or []),
+                        "offers_count": len(item.offers or []),
+                    }
+                    for item in result.get("items", [])
+                ],
+                "pagination": result.get("pagination", {}),
+                "total": result.get("total", 0),
+                "page": result.get("page", 1),
+                "per_page": result.get("per_page", 20),
+                "pages": result.get("pages", 1),
+            }
+            return json.dumps(serializable_result)
+        except Exception as e:
+            logger.error(f"Error serializing paginated result: {e}")
+            return None
+
+    @staticmethod
+    def _deserialize_request(request_data: str) -> Optional[Dict[str, Any]]:
+        """Deserialize request data from Redis cache"""
+        try:
+            return json.loads(request_data)
+        except Exception as e:
+            logger.error(f"Error deserializing request: {e}")
+            return None
+
+    @staticmethod
     def create_request(user_id: str, data: Dict[str, Any]) -> BuyerRequest:
         """Create a new buyer request with dual-role validation"""
         with session_scope() as session:
@@ -77,6 +175,9 @@ class BuyerRequestService:
             expires_at = data.get("expires_at")
             if not expires_at:
                 expires_at = datetime.utcnow() + timedelta(days=30)
+            else:
+                # Normalize the datetime to UTC naive
+                expires_at = BuyerRequestService._normalize_datetime(expires_at)
 
             # Create request
             request = BuyerRequest(
@@ -99,7 +200,9 @@ class BuyerRequestService:
                     image = RequestImage(
                         request_id=request.id,
                         image_url=image_data["url"],
-                        is_primary=(i == 0),  # First image is primary
+                        is_primary=image_data.get(
+                            "is_primary", i == 0
+                        ),  # Use provided is_primary or default to first image
                     )
                     session.add(image)
 
@@ -115,13 +218,8 @@ class BuyerRequestService:
     @staticmethod
     def get_request(request_id: str, user_id: Optional[str] = None) -> BuyerRequest:
         """Get request details with role-based access control"""
-        # Try cache first
-        cache_key = BuyerRequestService.CACHE_KEYS["request"].format(
-            request_id=request_id
-        )
-        cached = redis_client.get(cache_key)
-        if cached:
-            return cached
+        # TODO: Implement proper Redis caching with serialization
+        # For now, disable caching to fix Redis DataError
 
         with session_scope() as session:
             request = (
@@ -145,9 +243,13 @@ class BuyerRequestService:
                     # Buyers can only see their own requests or public requests
                     if user.is_buyer and request.user_id != user_id:
                         # Check if request is still open and not expired
+                        current_time = datetime.utcnow()
+                        request_expires = BuyerRequestService._normalize_datetime(
+                            request.expires_at
+                        )
                         if (
                             request.status != RequestStatus.OPEN
-                            or request.expires_at < datetime.utcnow()
+                            or request_expires < current_time
                         ):
                             raise ForbiddenError("Access denied")
 
@@ -160,9 +262,6 @@ class BuyerRequestService:
 
             # Increment view count
             request.views += 1
-
-            # Cache for 5 minutes
-            redis_client.setex(cache_key, 300, request)
 
             return request
 
@@ -224,7 +323,12 @@ class BuyerRequestService:
             if request.status != RequestStatus.OPEN:
                 raise ValidationError("Request is no longer accepting offers")
 
-            if request.expires_at < datetime.utcnow():
+            # Check if request has expired using normalized datetime
+            current_time = datetime.utcnow()
+            request_expires = BuyerRequestService._normalize_datetime(
+                request.expires_at
+            )
+            if request_expires < current_time:
                 raise ValidationError("Request has expired")
 
             # Check for existing offer from this seller
@@ -255,7 +359,7 @@ class BuyerRequestService:
                 product_id=data.get("product_id"),
                 price=data.get("price"),
                 message=data.get("message"),
-                status=OfferStatus.PENDING,
+                status="pending",
             )
 
             session.add(offer)
@@ -349,15 +453,8 @@ class BuyerRequestService:
     @staticmethod
     def list_user_requests(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
         """Get paginated list of user's requests"""
-        cache_key = BuyerRequestService.CACHE_KEYS["user_requests"].format(
-            user_id=user_id
-        )
-
-        # Try cache for read-only operations
-        if not args.get("page", 1) == 1:  # Only cache first page
-            cached = redis_client.get(cache_key)
-            if cached:
-                return cached
+        # TODO: Implement proper Redis caching with serialization
+        # For now, disable caching to fix Redis DataError
 
         with session_scope() as session:
             base_query = (
@@ -380,9 +477,8 @@ class BuyerRequestService:
             )
             result = paginator.paginate(args)
 
-            # Cache first page for 5 minutes
-            if args.get("page", 1) == 1:
-                redis_client.setex(cache_key, 300, result)
+            # TODO: Implement proper Redis caching with serialization
+            # For now, disable caching to fix Redis DataError
 
             return result
 
@@ -441,7 +537,6 @@ class BuyerRequestService:
             paginator = Paginator(
                 base_query, page=args.get("page", 1), per_page=args.get("per_page", 20)
             )
-            # return paginator.paginate(args)
             return paginator.paginate(args)
 
     @staticmethod
@@ -498,7 +593,9 @@ class BuyerRequestService:
             if data.get("metadata"):
                 request.request_metadata.update(data["metadata"])
             if data.get("expires_at"):
-                request.expires_at = data["expires_at"]
+                # Normalize the datetime to UTC naive
+                expires_at = BuyerRequestService._normalize_datetime(data["expires_at"])
+                request.expires_at = expires_at
 
             # Handle images if provided
             if data.get("images"):
@@ -510,7 +607,9 @@ class BuyerRequestService:
                     image = RequestImage(
                         request_id=request.id,
                         image_url=image_data["url"],
-                        is_primary=(i == 0),
+                        is_primary=image_data.get(
+                            "is_primary", i == 0
+                        ),  # Use provided is_primary or default to first image
                     )
                     session.add(image)
 
@@ -679,12 +778,13 @@ class BuyerRequestService:
     def handle_request_expiration():
         """Background task to handle expired requests"""
         with session_scope() as session:
+            current_time = datetime.utcnow()
             expired_requests = (
                 session.query(BuyerRequest)
                 .filter(
                     and_(
                         BuyerRequest.status == RequestStatus.OPEN,
-                        BuyerRequest.expires_at < datetime.utcnow(),
+                        BuyerRequest.expires_at < current_time,
                     )
                 )
                 .all()

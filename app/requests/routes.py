@@ -20,6 +20,7 @@ from .schemas import (
     SellerOfferSchema,
     SellerOfferCreateSchema,
     RequestStatusUpdateSchema,
+    BuyerRequestSearchResultSchema,
 )
 
 
@@ -31,7 +32,7 @@ bp = Blueprint(
 @bp.route("/")
 class RequestList(MethodView):
     @bp.arguments(BuyerRequestSearchSchema, location="query")
-    @bp.response(200, BuyerRequestSchema(many=True))
+    @bp.response(200, BuyerRequestSearchResultSchema)
     def get(self, args):
         """Search and list buyer requests with role-based filtering"""
         try:
@@ -57,7 +58,7 @@ class MyRequests(MethodView):
     @login_required
     @buyer_required
     @bp.arguments(PaginationQueryArgs, location="query")
-    @bp.response(200, BuyerRequestSchema(many=True))
+    @bp.response(200, BuyerRequestSearchResultSchema)
     def get(self, args):
         """Get current user's requests (buyers only)"""
         try:
