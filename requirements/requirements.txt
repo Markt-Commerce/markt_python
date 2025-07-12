@@ -28,6 +28,8 @@ bcrypt==4.0.1
 # Utilities
 python-dotenv==1.0.0
 loguru==0.7.0
+requests==2.31.0
+psutil==5.9.8
 
 # Task Queue
 celery==5.3.6

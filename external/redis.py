@@ -39,6 +39,10 @@ class RedisClient:
         """Wrapper for Redis zadd command"""
         return self.client.zadd(name, mapping, nx=nx, xx=xx, ch=ch, incr=incr)
 
+    def zrem(self, name, *values):
+        """Wrapper for Redis zrem command"""
+        return self.client.zrem(name, *values)
+
     def zincrby(self, name, amount, value):
         """Wrapper for Redis zincrby command"""
         return self.client.zincrby(name, amount, value)

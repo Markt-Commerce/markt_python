@@ -41,6 +41,10 @@ class Database:
                 PostLike,
                 PostMedia,
                 PostProduct,
+                Niche,
+                NicheMembership,
+                NichePost,
+                NicheModerationAction,
             )
             from app.notifications.models import Notification
             from app.requests.models import BuyerRequest, SellerOffer, RequestImage
