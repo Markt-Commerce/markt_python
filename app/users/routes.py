@@ -262,4 +262,63 @@ class PublicProfile(MethodView):
         # TODO: Privacy controls
 
 
+@bp.route("/shops")
+class ShopList(MethodView):
+    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.response(200, description="List of shops")
+    def get(self, args):
+        """Search and discover shops"""
+        try:
+            from .services import ShopService
+
+            user_id = current_user.id if current_user.is_authenticated else None
+            return ShopService.search_shops(args, user_id)
+        except Exception as e:
+            abort(500, message=str(e))
+
+
+@bp.route("/shops/trending")
+class TrendingShops(MethodView):
+    @bp.response(200, description="Trending shops")
+    def get(self):
+        """Get trending shops"""
+        try:
+            from .services import ShopService
+
+            shops = ShopService.get_trending_shops()
+            return {"shops": shops}
+        except Exception as e:
+            abort(500, message=str(e))
+
+
+@bp.route("/shops/categories")
+class ShopCategories(MethodView):
+    @bp.response(200, description="Shop categories")
+    def get(self):
+        """Get all shop categories for filtering"""
+        try:
+            from .services import ShopService
+
+            categories = ShopService.get_shop_categories()
+            return {"categories": categories}
+        except Exception as e:
+            abort(500, message=str(e))
+
+
+@bp.route("/shops/<int:shop_id>")
+class ShopDetail(MethodView):
+    @bp.response(200, description="Shop details")
+    def get(self, shop_id):
+        """Get detailed shop information"""
+        try:
+            from .services import ShopService
+
+            user_id = current_user.id if current_user.is_authenticated else None
+            return ShopService.get_shop_details(shop_id, user_id)
+        except NotFoundError as e:
+            abort(404, message=str(e))
+        except Exception as e:
+            abort(500, message=str(e))
+
+
 # -----------------------------------------------
