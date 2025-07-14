@@ -66,7 +66,9 @@ class ProductDetail(MethodView):
         product = ProductService.get_product(product_id)
         if product.seller_id != current_user.seller_account.id:
             abort(403, message="You can only update your own products")
-        return ProductService.update_product(product_id, product_data)
+        return ProductService.update_product(
+            product_id, current_user.seller_account.id, product_data
+        )
 
     @login_required
     @bp.response(204)
@@ -75,7 +77,7 @@ class ProductDetail(MethodView):
         product = ProductService.get_product(product_id)
         if product.seller_id != current_user.seller_account.id:
             abort(403, message="You can only delete your own products")
-        ProductService.delete_product(product_id)
+        ProductService.delete_product(product_id, current_user.seller_account.id)
         return None
 
 

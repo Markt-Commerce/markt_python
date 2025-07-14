@@ -77,6 +77,19 @@ def create_app():
         # Register socket namespaces
         register_socket_namespaces(socketio)
 
+        # Initialize PaymentService with Paystack keys
+        if settings.PAYSTACK_SECRET_KEY and settings.PAYSTACK_PUBLIC_KEY:
+            from app.payments.services import PaymentService
+
+            PaymentService.initialize_paystack(
+                settings.PAYSTACK_SECRET_KEY, settings.PAYSTACK_PUBLIC_KEY
+            )
+            logger.info("PaymentService initialized with Paystack keys")
+        else:
+            logger.warning(
+                "Paystack keys not configured - payment features will not work"
+            )
+
     logger.info("Application initialized")
     return app, socketio
 

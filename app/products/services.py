@@ -2,6 +2,7 @@
 import logging
 from datetime import datetime
 import time
+from typing import List, Dict, Any, Optional
 
 # package imports
 from sqlalchemy import or_, and_
@@ -15,7 +16,13 @@ from external.redis import redis_client
 from app.libs.session import session_scope
 from app.libs.pagination import Paginator
 from app.categories.models import ProductCategory, ProductTag
-from app.libs.errors import NotFoundError, ValidationError, ConflictError, APIError
+from app.libs.errors import (
+    NotFoundError,
+    ValidationError,
+    ConflictError,
+    APIError,
+    ForbiddenError,
+)
 
 from app.users.models import Seller
 from app.socials.models import Follow, Post, PostProduct, PostStatus
@@ -23,6 +30,7 @@ from app.socials.models import Follow, Post, PostProduct, PostStatus
 # app imports
 from .models import Product, ProductVariant, ProductInventory
 from .constants import PRODUCT_FILTER_KEYS, OPTIONAL_PRODUCT_FIELDS
+from app.orders.models import OrderItem
 
 
 logger = logging.getLogger(__name__)
@@ -492,6 +500,172 @@ class ProductService:
             return False
 
     # TODO: Add search, filtering, pagination
+
+    @staticmethod
+    def reduce_inventory_for_order(order_items: List[OrderItem]) -> bool:
+        """Reduce inventory for order items when payment is successful"""
+        try:
+            with session_scope() as session:
+                for item in order_items:
+                    # Get product inventory
+                    if item.variant_id:
+                        # Reduce variant inventory
+                        inventory = (
+                            session.query(ProductInventory)
+                            .filter_by(
+                                product_id=item.product_id, variant_id=item.variant_id
+                            )
+                            .first()
+                        )
+
+                        if inventory:
+                            if inventory.quantity < item.quantity:
+                                raise ValidationError(
+                                    f"Insufficient stock for product {item.product_id} variant {item.variant_id}"
+                                )
+                            inventory.quantity -= item.quantity
+                        else:
+                            # Create inventory record if it doesn't exist
+                            inventory = ProductInventory(
+                                product_id=item.product_id,
+                                variant_id=item.variant_id,
+                                quantity=0,  # Will be negative after reduction
+                            )
+                            session.add(inventory)
+                    else:
+                        # Reduce main product stock
+                        product = session.query(Product).get(item.product_id)
+                        if not product:
+                            raise NotFoundError(f"Product {item.product_id} not found")
+
+                        if product.stock < item.quantity:
+                            raise ValidationError(
+                                f"Insufficient stock for product {item.product_id}"
+                            )
+
+                        product.stock -= item.quantity
+
+                        # Update product status if stock becomes 0
+                        if product.stock == 0:
+                            product.status = Product.Status.OUT_OF_STOCK
+
+                session.flush()
+                logger.info(f"Successfully reduced inventory for order items")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to reduce inventory: {str(e)}")
+            raise APIError(f"Inventory reduction failed: {str(e)}", 500)
+
+    @staticmethod
+    def check_inventory_availability(order_items: List[OrderItem]) -> bool:
+        """Check if all order items have sufficient inventory"""
+        try:
+            with session_scope() as session:
+                for item in order_items:
+                    if item.variant_id:
+                        # Check variant inventory
+                        inventory = (
+                            session.query(ProductInventory)
+                            .filter_by(
+                                product_id=item.product_id, variant_id=item.variant_id
+                            )
+                            .first()
+                        )
+
+                        if not inventory or inventory.quantity < item.quantity:
+                            return False
+                    else:
+                        # Check main product stock
+                        product = session.query(Product).get(item.product_id)
+                        if not product or product.stock < item.quantity:
+                            return False
+
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to check inventory availability: {str(e)}")
+            return False
+
+    @staticmethod
+    def get_product_inventory(
+        product_id: str, variant_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Get inventory information for a product"""
+        with session_scope() as session:
+            if variant_id:
+                inventory = (
+                    session.query(ProductInventory)
+                    .filter_by(product_id=product_id, variant_id=variant_id)
+                    .first()
+                )
+
+                if inventory:
+                    return {
+                        "product_id": product_id,
+                        "variant_id": variant_id,
+                        "quantity": inventory.quantity,
+                        "location": inventory.location,
+                        "available": inventory.quantity > 0,
+                    }
+                else:
+                    return {
+                        "product_id": product_id,
+                        "variant_id": variant_id,
+                        "quantity": 0,
+                        "location": None,
+                        "available": False,
+                    }
+            else:
+                product = session.query(Product).get(product_id)
+                if product:
+                    return {
+                        "product_id": product_id,
+                        "quantity": product.stock,
+                        "available": product.stock > 0,
+                        "status": product.status.value,
+                    }
+                else:
+                    raise NotFoundError(f"Product {product_id} not found")
+
+    @staticmethod
+    def update_product_stock(
+        product_id: str, quantity: int, variant_id: Optional[int] = None
+    ):
+        """Update product stock (for admin/seller use)"""
+        with session_scope() as session:
+            if variant_id:
+                inventory = (
+                    session.query(ProductInventory)
+                    .filter_by(product_id=product_id, variant_id=variant_id)
+                    .first()
+                )
+
+                if inventory:
+                    inventory.quantity = max(0, quantity)
+                else:
+                    inventory = ProductInventory(
+                        product_id=product_id,
+                        variant_id=variant_id,
+                        quantity=max(0, quantity),
+                    )
+                    session.add(inventory)
+            else:
+                product = session.query(Product).get(product_id)
+                if not product:
+                    raise NotFoundError(f"Product {product_id} not found")
+
+                product.stock = max(0, quantity)
+
+                # Update status based on stock
+                if product.stock == 0:
+                    product.status = Product.Status.OUT_OF_STOCK
+                elif product.status == Product.Status.OUT_OF_STOCK:
+                    product.status = Product.Status.ACTIVE
+
+            session.flush()
+            logger.info(f"Updated stock for product {product_id} to {quantity}")
+            return True
 
 
 class ProductStatsService:

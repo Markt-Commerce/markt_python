@@ -47,7 +47,7 @@ class PaymentCreate(MethodView):
             order_id=payment_data["order_id"],
             amount=payment_data["amount"],
             currency=payment_data.get("currency", "NGN"),
-            method=payment_data.get("method"),
+            method=payment_data.get("method", "card"),
             metadata=payment_data.get("metadata"),
         )
 
@@ -123,7 +123,7 @@ class PaymentInitialize(MethodView):
                 order_id=payment_data["order_id"],
                 amount=payment_data["amount"],
                 currency=payment_data.get("currency", "NGN"),
-                method=payment_data.get("method"),
+                method=payment_data.get("method", "card"),
                 metadata=payment_data.get("metadata"),
             )
 

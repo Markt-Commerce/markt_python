@@ -68,6 +68,13 @@ class PaymentService:
             if order.status != OrderStatus.PENDING:
                 raise ValidationError("Order is not in pending status")
 
+            # Convert string method to enum if needed
+            if isinstance(method, str):
+                try:
+                    method = PaymentMethod(method)
+                except ValueError:
+                    raise ValidationError(f"Invalid payment method: {method}")
+
             # Create payment record
             payment = Payment(
                 order_id=order_id,
@@ -128,6 +135,11 @@ class PaymentService:
                     order = session.query(Order).get(payment.order_id)
                     if order:
                         order.status = OrderStatus.PROCESSING
+
+                        # Reduce inventory for all order items
+                        from app.products.services import ProductService
+
+                        ProductService.reduce_inventory_for_order(order.items)
 
                         # Create transaction record
                         transaction = Transaction(
@@ -209,7 +221,9 @@ class PaymentService:
         cache_key = PaymentService.PAYMENT_CACHE_KEY.format(payment_id=payment_id)
         cached = redis_client.get(cache_key)
         if cached:
-            return cached
+            # For now, return None if cached to force DB lookup
+            # TODO: Implement proper cache deserialization
+            pass
 
         with session_scope() as session:
             payment = (
@@ -420,6 +434,11 @@ class PaymentService:
                 if order:
                     order.status = OrderStatus.PROCESSING
 
+                    # Reduce inventory for all order items
+                    from app.products.services import ProductService
+
+                    ProductService.reduce_inventory_for_order(order.items)
+
                 session.flush()
 
                 # Send notifications
@@ -571,7 +590,27 @@ class PaymentService:
         """Cache payment data"""
         try:
             cache_key = PaymentService.PAYMENT_CACHE_KEY.format(payment_id=payment.id)
-            redis_client.setex(cache_key, PaymentService.CACHE_EXPIRY, payment)
+            # Convert payment object to JSON-serializable dict
+            payment_data = {
+                "id": payment.id,
+                "order_id": payment.order_id,
+                "amount": payment.amount,
+                "currency": payment.currency,
+                "method": payment.method.value if payment.method else None,
+                "status": payment.status.value if payment.status else None,
+                "transaction_id": payment.transaction_id,
+                "gateway_response": payment.gateway_response,
+                "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
+                "created_at": payment.created_at.isoformat()
+                if payment.created_at
+                else None,
+                "updated_at": payment.updated_at.isoformat()
+                if payment.updated_at
+                else None,
+            }
+            redis_client.setex(
+                cache_key, PaymentService.CACHE_EXPIRY, str(payment_data)
+            )
         except Exception as e:
             logger.warning(f"Failed to cache payment: {str(e)}")
 

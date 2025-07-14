@@ -55,7 +55,6 @@ class Config:
         # Payment Gateway Configuration (Paystack for Nigeria)
         self.PAYSTACK_SECRET_KEY = config("PAYSTACK_SECRET_KEY", default="")
         self.PAYSTACK_PUBLIC_KEY = config("PAYSTACK_PUBLIC_KEY", default="")
-        self.PAYSTACK_WEBHOOK_SECRET = config("PAYSTACK_WEBHOOK_SECRET", default="")
         self.PAYMENT_CURRENCY = config("PAYMENT_CURRENCY", default="NGN")
         self.PAYMENT_GATEWAY = config("PAYMENT_GATEWAY", default="paystack")
 
@@ -109,7 +108,6 @@ class Config:
             "paystack": {
                 "secret_key": self.PAYSTACK_SECRET_KEY,
                 "public_key": self.PAYSTACK_PUBLIC_KEY,
-                "webhook_secret": self.PAYSTACK_WEBHOOK_SECRET,
             },
         }
 
