@@ -478,6 +478,19 @@ class ProductService:
         except Exception as e:
             logger.error(f"Trending update failed: {str(e)}")
 
+    @staticmethod
+    def product_exists(product_id: str) -> bool:
+        """Check if a product exists"""
+        try:
+            with session_scope() as session:
+                product = (
+                    session.query(Product).filter(Product.id == product_id).first()
+                )
+                return product is not None
+        except Exception as e:
+            logger.error(f"Error checking if product exists: {e}")
+            return False
+
     # TODO: Add search, filtering, pagination
 
 

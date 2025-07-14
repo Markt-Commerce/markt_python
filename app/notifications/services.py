@@ -430,34 +430,36 @@ class NotificationService:
     ) -> bool:
         """Attempt immediate WebSocket delivery, return True if successful"""
         try:
-            # Check if user has active connections
-            if not redis_client.exists(f"online_users:{user_id}"):
+            # Check if user has active connections using centralized manager
+            from main.sockets import SocketManager
+
+            if not SocketManager.is_user_online(user_id):
                 return False
 
-            # Get all active sessions for this user (handles multiple devices/tabs)
-            user_room = f"user_{user_id}"
-
-            from main.extensions import socketio
+            # Use centralized emission methods
+            from main.sockets import emit_to_user
 
             # Emit notification
-            socketio.emit(
-                "notification",
-                notification_data,
-                room=user_room,
-                namespace="/notifications",
+            success = emit_to_user(
+                user_id, "notification", notification_data, namespace="/notifications"
             )
 
-            # Update unread count in real-time
-            unread_count = NotificationService.get_unread_count(user_id)
-            socketio.emit(
-                "unread_count_update",
-                {"count": unread_count},
-                room=user_room,
-                namespace="/notifications",
-            )
+            if success:
+                # Update unread count in real-time
+                unread_count = NotificationService.get_unread_count(user_id)
+                emit_to_user(
+                    user_id,
+                    "unread_count_update",
+                    {"count": unread_count},
+                    namespace="/notifications",
+                )
 
-            logger.info(f"Immediate WebSocket delivery successful for user {user_id}")
-            return True
+                logger.info(
+                    f"Immediate WebSocket delivery successful for user {user_id}"
+                )
+                return True
+
+            return False
 
         except Exception as e:
             logger.error(
@@ -518,15 +520,15 @@ class NotificationService:
                 updated = query.update({"is_read": True}, synchronize_session=False)
                 session.commit()
 
-                # Emit real-time unread count update
+                # Emit real-time unread count update using centralized method
                 if updated > 0:
-                    from main.extensions import socketio
+                    from main.sockets import emit_to_user
 
                     unread_count = NotificationService.get_unread_count(user_id)
-                    socketio.emit(
+                    emit_to_user(
+                        user_id,
                         "unread_count_update",
                         {"count": unread_count},
-                        room=f"user_{user_id}",
                         namespace="/notifications",
                     )
 

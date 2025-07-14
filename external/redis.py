@@ -80,6 +80,14 @@ class RedisClient:
         """Wrapper for Redis exists command"""
         return self.client.exists(*names)
 
+    def keys(self, pattern):
+        """Wrapper for Redis keys command"""
+        return self.client.keys(pattern)
+
+    def ttl(self, name):
+        """Wrapper for Redis ttl command"""
+        return self.client.ttl(name)
+
     # Pub/Sub operations
     def publish(self, channel, message):
         """Wrapper for Redis publish command"""
@@ -114,6 +122,23 @@ class RedisClient:
     def scard(self, name):
         """Wrapper for Redis scard command"""
         return self.client.scard(name)
+
+    def srem(self, name, *values):
+        """Wrapper for Redis srem command"""
+        return self.client.srem(name, *values)
+
+    # String operations
+    def incr(self, name, amount=1):
+        """Wrapper for Redis incr command"""
+        return self.client.incr(name, amount)
+
+    def decr(self, name, amount=1):
+        """Wrapper for Redis decr command"""
+        return self.client.decr(name, amount)
+
+    def expire(self, name, time):
+        """Wrapper for Redis expire command"""
+        return self.client.expire(name, time)
 
     # Recovery code
     def store_recovery_code(self, email: str, code: str, expires_in: int = 600):

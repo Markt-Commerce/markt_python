@@ -530,13 +530,14 @@ class PaymentService:
 
     @staticmethod
     def _emit_payment_update(payment: Payment):
-        """Emit real-time payment update"""
+        """Emit real-time payment update using centralized emission"""
         try:
-            from main.extensions import socketio
+            from main.sockets import emit_to_room
 
             # Emit to buyer
             buyer_room = f"buyer_{payment.order.buyer.id}"
-            socketio.emit(
+            emit_to_room(
+                buyer_room,
                 "payment_update",
                 {
                     "payment_id": payment.id,
@@ -544,14 +545,14 @@ class PaymentService:
                     "amount": payment.amount,
                     "updated_at": payment.updated_at.isoformat(),
                 },
-                room=buyer_room,
                 namespace="/orders",
             )
 
             # Emit to seller if applicable
             if payment.order.items:
                 seller_room = f"seller_{payment.order.items[0].product.seller.id}"
-                socketio.emit(
+                emit_to_room(
+                    seller_room,
                     "payment_update",
                     {
                         "payment_id": payment.id,
@@ -559,7 +560,6 @@ class PaymentService:
                         "amount": payment.amount,
                         "updated_at": payment.updated_at.isoformat(),
                     },
-                    room=seller_room,
                     namespace="/orders",
                 )
 

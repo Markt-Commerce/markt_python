@@ -1512,6 +1512,17 @@ class PostService:
 
             return comment
 
+    @staticmethod
+    def post_exists(post_id: str) -> bool:
+        """Check if a post exists"""
+        try:
+            with session_scope() as session:
+                post = session.query(Post).filter(Post.id == post_id).first()
+                return post is not None
+        except Exception as e:
+            logger.error(f"Error checking if post exists: {e}")
+            return False
+
 
 class ProductSocialService:
     @staticmethod
@@ -1805,186 +1816,444 @@ class FollowService:
 
 
 class FeedService:
-    @staticmethod
-    def get_hybrid_feed(user_id, page=1, per_page=20):
-        """Primary endpoint for feed consumption"""
-        try:
-            # Try Redis cache first
-            cached_items = FeedService._get_cached_feed(user_id)
+    """Enhanced feed service with personalization and real-time updates"""
 
-            if cached_items:
-                feed_items = FeedService._hydrate_cached_items(cached_items)
-            else:
-                # Fallback to database generation
-                feed_items = FeedService._generate_fresh_feed(user_id)
+    # Cache keys with user-specific prefixes
+    CACHE_KEYS = {
+        "user_feed": "feed:user:{user_id}:{feed_type}",
+        "user_interests": "user:{user_id}:interests",
+        "user_preferences": "user:{user_id}:preferences",
+        "trending_content": "trending:content:{content_type}",
+        "feed_metadata": "feed:metadata:{user_id}",
+    }
+
+    # Feed types for different user contexts
+    FEED_TYPES = {
+        "personalized": "personalized",
+        "trending": "trending",
+        "following": "following",
+        "discover": "discover",
+        "niche": "niche:{niche_id}",
+    }
+
+    @staticmethod
+    def get_hybrid_feed(
+        user_id, page=1, per_page=20, feed_type="personalized", **kwargs
+    ):
+        """Get personalized hybrid feed with real-time updates"""
+        try:
+            # Check cache first
+            cached_feed = FeedService._get_cached_feed(user_id, feed_type)
+            if cached_feed and not kwargs.get("force_refresh"):
+                return FeedService._paginate_feed(cached_feed, page, per_page)
+
+            # Generate fresh feed
+            feed_items = FeedService._generate_fresh_feed(user_id, feed_type, **kwargs)
+
+            # Cache the feed
+            FeedService._cache_feed(user_id, feed_items, feed_type)
 
             return FeedService._paginate_feed(feed_items, page, per_page)
 
         except Exception as e:
-            logger.error(f"Feed error for user {user_id}: {str(e)}", exc_info=True)
-            raise NotFoundError("Failed to get feed")
+            logger.error(f"Error getting feed for user {user_id}: {str(e)}")
+            # Fallback to trending content
+            return FeedService._get_fallback_feed(page, per_page)
 
     @staticmethod
-    def _get_cached_feed(user_id):
-        """Get feed from Redis cache"""
-        return redis_client.zrevrange(f"user:{user_id}:feed", 0, -1, withscores=True)
+    def _get_cached_feed(user_id, feed_type="personalized"):
+        """Get cached feed with user-specific key"""
+        cache_key = FeedService.CACHE_KEYS["user_feed"].format(
+            user_id=user_id, feed_type=feed_type
+        )
+
+        try:
+            cached = redis_client.get(cache_key)
+            if cached:
+                return cached
+        except RedisError as e:
+            logger.warning(f"Redis error getting cached feed: {str(e)}")
+
+        return None
 
     @staticmethod
     def _hydrate_cached_items(cached_items):
-        """Convert cached IDs to full objects"""
-        with session_scope() as session:
-            # Separate posts and products
+        """Enhanced hydration with better error handling and performance"""
+        if not cached_items:
+            return []
+
+        try:
+            # Parse cached items
+            if isinstance(cached_items, str):
+                import json
+
+                cached_items = json.loads(cached_items)
+
+            # Separate posts and products for batch loading
             post_ids = []
             product_ids = []
 
-            # Handle different Redis response formats
             for item in cached_items:
-                try:
-                    if isinstance(item, tuple):
-                        item_id, _ = item
-                        # Handle bytes from Redis
-                        if isinstance(item_id, bytes):
-                            item_id = item_id.decode("utf-8")
-                    elif isinstance(item, dict):
-                        item_id = item.get("id", item.get("member"))
-                        if isinstance(item_id, bytes):
-                            item_id = item_id.decode("utf-8")
-                    else:
-                        item_id = str(item)
-                        if isinstance(item_id, bytes):
-                            item_id = item_id.decode("utf-8")
-
+                if isinstance(item, dict):
+                    item_id = item.get("id")
                     if item_id and item_id.startswith("PST_"):
                         post_ids.append(item_id)
                     elif item_id and item_id.startswith("PRD_"):
                         product_ids.append(item_id)
-                except (TypeError, AttributeError, KeyError, UnicodeDecodeError) as e:
-                    logger.warning(f"Failed to process cached item {item}: {e}")
-                    continue
+                elif isinstance(item, str):
+                    if item.startswith("PST_"):
+                        post_ids.append(item)
+                    elif item.startswith("PRD_"):
+                        product_ids.append(item)
 
-            # Fetch posts
-            posts = (
-                session.query(Post)
-                .options(
-                    joinedload(Post.seller).joinedload(Seller.user),
-                    joinedload(Post.media),
-                    joinedload(Post.tagged_products).joinedload(PostProduct.product),
-                    # Add niche posts relationship
-                    joinedload(Post.niche_posts).joinedload(NichePost.niche),
-                )
-                .filter(
-                    Post.id.in_(post_ids),
-                    Post.status == PostStatus.ACTIVE,
-                )
-                .all()
-                if post_ids
-                else []
-            )
+            # Batch load posts and products
+            posts = []
+            products = []
 
-            # Enhance posts with niche context
-            posts = PostService._enhance_posts_with_niche_context(posts)
+            if post_ids:
+                with session_scope() as session:
+                    posts = (
+                        session.query(Post)
+                        .options(
+                            joinedload(Post.seller).joinedload(Seller.user),
+                            joinedload(Post.media),
+                            joinedload(Post.likes),
+                            joinedload(Post.comments),
+                            joinedload(Post.niche_post).joinedload(NichePost.niche),
+                        )
+                        .filter(
+                            Post.id.in_(post_ids),
+                            Post.status == PostStatus.ACTIVE,
+                        )
+                        .all()
+                    )
 
-            # Fetch products
-            products = (
-                session.query(Product)
-                .options(joinedload(Product.seller), joinedload(Product.images))
-                .filter(
-                    Product.id.in_(product_ids),
-                    Product.status == Product.Status.ACTIVE,
-                )
-                .all()
-                if product_ids
-                else []
-            )
+            if product_ids:
+                with session_scope() as session:
+                    products = (
+                        session.query(Product)
+                        .options(
+                            joinedload(Product.seller).joinedload(Seller.user),
+                            joinedload(Product.media),
+                            joinedload(Product.reviews),
+                        )
+                        .filter(
+                            Product.id.in_(product_ids),
+                            Product.status == Product.Status.ACTIVE,
+                        )
+                        .all()
+                    )
 
-            # Reconstruct feed items
-            feed_items = []
+            # Create lookup dictionaries
+            posts_dict = {post.id: post for post in posts}
+            products_dict = {product.id: product for product in products}
+
+            # Hydrate feed items
+            hydrated_items = []
+
             for item in cached_items:
-                try:
-                    if isinstance(item, tuple):
-                        item_id, score = item
-                        # Handle bytes from Redis
-                        if isinstance(item_id, bytes):
-                            item_id = item_id.decode("utf-8")
-                    elif isinstance(item, dict):
-                        item_id = item.get("id", item.get("member"))
-                        score = item.get("score", 0)
-                        if isinstance(item_id, bytes):
-                            item_id = item_id.decode("utf-8")
-                    else:
-                        item_id = str(item)
-                        score = 0
-                        if isinstance(item_id, bytes):
-                            item_id = item_id.decode("utf-8")
+                if isinstance(item, dict):
+                    item_id = item.get("id")
+                    score = item.get("score", 0)
+                else:
+                    item_id = str(item)
+                    score = 0
 
-                    if item_id and item_id.startswith("PST_"):
-                        post = next((p for p in posts if p.id == item_id), None)
-                        if post and post.status == PostStatus.ACTIVE:
-                            feed_items.append(
-                                {
-                                    "type": "post",
-                                    "data": post,
-                                    "score": score,
-                                    "created_at": post.created_at,
-                                }
-                            )
-                    elif item_id and item_id.startswith("PRD_"):
-                        product = next((p for p in products if p.id == item_id), None)
-                        if product and product.status == Product.status.ACTIVE:
-                            feed_items.append(
-                                {
-                                    "type": "product",
-                                    "data": product,
-                                    "score": score,
-                                    "created_at": product.created_at,
-                                }
-                            )
-                except (TypeError, AttributeError, KeyError, UnicodeDecodeError) as e:
-                    logger.warning(f"Failed to reconstruct feed item {item}: {e}")
+                if not item_id:
                     continue
 
-            return feed_items
+                # Handle bytes from Redis
+                if isinstance(item_id, bytes):
+                    item_id = item_id.decode("utf-8")
+
+                if item_id.startswith("PST_"):
+                    post = posts_dict.get(item_id)
+                    if post:
+                        hydrated_items.append(
+                            {
+                                "id": post.id,
+                                "type": "post",
+                                "content": post.content,
+                                "seller": {
+                                    "id": post.seller.id,
+                                    "shop_name": post.seller.shop_name,
+                                    "user": {
+                                        "id": post.seller.user.id,
+                                        "username": post.seller.user.username,
+                                        "profile_picture": post.seller.user.profile_picture,
+                                    },
+                                },
+                                "media": [
+                                    {"url": m.url, "type": m.type} for m in post.media
+                                ],
+                                "likes_count": len(post.likes),
+                                "comments_count": len(post.comments),
+                                "created_at": post.created_at.isoformat(),
+                                "score": score,
+                                "niche": post.niche_post.niche.name
+                                if post.niche_post
+                                else None,
+                            }
+                        )
+
+                elif item_id.startswith("PRD_"):
+                    product = products_dict.get(item_id)
+                    if product:
+                        hydrated_items.append(
+                            {
+                                "id": product.id,
+                                "type": "product",
+                                "name": product.name,
+                                "description": product.description,
+                                "price": float(product.price),
+                                "seller": {
+                                    "id": product.seller.id,
+                                    "shop_name": product.seller.shop_name,
+                                    "user": {
+                                        "id": product.seller.user.id,
+                                        "username": product.seller.user.username,
+                                        "profile_picture": product.seller.user.profile_picture,
+                                    },
+                                },
+                                "media": [
+                                    {"url": m.url, "type": m.type}
+                                    for m in product.media
+                                ],
+                                "rating": product.rating,
+                                "reviews_count": len(product.reviews),
+                                "created_at": product.created_at.isoformat(),
+                                "score": score,
+                            }
+                        )
+
+            return hydrated_items
+
+        except Exception as e:
+            logger.error(f"Error hydrating cached items: {str(e)}")
+            return []
 
     @staticmethod
-    def _generate_fresh_feed(user_id):
-        """Generate fresh feed from database sources"""
-        # Get base content
-        posts = FeedService._get_followed_posts(user_id)
-        products = ProductService.get_recommended_products(user_id)
-        trending_result = TrendingService.get_trending_content(user_id)
+    def _generate_fresh_feed(user_id, feed_type="personalized", **kwargs):
+        """Generate fresh personalized feed with enhanced algorithms"""
+        try:
+            feed_items = []
 
-        # Score and combine
-        feed_items = []
-        feed_items.extend(FeedService._score_posts(posts, user_id))
-        feed_items.extend(FeedService._score_products(products, user_id))
+            if feed_type == "personalized":
+                # Get user interests and preferences
+                user_interests = FeedService._get_user_interests(user_id)
+                user_preferences = FeedService._get_user_preferences(user_id)
 
-        # Handle trending content - it returns a dict with items
-        if trending_result and isinstance(trending_result, dict):
-            trending_items = trending_result.get("items", [])
-            feed_items.extend(trending_items)
-        elif isinstance(trending_result, list):
-            feed_items.extend(trending_result)
+                # Get followed content
+                followed_items = FeedService._get_followed_content(user_id)
+                feed_items.extend(followed_items)
 
-        # Apply ranking and diversity
-        ranked_items = FeedService._apply_ranking(feed_items)
+                # Get trending content based on user interests
+                trending_items = FeedService._get_trending_by_interests(
+                    user_id, user_interests
+                )
+                feed_items.extend(trending_items)
 
-        # Cache results
-        FeedService._cache_feed(user_id, ranked_items)
+                # Get discover content
+                discover_items = FeedService._get_discover_content(
+                    user_id, user_preferences
+                )
+                feed_items.extend(discover_items)
 
-        return ranked_items
+            elif feed_type == "trending":
+                # Pure trending content
+                trending_content = FeedService._get_trending_content()
+                feed_items.extend(trending_content)
+
+            elif feed_type == "following":
+                # Only followed content
+                followed_items = FeedService._get_followed_content(user_id)
+                feed_items.extend(followed_items)
+
+            elif feed_type.startswith("niche:"):
+                # Niche-specific content
+                niche_id = feed_type.split(":")[1]
+                niche_items = FeedService._get_niche_content(niche_id, user_id)
+                feed_items.extend(niche_items)
+
+            # Apply personalization scoring
+            scored_items = FeedService._apply_personalization_scoring(
+                feed_items, user_id
+            )
+
+            # Apply diversity and freshness
+            final_items = FeedService._apply_diversity_and_freshness(scored_items)
+
+            return final_items
+
+        except Exception as e:
+            logger.error(f"Error generating fresh feed: {str(e)}")
+            return FeedService._get_fallback_feed()
 
     @staticmethod
-    def _get_followed_posts(user_id):
-        """Get posts from followed sellers"""
+    def _get_user_interests(user_id):
+        """Get user interests from cache or calculate"""
+        cache_key = FeedService.CACHE_KEYS["user_interests"].format(user_id=user_id)
+
+        try:
+            cached = redis_client.get(cache_key)
+            if cached:
+                return cached
+        except RedisError:
+            pass
+
+        # Calculate user interests based on behavior
+        interests = FeedService._calculate_user_interests(user_id)
+
+        # Cache for 1 hour
+        try:
+            redis_client.setex(cache_key, 3600, interests)
+        except RedisError:
+            pass
+
+        return interests
+
+    @staticmethod
+    def _calculate_user_interests(user_id):
+        """Calculate user interests based on behavior"""
         with session_scope() as session:
-            # Get followed seller IDs first
+            # Get user's liked posts categories
+            liked_categories = (
+                session.query(Post.category)
+                .join(PostLike)
+                .filter(PostLike.user_id == user_id)
+                .distinct()
+                .all()
+            )
+
+            # Get user's viewed products categories
+            viewed_categories = (
+                session.query(Product.category_id)
+                .join(ProductView)
+                .filter(ProductView.user_id == user_id)
+                .distinct()
+                .all()
+            )
+
+            # Get user's followed sellers categories
+            followed_categories = (
+                session.query(Seller.category)
+                .join(Follow)
+                .filter(Follow.follower_id == user_id)
+                .distinct()
+                .all()
+            )
+
+            # Combine and weight interests
+            interests = {}
+
+            for (category,) in liked_categories:
+                interests[category] = interests.get(category, 0) + 3
+
+            for (category_id,) in viewed_categories:
+                interests[category_id] = interests.get(category_id, 0) + 2
+
+            for (category,) in followed_categories:
+                interests[category] = interests.get(category, 0) + 4
+
+            return interests
+
+    @staticmethod
+    def _get_user_preferences(user_id):
+        """Get user preferences for content discovery"""
+        cache_key = FeedService.CACHE_KEYS["user_preferences"].format(user_id=user_id)
+
+        try:
+            cached = redis_client.get(cache_key)
+            if cached:
+                return cached
+        except RedisError:
+            pass
+
+        # Calculate preferences based on user behavior
+        preferences = FeedService._calculate_user_preferences(user_id)
+
+        # Cache for 2 hours
+        try:
+            redis_client.setex(cache_key, 7200, preferences)
+        except RedisError:
+            pass
+
+        return preferences
+
+    @staticmethod
+    def _calculate_user_preferences(user_id):
+        """Calculate user preferences for content discovery"""
+        with session_scope() as session:
+            # Get user's activity patterns
+            recent_likes = (
+                session.query(PostLike)
+                .filter(PostLike.user_id == user_id)
+                .order_by(PostLike.created_at.desc())
+                .limit(50)
+                .all()
+            )
+
+            recent_views = (
+                session.query(ProductView)
+                .filter(ProductView.user_id == user_id)
+                .order_by(ProductView.created_at.desc())
+                .limit(50)
+                .all()
+            )
+
+            # Analyze patterns
+            preferences = {
+                "content_ratio": 0.5,  # Default 50% posts, 50% products
+                "price_range": {"min": 0, "max": 1000},
+                "category_preferences": {},
+                "engagement_preference": "high",  # high/medium/low
+                "freshness_preference": "recent",  # recent/trending/classic
+            }
+
+            # Calculate content ratio
+            if recent_likes and recent_views:
+                total_engagement = len(recent_likes) + len(recent_views)
+                preferences["content_ratio"] = len(recent_likes) / total_engagement
+
+            # Calculate price preferences
+            if recent_views:
+                prices = [view.product.price for view in recent_views if view.product]
+                if prices:
+                    preferences["price_range"] = {
+                        "min": min(prices),
+                        "max": max(prices),
+                    }
+
+            # Calculate category preferences
+            category_engagement = {}
+            for like in recent_likes:
+                if like.post.category:
+                    category_engagement[like.post.category] = (
+                        category_engagement.get(like.post.category, 0) + 1
+                    )
+
+            for view in recent_views:
+                if view.product.category_id:
+                    category_engagement[view.product.category_id] = (
+                        category_engagement.get(view.product.category_id, 0) + 1
+                    )
+
+            preferences["category_preferences"] = category_engagement
+
+            return preferences
+
+    @staticmethod
+    def _get_followed_content(user_id):
+        """Get content from followed sellers with enhanced scoring"""
+        with session_scope() as session:
+            # Get followed seller IDs
             followed_seller_ids = [
                 seller_id[0]
                 for seller_id in session.query(Seller.id)
                 .join(Follow, Follow.followee_id == Seller.user_id)
                 .filter(
                     Follow.follower_id == user_id,
-                    Follow.follow_type == FollowType.CUSTOMER,
+                    # Follow.is_active == True,
                 )
                 .all()
             ]
@@ -1992,98 +2261,584 @@ class FeedService:
             if not followed_seller_ids:
                 return []
 
+            # Get recent posts from followed sellers
             posts = (
                 session.query(Post)
-                .options(
-                    joinedload(Post.seller).joinedload(Seller.user),
-                    joinedload(Post.media),
-                    joinedload(Post.tagged_products).joinedload(PostProduct.product),
-                    # Add niche posts relationship
-                    joinedload(Post.niche_posts).joinedload(NichePost.niche),
-                )
                 .filter(
                     Post.seller_id.in_(followed_seller_ids),
                     Post.status == PostStatus.ACTIVE,
                 )
                 .order_by(Post.created_at.desc())
-                .limit(100)
+                .limit(50)
                 .all()
             )
 
-            # Enhance posts with niche context
-            return PostService._enhance_posts_with_niche_context(posts)
+            # Get recent products from followed sellers
+            products = (
+                session.query(Product)
+                .filter(
+                    Product.seller_id.in_(followed_seller_ids),
+                    Product.status == Product.Status.ACTIVE,
+                )
+                .order_by(Product.created_at.desc())
+                .limit(50)
+                .all()
+            )
+
+            # Score and format items
+            feed_items = []
+
+            for post in posts:
+                score = FeedService._calculate_post_score(post, user_id)
+                feed_items.append(
+                    {
+                        "id": post.id,
+                        "type": "post",
+                        "score": score,
+                        "created_at": post.created_at,
+                    }
+                )
+
+            for product in products:
+                score = FeedService._calculate_product_score(product, user_id)
+                feed_items.append(
+                    {
+                        "id": product.id,
+                        "type": "product",
+                        "score": score,
+                        "created_at": product.created_at,
+                    }
+                )
+
+            return feed_items
 
     @staticmethod
-    def _score_posts(posts, user_id):
-        """Calculate scores for posts"""
-        return [
-            {
-                "type": "post",
-                "data": post,
-                "score": FeedService._calculate_post_score(post, user_id),
-                "created_at": post.created_at,
+    def _get_trending_by_interests(user_id, interests):
+        """Get trending content filtered by user interests"""
+        if not interests:
+            return FeedService._get_trending_content()
+
+        # Get trending content from Redis
+        try:
+            trending_posts = redis_client.zrevrange(
+                "popular_posts", 0, 99, withscores=True
+            )
+            trending_products = redis_client.zrevrange(
+                "popular_products", 0, 99, withscores=True
+            )
+        except RedisError:
+            return []
+
+        # Filter by interests
+        filtered_items = []
+
+        # Process trending posts
+        for post_id, score in trending_posts:
+            if isinstance(post_id, bytes):
+                post_id = post_id.decode("utf-8")
+
+            # Check if post category matches user interests
+            with session_scope() as session:
+                post = session.query(Post).filter(Post.id == post_id).first()
+                if post and post.category in interests:
+                    filtered_items.append(
+                        {
+                            "id": post_id,
+                            "type": "post",
+                            "score": score,
+                            "created_at": post.created_at,
+                        }
+                    )
+
+        # Process trending products
+        for product_id, score in trending_products:
+            if isinstance(product_id, bytes):
+                product_id = product_id.decode("utf-8")
+
+            # Check if product category matches user interests
+            with session_scope() as session:
+                product = (
+                    session.query(Product).filter(Product.id == product_id).first()
+                )
+                if product and product.category_id in interests:
+                    filtered_items.append(
+                        {
+                            "id": product_id,
+                            "type": "product",
+                            "score": score,
+                            "created_at": product.created_at,
+                        }
+                    )
+
+        return filtered_items
+
+    @staticmethod
+    def _get_discover_content(user_id, preferences):
+        """Get discovery content based on user preferences"""
+        with session_scope() as session:
+            # Get content that matches user preferences
+            discover_items = []
+
+            # Get posts from categories user might like
+            if preferences.get("category_preferences"):
+                top_categories = sorted(
+                    preferences["category_preferences"].items(),
+                    key=lambda x: x[1],
+                    reverse=True,
+                )[:5]
+
+                category_ids = [cat[0] for cat in top_categories]
+
+                posts = (
+                    session.query(Post)
+                    .filter(
+                        Post.category.in_(category_ids),
+                        Post.status == PostStatus.ACTIVE,
+                    )
+                    .order_by(Post.created_at.desc())
+                    .limit(20)
+                    .all()
+                )
+
+                for post in posts:
+                    score = FeedService._calculate_post_score(post, user_id)
+                    discover_items.append(
+                        {
+                            "id": post.id,
+                            "type": "post",
+                            "score": score,
+                            "created_at": post.created_at,
+                        }
+                    )
+
+            # Get products in user's price range
+            price_range = preferences.get("price_range", {"min": 0, "max": 1000})
+
+            products = (
+                session.query(Product)
+                .filter(
+                    Product.price.between(price_range["min"], price_range["max"]),
+                    Product.status == Product.Status.ACTIVE,
+                )
+                .order_by(Product.created_at.desc())
+                .limit(20)
+                .all()
+            )
+
+            for product in products:
+                score = FeedService._calculate_product_score(product, user_id)
+                discover_items.append(
+                    {
+                        "id": product.id,
+                        "type": "product",
+                        "score": score,
+                        "created_at": product.created_at,
+                    }
+                )
+
+            return discover_items
+
+    @staticmethod
+    def _apply_personalization_scoring(items, user_id):
+        """Apply personalized scoring to feed items"""
+        for item in items:
+            if item["type"] == "post":
+                # Enhance post score with personalization
+                with session_scope() as session:
+                    post = session.query(Post).filter(Post.id == item["id"]).first()
+                    if post:
+                        # Check if from followed seller
+                        is_followed = FeedService._is_from_followed_seller(
+                            post, user_id
+                        )
+                        if is_followed:
+                            item["score"] *= 1.5
+
+                        # Check if matches user interests
+                        matches_interests = FeedService._matches_user_interests(
+                            post, user_id
+                        )
+                        if matches_interests:
+                            item["score"] *= 1.3
+
+                        # Time decay
+                        time_decay = FeedService._calculate_time_decay(
+                            item["created_at"]
+                        )
+                        item["score"] *= time_decay
+
+            elif item["type"] == "product":
+                # Enhance product score with personalization
+                with session_scope() as session:
+                    product = (
+                        session.query(Product).filter(Product.id == item["id"]).first()
+                    )
+                    if product:
+                        # Check if matches user preferences
+                        matches_preferences = FeedService._matches_user_preferences(
+                            product, user_id
+                        )
+                        if matches_preferences:
+                            item["score"] *= 1.4
+
+                        # Time decay
+                        time_decay = FeedService._calculate_time_decay(
+                            item["created_at"]
+                        )
+                        item["score"] *= time_decay
+
+        return items
+
+    @staticmethod
+    def _calculate_time_decay(created_at):
+        """Calculate time decay factor for content freshness"""
+        if isinstance(created_at, str):
+            from datetime import datetime
+
+            created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+
+        age_hours = (datetime.utcnow() - created_at).total_seconds() / 3600
+
+        # Exponential decay: newer content gets higher scores
+        decay_factor = math.exp(-age_hours / 24)  # 24-hour half-life
+        return max(0.1, decay_factor)  # Minimum 10% score
+
+    @staticmethod
+    def _apply_diversity_and_freshness(items):
+        """Apply diversity and freshness to feed items"""
+        if not items:
+            return []
+
+        # Sort by score
+        items.sort(key=lambda x: x["score"], reverse=True)
+
+        # Apply diversity: ensure mix of content types
+        posts = [item for item in items if item["type"] == "post"]
+        products = [item for item in items if item["type"] == "product"]
+
+        # Interleave posts and products for diversity
+        diverse_items = []
+        max_items = min(len(posts), len(products))
+
+        for i in range(max_items):
+            if posts[i]["score"] > products[i]["score"]:
+                diverse_items.append(posts[i])
+                diverse_items.append(products[i])
+            else:
+                diverse_items.append(products[i])
+                diverse_items.append(posts[i])
+
+        # Add remaining items
+        remaining_posts = posts[max_items:]
+        remaining_products = products[max_items:]
+        diverse_items.extend(remaining_posts)
+        diverse_items.extend(remaining_products)
+
+        return diverse_items[:100]  # Limit to 100 items
+
+    @staticmethod
+    def _get_fallback_feed(page=1, per_page=20):
+        """Get fallback trending feed when personalized feed fails"""
+        try:
+            # Get trending content from Redis
+            trending_posts = redis_client.zrevrange(
+                "popular_posts", 0, 49, withscores=True
+            )
+            trending_products = redis_client.zrevrange(
+                "popular_products", 0, 49, withscores=True
+            )
+
+            feed_items = []
+
+            # Process trending posts
+            for post_id, score in trending_posts:
+                if isinstance(post_id, bytes):
+                    post_id = post_id.decode("utf-8")
+                feed_items.append(
+                    {
+                        "id": post_id,
+                        "type": "post",
+                        "score": score,
+                    }
+                )
+
+            # Process trending products
+            for product_id, score in trending_products:
+                if isinstance(product_id, bytes):
+                    product_id = product_id.decode("utf-8")
+                feed_items.append(
+                    {
+                        "id": product_id,
+                        "type": "product",
+                        "score": score,
+                    }
+                )
+
+            # Hydrate and paginate
+            hydrated_items = FeedService._hydrate_cached_items(feed_items)
+            return FeedService._paginate_feed(hydrated_items, page, per_page)
+
+        except Exception as e:
+            logger.error(f"Fallback feed generation failed: {str(e)}")
+            return {
+                "items": [],
+                "pagination": {"page": page, "per_page": per_page, "total": 0},
             }
-            for post in posts
-        ]
+
+    @staticmethod
+    def _cache_feed(user_id, feed_items, feed_type="personalized"):
+        """Cache feed with user-specific key and metadata"""
+        cache_key = FeedService.CACHE_KEYS["user_feed"].format(
+            user_id=user_id, feed_type=feed_type
+        )
+
+        try:
+            # Cache feed items
+            redis_client.setex(cache_key, 1800, feed_items)  # 30 minutes
+
+            # Cache metadata
+            metadata_key = FeedService.CACHE_KEYS["feed_metadata"].format(
+                user_id=user_id
+            )
+            metadata = {
+                "last_generated": datetime.utcnow().isoformat(),
+                "feed_type": feed_type,
+                "item_count": len(feed_items),
+                "cache_duration": 1800,
+            }
+            redis_client.setex(metadata_key, 1800, metadata)
+
+        except RedisError as e:
+            logger.warning(f"Failed to cache feed for user {user_id}: {str(e)}")
+
+    @staticmethod
+    def _paginate_feed(feed_items, page, per_page):
+        """Paginate feed items with metadata"""
+        if not feed_items:
+            return {
+                "items": [],
+                "pagination": {
+                    "page": page,
+                    "per_page": per_page,
+                    "total": 0,
+                    "pages": 0,
+                    "has_next": False,
+                    "has_prev": False,
+                },
+            }
+
+        total = len(feed_items)
+        start = (page - 1) * per_page
+        end = start + per_page
+
+        paginated_items = feed_items[start:end]
+
+        return {
+            "items": paginated_items,
+            "pagination": {
+                "page": page,
+                "per_page": per_page,
+                "total": total,
+                "pages": (total + per_page - 1) // per_page,
+                "has_next": end < total,
+                "has_prev": page > 1,
+            },
+        }
+
+    @staticmethod
+    def _is_from_followed_seller(post, user_id):
+        """Check if post is from a followed seller"""
+        with session_scope() as session:
+            follow = (
+                session.query(Follow)
+                .filter(
+                    Follow.follower_id == user_id,
+                    Follow.followee_id == post.seller.user_id,
+                    # Follow.is_active == True,
+                )
+                .first()
+            )
+            return follow is not None
+
+    @staticmethod
+    def _matches_user_interests(post, user_id):
+        """Check if post matches user interests"""
+        user_interests = FeedService._get_user_interests(user_id)
+        return post.category in user_interests if post.category else False
+
+    @staticmethod
+    def _matches_user_preferences(product, user_id):
+        """Check if product matches user preferences"""
+        user_preferences = FeedService._get_user_preferences(user_id)
+
+        # Check price range
+        price_range = user_preferences.get("price_range", {"min": 0, "max": 1000})
+        if not (price_range["min"] <= product.price <= price_range["max"]):
+            return False
+
+        # Check category preferences
+        category_preferences = user_preferences.get("category_preferences", {})
+        if product.category_id in category_preferences:
+            return True
+
+        return False
+
+    @staticmethod
+    def _invalidate_user_feed_cache(user_id):
+        """Invalidate user's feed cache when content changes"""
+        try:
+            # Get all feed cache keys for this user
+            pattern = f"feed:user:{user_id}:*"
+            keys = redis_client.keys(pattern)
+
+            if keys:
+                redis_client.delete(*keys)
+                logger.info(
+                    f"Invalidated {len(keys)} feed cache keys for user {user_id}"
+                )
+
+            # Also invalidate interest and preference caches
+            interest_key = FeedService.CACHE_KEYS["user_interests"].format(
+                user_id=user_id
+            )
+            preference_key = FeedService.CACHE_KEYS["user_preferences"].format(
+                user_id=user_id
+            )
+            metadata_key = FeedService.CACHE_KEYS["feed_metadata"].format(
+                user_id=user_id
+            )
+
+            redis_client.delete(interest_key, preference_key, metadata_key)
+
+        except RedisError as e:
+            logger.warning(
+                f"Failed to invalidate feed cache for user {user_id}: {str(e)}"
+            )
+
+    @staticmethod
+    def _get_trending_content():
+        """Get trending content from Redis"""
+        try:
+            trending_posts = redis_client.zrevrange(
+                "popular_posts", 0, 99, withscores=True
+            )
+            trending_products = redis_client.zrevrange(
+                "popular_products", 0, 99, withscores=True
+            )
+
+            feed_items = []
+
+            for post_id, score in trending_posts:
+                if isinstance(post_id, bytes):
+                    post_id = post_id.decode("utf-8")
+                feed_items.append(
+                    {
+                        "id": post_id,
+                        "type": "post",
+                        "score": score,
+                    }
+                )
+
+            for product_id, score in trending_products:
+                if isinstance(product_id, bytes):
+                    product_id = product_id.decode("utf-8")
+                feed_items.append(
+                    {
+                        "id": product_id,
+                        "type": "product",
+                        "score": score,
+                    }
+                )
+
+            return feed_items
+
+        except RedisError as e:
+            logger.warning(f"Failed to get trending content: {str(e)}")
+            return []
+
+    @staticmethod
+    def _get_niche_content(niche_id, user_id):
+        """Get content from specific niche"""
+        with session_scope() as session:
+            # Check if user has access to niche
+            membership = (
+                session.query(NicheMembership)
+                .filter(
+                    NicheMembership.niche_id == niche_id,
+                    NicheMembership.user_id == user_id,
+                    NicheMembership.is_active == True,
+                )
+                .first()
+            )
+
+            if not membership:
+                return []
+
+            # Get niche posts
+            niche_posts = (
+                session.query(NichePost)
+                .filter(
+                    NichePost.niche_id == niche_id,
+                    NichePost.is_approved == True,
+                )
+                .order_by(NichePost.created_at.desc())
+                .limit(50)
+                .all()
+            )
+
+            feed_items = []
+            for niche_post in niche_posts:
+                score = FeedService._calculate_post_score(niche_post.post, user_id)
+                feed_items.append(
+                    {
+                        "id": niche_post.post.id,
+                        "type": "post",
+                        "score": score,
+                        "created_at": niche_post.post.created_at,
+                    }
+                )
+
+            return feed_items
 
     @staticmethod
     def _calculate_post_score(post, user_id):
         """Calculate composite score for a post"""
         score = 0
 
-        # 1. Base score for followed accounts (optimized)
-        # We'll assume posts from followed sellers have higher base score
-        # This should be pre-calculated or cached
-        score += (
-            15
-            if hasattr(post, "_is_from_followed_seller")
-            and post._is_from_followed_seller
-            else 5
-        )
+        # 1. Base score for followed accounts
+        is_followed = FeedService._is_from_followed_seller(post, user_id)
+        score += 15 if is_followed else 5
 
         # 2. Engagement signals with logarithmic scaling
-        score += math.log1p(post.like_count) * 2
-        score += math.log1p(post.comment_count) * 1.5
+        score += math.log1p(len(post.likes)) * 2
+        score += math.log1p(len(post.comments)) * 1.5
 
         # 3. Recency decay (halflife of 3 days)
         hours_old = (datetime.utcnow() - post.created_at).total_seconds() / 3600
         score *= 0.5 ** (hours_old / 72)
 
-        # 4. Personalization bonus (placeholder - would use cached user interests)
+        # 4. Personalization bonus
         if FeedService._matches_user_interests(post, user_id):
             score *= 1.5
 
         return score
 
     @staticmethod
-    def _score_products(products, user_id):
-        """Calculate scores for products"""
-        return [
-            {
-                "type": "product",
-                "data": product,
-                "score": FeedService._calculate_product_score(product, user_id),
-                "created_at": product.created_at,
-            }
-            for product in products
-        ]
-
-    @staticmethod
     def _calculate_product_score(product, user_id):
-        """Updated scoring algorithm"""
+        """Calculate composite score for a product"""
         score = 0
 
         # 1. Base score
         score += 10
 
         # 2. Engagement signals
-        score += math.log1p(product.view_count) * 1.2
-        score += math.log1p(product.review_count) * 1.5
+        score += math.log1p(product.view_count or 0) * 1.2
+        score += math.log1p(len(product.reviews)) * 1.5
 
         # 3. Rating quality
-        if product.average_rating >= 4:
+        if product.rating and product.rating >= 4:
             score += 10
-        elif product.average_rating >= 3:
+        elif product.rating and product.rating >= 3:
             score += 5
 
         # 4. Seller reputation
@@ -2095,113 +2850,6 @@ class FeedService:
             score *= 1.5
 
         return score
-
-    @staticmethod
-    def _apply_ranking(items):
-        """Apply ranking and diversity rules"""
-        # Filter out invalid items first
-        valid_items = []
-        for item in items:
-            if isinstance(item, dict) and "score" in item and "type" in item:
-                valid_items.append(item)
-            else:
-                logger.warning(f"Skipping invalid feed item: {item}")
-
-        # Sort by score descending
-        valid_items.sort(key=lambda x: x["score"], reverse=True)
-
-        # Apply diversity - don't show more than 3 similar items in a row
-        ranked_items = []
-        last_types = []
-
-        for item in valid_items:
-            if len(last_types) >= 3 and all(t == item["type"] for t in last_types[-3:]):
-                continue  # Skip to maintain diversity
-
-            ranked_items.append(item)
-            last_types.append(item["type"])
-
-        return ranked_items
-
-    @staticmethod
-    def _cache_feed(user_id, feed_items):
-        """Cache feed in Redis"""
-        with redis_client.pipeline() as pipe:
-            pipe.delete(f"user:{user_id}:feed")
-            for item in feed_items:
-                pipe.zadd(
-                    f"user:{user_id}:feed",
-                    {item["data"].id: item["score"]},
-                )
-            pipe.expire(f"user:{user_id}:feed", 86400)  # 24h cache
-            pipe.execute()
-
-    @staticmethod
-    def _paginate_feed(feed_items, page, per_page):
-        """Paginate feed results for in-memory list"""
-        from math import ceil
-
-        total_items = len(feed_items)
-        total_pages = ceil(total_items / per_page) if total_items else 0
-
-        # Calculate offset
-        offset = (page - 1) * per_page
-
-        # Slice the list for pagination
-        paginated_items = feed_items[offset : offset + per_page]
-
-        return {
-            "items": paginated_items,
-            "pagination": {
-                "page": page,
-                "per_page": per_page,
-                "total_items": total_items,
-                "total_pages": total_pages,
-            },
-        }
-
-    @staticmethod
-    def _is_from_followed_seller(post, user_id):
-        """Check if post is from a followed seller"""
-        # Implementation would query follow relationships
-        # Can be optimized with cached follow data
-        with session_scope() as session:
-            return (
-                session.query(Follow)
-                .filter(
-                    Follow.follower_id == user_id,
-                    Follow.followee_id == post.seller.user_id,
-                    Follow.follow_type == FollowType.CUSTOMER,
-                )
-                .first()
-                is not None
-            )
-
-    @staticmethod
-    def _matches_user_interests(post, user_id):
-        """Check if post matches user's interests"""
-        # Placeholder - would analyze:
-        # - User's liked posts/categories
-        # - Past engagement patterns
-        return False
-
-    @staticmethod
-    def _matches_user_preferences(product, user_id):
-        """Check if product matches user's preferences"""
-        # Placeholder - would analyze:
-        # - Purchase history
-        # - Viewed products
-        # - Saved items
-        return False
-
-    @staticmethod
-    def _invalidate_user_feed_cache(user_id):
-        """Invalidate user's feed cache when content changes"""
-        try:
-            redis_client.delete(f"user:{user_id}:feed")
-            logger.info(f"Invalidated feed cache for user {user_id}")
-        except Exception as e:
-            logger.error(f"Failed to invalidate feed cache for user {user_id}: {e}")
 
 
 class TrendingService:

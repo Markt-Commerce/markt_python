@@ -1,7 +1,10 @@
 # package imports
+import logging
 from flask_smorest import Blueprint, abort
 from flask.views import MethodView
 from flask_login import login_required, current_user
+
+logger = logging.getLogger(__name__)
 
 # project imports
 from app.libs.schemas import PaginationQueryArgs
@@ -456,30 +459,109 @@ class FollowUser(MethodView):
 # Feed
 # -----------------------------------------------
 @bp.route("/feed")
-class UserFeed(MethodView):
+class Feed(MethodView):
     @login_required
     @bp.arguments(PaginationQueryArgs, location="query")
-    @bp.response(200, HybridFeedSchema)
+    @bp.response(200, description="Personalized feed")
     def get(self, args):
-        """Get personalized feed"""
+        """Get personalized hybrid feed"""
         try:
-            return FeedService.get_hybrid_feed(
+            feed_type = args.get("feed_type", "personalized")
+            force_refresh = args.get("force_refresh", False)
+
+            feed_data = FeedService.get_hybrid_feed(
                 current_user.id,
                 page=args.get("page", 1),
                 per_page=args.get("per_page", 20),
+                feed_type=feed_type,
+                force_refresh=force_refresh,
             )
-        except APIError as e:
-            abort(e.status_code, message=e.message)
+
+            return feed_data
+        except Exception as e:
+            logger.error(f"Feed error: {str(e)}")
+            abort(500, message="Failed to get feed")
 
 
 @bp.route("/feed/trending")
 class TrendingFeed(MethodView):
+    @login_required
     @bp.arguments(PaginationQueryArgs, location="query")
-    @bp.response(200, HybridFeedSchema)
+    @bp.response(200, description="Trending feed")
     def get(self, args):
-        """Get trending feed"""
-        return TrendingService.get_trending_content(
-            user_id=current_user.id if current_user.is_authenticated else None,
-            page=args.get("page", 1),
-            per_page=args.get("per_page", 20),
-        )
+        """Get trending content feed"""
+        try:
+            feed_data = FeedService.get_hybrid_feed(
+                current_user.id,
+                page=args.get("page", 1),
+                per_page=args.get("per_page", 20),
+                feed_type="trending",
+            )
+
+            return feed_data
+        except Exception as e:
+            logger.error(f"Trending feed error: {str(e)}")
+            abort(500, message="Failed to get trending feed")
+
+
+@bp.route("/feed/following")
+class FollowingFeed(MethodView):
+    @login_required
+    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.response(200, description="Following feed")
+    def get(self, args):
+        """Get content from followed sellers"""
+        try:
+            feed_data = FeedService.get_hybrid_feed(
+                current_user.id,
+                page=args.get("page", 1),
+                per_page=args.get("per_page", 20),
+                feed_type="following",
+            )
+
+            return feed_data
+        except Exception as e:
+            logger.error(f"Following feed error: {str(e)}")
+            abort(500, message="Failed to get following feed")
+
+
+@bp.route("/feed/discover")
+class DiscoverFeed(MethodView):
+    @login_required
+    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.response(200, description="Discovery feed")
+    def get(self, args):
+        """Get discovery content based on user preferences"""
+        try:
+            feed_data = FeedService.get_hybrid_feed(
+                current_user.id,
+                page=args.get("page", 1),
+                per_page=args.get("per_page", 20),
+                feed_type="discover",
+            )
+
+            return feed_data
+        except Exception as e:
+            logger.error(f"Discover feed error: {str(e)}")
+            abort(500, message="Failed to get discovery feed")
+
+
+@bp.route("/feed/niche/<niche_id>")
+class NicheFeed(MethodView):
+    @login_required
+    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.response(200, description="Niche-specific feed")
+    def get(self, args, niche_id):
+        """Get content from specific niche community"""
+        try:
+            feed_data = FeedService.get_hybrid_feed(
+                current_user.id,
+                page=args.get("page", 1),
+                per_page=args.get("per_page", 20),
+                feed_type=f"niche:{niche_id}",
+            )
+
+            return feed_data
+        except Exception as e:
+            logger.error(f"Niche feed error: {str(e)}")
+            abort(500, message="Failed to get niche feed")
