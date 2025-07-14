@@ -65,6 +65,6 @@ class Notification(BaseModel):
             "is_read": self.is_read,
             "reference_type": self.reference_type,
             "reference_id": self.reference_id,
-            "created_at": self.created_at.isoformat(),
+            "created_at": self.created_at,
             "metadata_": self.metadata_ or {},
         }

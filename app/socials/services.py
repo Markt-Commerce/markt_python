@@ -1821,7 +1821,7 @@ class FeedService:
             return FeedService._paginate_feed(feed_items, page, per_page)
 
         except Exception as e:
-            logger.error(f"Feed error for user {user_id}: {str(e)}")
+            logger.error(f"Feed error for user {user_id}: {str(e)}", exc_info=True)
             raise NotFoundError("Failed to get feed")
 
     @staticmethod
@@ -1837,11 +1837,30 @@ class FeedService:
             post_ids = []
             product_ids = []
 
-            for item_id, _ in cached_items:
-                if item_id.startswith("PST_"):
-                    post_ids.append(item_id)
-                elif item_id.startswith("PRD_"):
-                    product_ids.append(item_id)
+            # Handle different Redis response formats
+            for item in cached_items:
+                try:
+                    if isinstance(item, tuple):
+                        item_id, _ = item
+                        # Handle bytes from Redis
+                        if isinstance(item_id, bytes):
+                            item_id = item_id.decode("utf-8")
+                    elif isinstance(item, dict):
+                        item_id = item.get("id", item.get("member"))
+                        if isinstance(item_id, bytes):
+                            item_id = item_id.decode("utf-8")
+                    else:
+                        item_id = str(item)
+                        if isinstance(item_id, bytes):
+                            item_id = item_id.decode("utf-8")
+
+                    if item_id and item_id.startswith("PST_"):
+                        post_ids.append(item_id)
+                    elif item_id and item_id.startswith("PRD_"):
+                        product_ids.append(item_id)
+                except (TypeError, AttributeError, KeyError, UnicodeDecodeError) as e:
+                    logger.warning(f"Failed to process cached item {item}: {e}")
+                    continue
 
             # Fetch posts
             posts = (
@@ -1850,6 +1869,8 @@ class FeedService:
                     joinedload(Post.seller).joinedload(Seller.user),
                     joinedload(Post.media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
+                    # Add niche posts relationship
+                    joinedload(Post.niche_posts).joinedload(NichePost.niche),
                 )
                 .filter(
                     Post.id.in_(post_ids),
@@ -1860,13 +1881,16 @@ class FeedService:
                 else []
             )
 
+            # Enhance posts with niche context
+            posts = PostService._enhance_posts_with_niche_context(posts)
+
             # Fetch products
             products = (
                 session.query(Product)
                 .options(joinedload(Product.seller), joinedload(Product.images))
                 .filter(
                     Product.id.in_(product_ids),
-                    Product.status == ProductStatus.ACTIVE,
+                    Product.status == Product.Status.ACTIVE,
                 )
                 .all()
                 if product_ids
@@ -1875,29 +1899,49 @@ class FeedService:
 
             # Reconstruct feed items
             feed_items = []
-            for item_id, score in cached_items:
-                if item_id.startswith("PST_"):
-                    post = next((p for p in posts if p.id == item_id), None)
-                    if post:
-                        feed_items.append(
-                            {
-                                "type": "post",
-                                "data": post,
-                                "score": score,
-                                "created_at": datetime.fromtimestamp(score),
-                            }
-                        )
-                else:
-                    product = next((p for p in products if p.id == item_id), None)
-                    if product:
-                        feed_items.append(
-                            {
-                                "type": "product",
-                                "data": product,
-                                "score": score,
-                                "created_at": datetime.fromtimestamp(score),
-                            }
-                        )
+            for item in cached_items:
+                try:
+                    if isinstance(item, tuple):
+                        item_id, score = item
+                        # Handle bytes from Redis
+                        if isinstance(item_id, bytes):
+                            item_id = item_id.decode("utf-8")
+                    elif isinstance(item, dict):
+                        item_id = item.get("id", item.get("member"))
+                        score = item.get("score", 0)
+                        if isinstance(item_id, bytes):
+                            item_id = item_id.decode("utf-8")
+                    else:
+                        item_id = str(item)
+                        score = 0
+                        if isinstance(item_id, bytes):
+                            item_id = item_id.decode("utf-8")
+
+                    if item_id and item_id.startswith("PST_"):
+                        post = next((p for p in posts if p.id == item_id), None)
+                        if post and post.status == PostStatus.ACTIVE:
+                            feed_items.append(
+                                {
+                                    "type": "post",
+                                    "data": post,
+                                    "score": score,
+                                    "created_at": post.created_at,
+                                }
+                            )
+                    elif item_id and item_id.startswith("PRD_"):
+                        product = next((p for p in products if p.id == item_id), None)
+                        if product and product.status == Product.status.ACTIVE:
+                            feed_items.append(
+                                {
+                                    "type": "product",
+                                    "data": product,
+                                    "score": score,
+                                    "created_at": product.created_at,
+                                }
+                            )
+                except (TypeError, AttributeError, KeyError, UnicodeDecodeError) as e:
+                    logger.warning(f"Failed to reconstruct feed item {item}: {e}")
+                    continue
 
             return feed_items
 
@@ -1907,13 +1951,19 @@ class FeedService:
         # Get base content
         posts = FeedService._get_followed_posts(user_id)
         products = ProductService.get_recommended_products(user_id)
-        trending = TrendingService.get_trending_content(user_id)
+        trending_result = TrendingService.get_trending_content(user_id)
 
         # Score and combine
         feed_items = []
         feed_items.extend(FeedService._score_posts(posts, user_id))
         feed_items.extend(FeedService._score_products(products, user_id))
-        feed_items.extend(trending)
+
+        # Handle trending content - it returns a dict with items
+        if trending_result and isinstance(trending_result, dict):
+            trending_items = trending_result.get("items", [])
+            feed_items.extend(trending_items)
+        elif isinstance(trending_result, list):
+            feed_items.extend(trending_result)
 
         # Apply ranking and diversity
         ranked_items = FeedService._apply_ranking(feed_items)
@@ -1927,15 +1977,20 @@ class FeedService:
     def _get_followed_posts(user_id):
         """Get posts from followed sellers"""
         with session_scope() as session:
-            followed_sellers = (
-                session.query(Seller.id)
+            # Get followed seller IDs first
+            followed_seller_ids = [
+                seller_id[0]
+                for seller_id in session.query(Seller.id)
                 .join(Follow, Follow.followee_id == Seller.user_id)
                 .filter(
                     Follow.follower_id == user_id,
                     Follow.follow_type == FollowType.CUSTOMER,
                 )
-                .subquery()
-            )
+                .all()
+            ]
+
+            if not followed_seller_ids:
+                return []
 
             posts = (
                 session.query(Post)
@@ -1947,7 +2002,7 @@ class FeedService:
                     joinedload(Post.niche_posts).joinedload(NichePost.niche),
                 )
                 .filter(
-                    Post.seller_id.in_(followed_sellers),
+                    Post.seller_id.in_(followed_seller_ids),
                     Post.status == PostStatus.ACTIVE,
                 )
                 .order_by(Post.created_at.desc())
@@ -1976,8 +2031,15 @@ class FeedService:
         """Calculate composite score for a post"""
         score = 0
 
-        # 1. Base score for followed accounts
-        score += 15 if FeedService._is_from_followed_seller(post, user_id) else 5
+        # 1. Base score for followed accounts (optimized)
+        # We'll assume posts from followed sellers have higher base score
+        # This should be pre-calculated or cached
+        score += (
+            15
+            if hasattr(post, "_is_from_followed_seller")
+            and post._is_from_followed_seller
+            else 5
+        )
 
         # 2. Engagement signals with logarithmic scaling
         score += math.log1p(post.like_count) * 2
@@ -1987,7 +2049,7 @@ class FeedService:
         hours_old = (datetime.utcnow() - post.created_at).total_seconds() / 3600
         score *= 0.5 ** (hours_old / 72)
 
-        # 4. Personalization bonus
+        # 4. Personalization bonus (placeholder - would use cached user interests)
         if FeedService._matches_user_interests(post, user_id):
             score *= 1.5
 
@@ -2037,14 +2099,22 @@ class FeedService:
     @staticmethod
     def _apply_ranking(items):
         """Apply ranking and diversity rules"""
+        # Filter out invalid items first
+        valid_items = []
+        for item in items:
+            if isinstance(item, dict) and "score" in item and "type" in item:
+                valid_items.append(item)
+            else:
+                logger.warning(f"Skipping invalid feed item: {item}")
+
         # Sort by score descending
-        items.sort(key=lambda x: x["score"], reverse=True)
+        valid_items.sort(key=lambda x: x["score"], reverse=True)
 
         # Apply diversity - don't show more than 3 similar items in a row
         ranked_items = []
         last_types = []
 
-        for item in items:
+        for item in valid_items:
             if len(last_types) >= 3 and all(t == item["type"] for t in last_types[-3:]):
                 continue  # Skip to maintain diversity
 
@@ -2061,7 +2131,7 @@ class FeedService:
             for item in feed_items:
                 pipe.zadd(
                     f"user:{user_id}:feed",
-                    {item["data"].id: int(item["created_at"].timestamp())},
+                    {item["data"].id: item["score"]},
                 )
             pipe.expire(f"user:{user_id}:feed", 86400)  # 24h cache
             pipe.execute()
@@ -2123,6 +2193,15 @@ class FeedService:
         # - Viewed products
         # - Saved items
         return False
+
+    @staticmethod
+    def _invalidate_user_feed_cache(user_id):
+        """Invalidate user's feed cache when content changes"""
+        try:
+            redis_client.delete(f"user:{user_id}:feed")
+            logger.info(f"Invalidated feed cache for user {user_id}")
+        except Exception as e:
+            logger.error(f"Failed to invalidate feed cache for user {user_id}: {e}")
 
 
 class TrendingService:

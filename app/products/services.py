@@ -119,7 +119,7 @@ class ProductService:
             result = paginator.paginate(args)
 
             return {
-                "products": result["items"],
+                "items": result["items"],
                 "pagination": {
                     "page": result["page"],
                     "per_page": result["per_page"],
@@ -161,6 +161,83 @@ class ProductService:
         except SQLAlchemyError as e:
             logger.error(f"Database error creating product: {str(e)}")
             raise APIError("Failed to create product", 500)
+
+    @staticmethod
+    def update_product(product_id, seller_id, update_data):
+        """Update product details"""
+        try:
+            with session_scope() as session:
+                product = session.query(Product).get(product_id)
+                if not product:
+                    raise NotFoundError("Product not found")
+
+                if product.seller_id != seller_id:
+                    raise ValidationError("You can only update your own products")
+
+                # Update basic fields
+                if "name" in update_data:
+                    product.name = update_data["name"]
+                if "description" in update_data:
+                    product.description = update_data["description"]
+                if "price" in update_data:
+                    product.price = update_data["price"]
+                if "stock" in update_data:
+                    product.stock = update_data["stock"]
+                if "status" in update_data:
+                    product.status = update_data["status"]
+
+                # Update optional fields
+                for field in OPTIONAL_PRODUCT_FIELDS:
+                    if field in update_data:
+                        setattr(product, field, update_data[field])
+
+                # Handle variants if provided
+                if "variants" in update_data:
+                    # Clear existing variants
+                    session.query(ProductVariant).filter_by(
+                        product_id=product_id
+                    ).delete()
+
+                    # Add new variants
+                    for variant_data in update_data["variants"]:
+                        variant = ProductVariant(
+                            product_id=product.id,
+                            name=variant_data["name"],
+                            options=variant_data["options"],
+                        )
+                        session.add(variant)
+
+                product.updated_at = datetime.utcnow()
+                return product
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error updating product {product_id}: {str(e)}")
+            raise APIError("Failed to update product", 500)
+
+    @staticmethod
+    def delete_product(product_id, seller_id):
+        """Delete product (soft delete)"""
+        try:
+            with session_scope() as session:
+                product = session.query(Product).get(product_id)
+                if not product:
+                    raise NotFoundError("Product not found")
+
+                if product.seller_id != seller_id:
+                    raise ValidationError("You can only delete your own products")
+
+                # Soft delete by changing status
+                product.status = Product.Status.DELETED
+                product.updated_at = datetime.utcnow()
+
+                # Remove from trending products cache
+                redis_client.zrem("trending_products", product_id)
+
+                return True
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error deleting product {product_id}: {str(e)}")
+            raise APIError("Failed to delete product", 500)
 
     @staticmethod
     def bulk_create_products(products_data, seller_id):
@@ -286,14 +363,16 @@ class ProductService:
                 # Simple recommendation logic (will enhance later)
                 if user_id:
                     # Get products from followed sellers
-                    followed_sellers = (
-                        session.query(Seller.id)
+                    followed_seller_ids = [
+                        seller_id[0]
+                        for seller_id in session.query(Seller.id)
                         .join(Follow, Follow.followee_id == Seller.user_id)
                         .filter(Follow.follower_id == user_id)
-                        .subquery()
-                    )
+                        .all()
+                    ]
 
-                    query = query.filter(Product.seller_id.in_(followed_sellers))
+                    if followed_seller_ids:
+                        query = query.filter(Product.seller_id.in_(followed_seller_ids))
 
                 return query.order_by(Product.view_count.desc()).limit(limit).all()
 
