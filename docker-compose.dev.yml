@@ -1,0 +1,126 @@
+version: "3.8"
+
+services:
+  # Redis (using your existing configuration)
+  redis:
+    extends:
+      file: external/docker-compose.redis.yml
+      service: redis
+    container_name: markt-redis-dev
+    restart: unless-stopped
+
+  # PostgreSQL for development
+  postgres:
+    image: postgres:15-alpine
+    container_name: markt-postgres-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: markt_db
+      POSTGRES_USER: markt
+      POSTGRES_PASSWORD: markt123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-dev-data:/var/lib/postgresql/data
+    networks:
+      - markt-dev-network
+
+  # Application (development mode)
+  markt-app-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: markt-app-dev
+    restart: unless-stopped
+    environment:
+      - ENV=development
+      - DEBUG=True
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=markt
+      - DB_PASSWORD=markt123
+      - DB_NAME=markt_db
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - SECRET_KEY=dev-secret-key
+      - PAYSTACK_SECRET_KEY=sk_test_your_secret_key_here
+      - PAYSTACK_PUBLIC_KEY=pk_test_your_public_key_here
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - markt-dev-network
+    command: python -m main.run
+
+  # Celery Worker (development)
+  markt-celery-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: markt-celery-dev
+    restart: unless-stopped
+    environment:
+      - ENV=development
+      - DEBUG=True
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=markt
+      - DB_PASSWORD=markt123
+      - DB_NAME=markt_db
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - SECRET_KEY=dev-secret-key
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - markt-dev-network
+    command: celery -A main.workers worker -l INFO -Q social
+
+  # Celery Beat (development)
+  markt-celerybeat-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: markt-celerybeat-dev
+    restart: unless-stopped
+    environment:
+      - ENV=development
+      - DEBUG=True
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=markt
+      - DB_PASSWORD=markt123
+      - DB_NAME=markt_db
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - SECRET_KEY=dev-secret-key
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - markt-dev-network
+    command: celery -A main.workers beat -l INFO
+
+networks:
+  markt-dev-network:
+    driver: bridge
+
+volumes:
+  postgres-dev-data:
+    driver: local 
