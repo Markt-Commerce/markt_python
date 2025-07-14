@@ -2,6 +2,7 @@
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
+import json
 
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import joinedload
@@ -22,7 +23,7 @@ from app.libs.errors import (
 # app imports
 from .models import Cart, CartItem
 from app.users.models import User, Buyer
-from app.products.models import ProductStatus
+from app.products.models import Product, ProductVariant
 from app.orders.models import Order, OrderItem, OrderStatus
 from app.notifications.services import NotificationService
 from app.notifications.models import NotificationType
@@ -51,7 +52,7 @@ class CartService:
                 session.query(Cart)
                 .filter_by(buyer_id=user.buyer_account.id)
                 .filter(Cart.expires_at > datetime.utcnow())
-                .options(joinedload("items").joinedload("product"))
+                .options(joinedload(Cart.items).joinedload(CartItem.product))
                 .first()
             )
 
@@ -89,16 +90,25 @@ class CartService:
             if not product:
                 raise NotFoundError("Product not found")
 
-            if product.status != ProductStatus.ACTIVE:
+            if product.status.value != "active":
                 raise ValidationError("Product is not available for purchase")
 
             # Validate variant if provided
             if variant_id:
-                # TODO: Import ProductVariant when available
-                # variant = session.query(ProductVariant).get(variant_id)
-                # if not variant or variant.product_id != product_id:
-                #     raise ValidationError("Invalid product variant")
-                pass
+                variant = session.query(ProductVariant).get(variant_id)
+                if not variant or variant.product_id != product_id:
+                    raise ValidationError("Invalid product variant")
+
+                # Check if variant is available (you can add more validation here)
+                # For example, check if variant has inventory, is active, etc.
+                # This depends on your business logic for variant availability
+
+                # Set variant-specific price if available
+                # You might want to get price from variant.options or a separate price field
+                variant_price = product.price  # Default to product price
+                # TODO: Implement variant-specific pricing logic if needed
+            else:
+                variant_price = product.price
 
             # Check if item already exists in cart
             existing_item = (
@@ -120,7 +130,7 @@ class CartService:
                 cart_item.product_id = product_id
                 cart_item.variant_id = variant_id
                 cart_item.quantity = quantity
-                cart_item.product_price = product.price
+                cart_item.product_price = variant_price
                 session.add(cart_item)
 
             session.flush()
@@ -230,26 +240,35 @@ class CartService:
     @staticmethod
     def get_cart(user_id: str) -> Optional[Cart]:
         """Get user's cart with items"""
-        # Try cache first
-        cache_key = CartService.CART_CACHE_KEY.format(buyer_id=user_id)
-        cached_cart = redis_client.get(cache_key)
-        if cached_cart:
-            return cached_cart
-
         with session_scope() as session:
             # Validate user
             user = session.query(User).get(user_id)
             if not user or not user.is_buyer:
                 return None
 
+            buyer_id = user.buyer_account.id
+
+            # Try cache first
+            cache_key = CartService.CART_CACHE_KEY.format(buyer_id=buyer_id)
+            cached_cart_data = redis_client.get(cache_key)
+            if cached_cart_data:
+                try:
+                    # Deserialize cached cart data
+                    json.loads(cached_cart_data)
+                    # For now, return None to force database fetch
+                    # TODO: Implement proper cart deserialization
+                except (json.JSONDecodeError, TypeError):
+                    # Invalid cache data, continue to database fetch
+                    pass
+
             # Get cart with items
             cart = (
                 session.query(Cart)
-                .filter_by(buyer_id=user.buyer_account.id)
+                .filter_by(buyer_id=buyer_id)
                 .filter(Cart.expires_at > datetime.utcnow())
                 .options(
-                    joinedload("items").joinedload("product"),
-                    joinedload("items").joinedload("variant"),
+                    joinedload(Cart.items).joinedload(CartItem.product),
+                    joinedload(Cart.items).joinedload(CartItem.variant),
                 )
                 .first()
             )
@@ -356,7 +375,38 @@ class CartService:
         """Cache cart data in Redis"""
         if cart:
             cache_key = CartService.CART_CACHE_KEY.format(buyer_id=cart.buyer_id)
-            redis_client.set(cache_key, cart, ex=CartService.CACHE_EXPIRY)
+
+            # Serialize cart data to JSON
+            cart_data = {
+                "id": cart.id,
+                "buyer_id": cart.buyer_id,
+                "created_at": cart.created_at.isoformat() if cart.created_at else None,
+                "expires_at": cart.expires_at.isoformat() if cart.expires_at else None,
+                "coupon_code": cart.coupon_code,
+                "items": [],
+            }
+
+            # Serialize cart items
+            for item in cart.items:
+                item_data = {
+                    "id": item.id,
+                    "cart_id": item.cart_id,
+                    "product_id": item.product_id,
+                    "variant_id": item.variant_id,
+                    "quantity": item.quantity,
+                    "product_price": float(item.product_price)
+                    if item.product_price
+                    else 0.0,
+                    "created_at": item.created_at.isoformat()
+                    if item.created_at
+                    else None,
+                }
+                cart_data["items"].append(item_data)
+
+            # Cache serialized data
+            redis_client.set(
+                cache_key, json.dumps(cart_data), ex=CartService.CACHE_EXPIRY
+            )
 
     @staticmethod
     def _invalidate_cart_cache(buyer_id: int):
@@ -369,7 +419,7 @@ class CartService:
         """Validate cart items for checkout"""
         for item in cart_items:
             # Check if product is still available
-            if item.product.status != ProductStatus.ACTIVE:
+            if item.product.status.value != "active":
                 raise ValidationError(
                     f"Product {item.product.name} is no longer available"
                 )
