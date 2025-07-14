@@ -1,9 +1,9 @@
 # Markt Python Backend
 
 
-<img 
-  src="https://avatars.githubusercontent.com/u/188402477?s=200&v=4" 
-  alt="Markt Logo" 
+<img
+  src="https://avatars.githubusercontent.com/u/188402477?s=200&v=4"
+  alt="Markt Logo"
   style="width: 100%; max-width: 800px; height: 150px; object-fit: cover; border-radius: 8px;"
 />
 
@@ -48,7 +48,7 @@ app/
    - Identify missing implementations
    - Optimize existing queries for production
 
-2. **Buyer Request System** 
+2. **Buyer Request System**
    - CRUD operations with dual-role validation
    - Seller offer management (with notifications)
    - Request status lifecycle hooks
