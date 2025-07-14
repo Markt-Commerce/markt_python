@@ -160,8 +160,8 @@ class NicheService:
                 if not membership:
                     raise ForbiddenError("You don't have access to this community")
 
-            # Cache for 10 minutes
-            redis_client.setex(cache_key, 600, niche)
+            # TODO: Implement proper Redis caching with serialization
+            # For now, disable caching to fix Redis DataError
 
             return niche
 
@@ -269,7 +269,17 @@ class NicheService:
             paginator = Paginator(
                 base_query, page=args.get("page", 1), per_page=args.get("per_page", 20)
             )
-            return paginator.paginate(args)
+            result = paginator.paginate(args)
+
+            return {
+                "items": result["items"],
+                "pagination": {
+                    "page": result["page"],
+                    "per_page": result["per_page"],
+                    "total_items": result["total_items"],
+                    "total_pages": result["total_pages"],
+                },
+            }
 
     @staticmethod
     def get_user_niches(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -297,11 +307,18 @@ class NicheService:
             )
             result = paginator.paginate(args)
 
-            # Cache first page for 5 minutes
-            if args.get("page", 1) == 1:
-                redis_client.setex(cache_key, 300, result)
+            # TODO: Implement proper Redis caching with serialization
+            # For now, disable caching to fix Redis DataError
 
-            return result
+            return {
+                "items": result["items"],
+                "pagination": {
+                    "page": result["page"],
+                    "per_page": result["per_page"],
+                    "total_items": result["total_items"],
+                    "total_pages": result["total_pages"],
+                },
+            }
 
     @staticmethod
     def search_niches(
@@ -348,7 +365,16 @@ class NicheService:
             paginator = Paginator(
                 base_query, page=args.get("page", 1), per_page=args.get("per_page", 20)
             )
-            return paginator.paginate(args)
+            result = paginator.paginate(args)
+            return {
+                "items": result["items"],
+                "pagination": {
+                    "page": result["page"],
+                    "per_page": result["per_page"],
+                    "total_items": result["total_items"],
+                    "total_pages": result["total_pages"],
+                },
+            }
 
     @staticmethod
     def moderate_user(
@@ -473,6 +499,326 @@ class NicheService:
 
             return {"can_post": True, "requires_approval": niche.require_approval}
 
+    @staticmethod
+    def create_niche_post(
+        niche_id: str, user_id: str, post_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Create a post in a specific niche/community"""
+        with session_scope() as session:
+            # Check if user can post in this niche
+            permission_check = NicheService.can_user_post_in_niche(niche_id, user_id)
+            if not permission_check["can_post"]:
+                raise ForbiddenError(permission_check["reason"])
+
+            # Get niche and user
+            niche = session.query(Niche).get(niche_id)
+            user = session.query(User).get(user_id)
+
+            # Create the post using PostService
+            if user.is_seller:
+                # For sellers, create post with seller_id
+                seller = session.query(Seller).filter_by(user_id=user_id).first()
+                if not seller:
+                    raise ValidationError("Seller account not found")
+
+                post = PostService.create_post(seller.id, post_data)
+            else:
+                # For buyers, we need to handle this differently since posts are seller-based
+                # For now, we'll create a special buyer post or use a different approach
+                raise ValidationError("Buyer posts not yet implemented")
+
+            # Create the niche post association
+            niche_post = NichePost(
+                niche_id=niche_id,
+                post_id=post.id,
+                status=PostStatus.ACTIVE,
+                is_approved=not niche.require_approval,  # Auto-approve if not required
+            )
+
+            # If approval is required, set status to pending
+            if niche.require_approval:
+                niche_post.is_approved = False
+                niche_post.status = PostStatus.DRAFT
+
+            session.add(niche_post)
+
+            # Update niche post count
+            niche.post_count += 1
+
+            # Update user's post count in this niche
+            membership = (
+                session.query(NicheMembership)
+                .filter_by(niche_id=niche_id, user_id=user_id, is_active=True)
+                .first()
+            )
+            if membership:
+                membership.post_count += 1
+                membership.last_activity = datetime.utcnow()
+
+            # Cache invalidation
+            NicheService._invalidate_niche_cache(niche_id)
+            NicheService._invalidate_user_cache(user_id)
+
+            return {
+                "post": post,
+                "niche_post": niche_post,
+                "requires_approval": niche.require_approval,
+                "is_approved": niche_post.is_approved,
+            }
+
+    @staticmethod
+    def get_niche_posts(niche_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get posts from a specific niche"""
+        with session_scope() as session:
+            # Check niche exists and user has access
+            niche = session.query(Niche).get(niche_id)
+            if not niche:
+                raise NotFoundError("Community not found")
+
+            # Check visibility
+            user_id = args.get("user_id")
+            if niche.visibility == NicheVisibility.PRIVATE:
+                if not user_id:
+                    raise ForbiddenError("This community is private")
+
+                membership = (
+                    session.query(NicheMembership)
+                    .filter_by(niche_id=niche_id, user_id=user_id, is_active=True)
+                    .first()
+                )
+                if not membership:
+                    raise ForbiddenError("You don't have access to this community")
+
+            # Build query for niche posts
+            base_query = (
+                session.query(NichePost)
+                .filter(
+                    NichePost.niche_id == niche_id,
+                    NichePost.status == PostStatus.ACTIVE,
+                    NichePost.is_approved == True,
+                )
+                .options(
+                    joinedload(NichePost.post)
+                    .joinedload(Post.seller)
+                    .joinedload(Seller.user),
+                    joinedload(NichePost.post).joinedload(Post.media),
+                    joinedload(NichePost.post)
+                    .joinedload(Post.tagged_products)
+                    .joinedload(PostProduct.product),
+                    joinedload(NichePost.post).joinedload(Post.likes),
+                    joinedload(NichePost.post).joinedload(Post.comments),
+                )
+                .order_by(NichePost.created_at.desc())
+            )
+
+            # Apply filters
+            if args.get("pinned_only"):
+                base_query = base_query.filter(NichePost.is_pinned == True)
+
+            if args.get("featured_only"):
+                base_query = base_query.filter(NichePost.is_featured == True)
+
+            paginator = Paginator(
+                base_query, page=args.get("page", 1), per_page=args.get("per_page", 20)
+            )
+            result = paginator.paginate(args)
+
+            return {
+                "items": result["items"],
+                "pagination": {
+                    "page": result["page"],
+                    "per_page": result["per_page"],
+                    "total_items": result["total_items"],
+                    "total_pages": result["total_pages"],
+                },
+            }
+
+    @staticmethod
+    def approve_niche_post(niche_id: str, post_id: str, moderator_id: str) -> NichePost:
+        """Approve a pending post in a niche (moderators only)"""
+        with session_scope() as session:
+            # Check moderator permissions
+            moderator_membership = (
+                session.query(NicheMembership)
+                .filter_by(niche_id=niche_id, user_id=moderator_id, is_active=True)
+                .first()
+            )
+
+            if not moderator_membership or moderator_membership.role not in [
+                NicheMembershipRole.MODERATOR,
+                NicheMembershipRole.ADMIN,
+                NicheMembershipRole.OWNER,
+            ]:
+                raise ForbiddenError("You don't have moderation permissions")
+
+            # Get the niche post
+            niche_post = (
+                session.query(NichePost)
+                .filter_by(niche_id=niche_id, post_id=post_id)
+                .first()
+            )
+
+            if not niche_post:
+                raise NotFoundError("Post not found in this community")
+
+            if niche_post.is_approved:
+                raise ConflictError("Post is already approved")
+
+            # Approve the post
+            niche_post.is_approved = True
+            niche_post.status = PostStatus.ACTIVE
+            niche_post.moderated_by = moderator_id
+            niche_post.moderated_at = datetime.utcnow()
+
+            # Update the main post status if it was in draft
+            post = session.query(Post).get(post_id)
+            if post and post.status == PostStatus.DRAFT:
+                post.status = PostStatus.ACTIVE
+
+            # Notify the post creator
+            if post and post.seller.user_id != moderator_id:
+                from app.notifications.services import NotificationService
+
+                NotificationService.create_notification(
+                    user_id=post.seller.user_id,
+                    notification_type=NotificationType.NICHE_POST_APPROVED,
+                    reference_type="post",
+                    reference_id=post_id,
+                    metadata_={
+                        "niche_id": niche_id,
+                        "niche_name": niche_post.niche.name,
+                    },
+                )
+
+            return niche_post
+
+    @staticmethod
+    def reject_niche_post(
+        niche_id: str, post_id: str, moderator_id: str, reason: str
+    ) -> NichePost:
+        """Reject a pending post in a niche (moderators only)"""
+        with session_scope() as session:
+            # Check moderator permissions
+            moderator_membership = (
+                session.query(NicheMembership)
+                .filter_by(niche_id=niche_id, user_id=moderator_id, is_active=True)
+                .first()
+            )
+
+            if not moderator_membership or moderator_membership.role not in [
+                NicheMembershipRole.MODERATOR,
+                NicheMembershipRole.ADMIN,
+                NicheMembershipRole.OWNER,
+            ]:
+                raise ForbiddenError("You don't have moderation permissions")
+
+            # Get the niche post
+            niche_post = (
+                session.query(NichePost)
+                .filter_by(niche_id=niche_id, post_id=post_id)
+                .first()
+            )
+
+            if not niche_post:
+                raise NotFoundError("Post not found in this community")
+
+            if niche_post.is_approved:
+                raise ConflictError("Post is already approved")
+
+            # Reject the post
+            niche_post.is_approved = False
+            niche_post.status = PostStatus.DELETED
+            niche_post.moderated_by = moderator_id
+            niche_post.moderated_at = datetime.utcnow()
+
+            # Notify the post creator
+            post = session.query(Post).get(post_id)
+            if post and post.seller.user_id != moderator_id:
+                from app.notifications.services import NotificationService
+
+                NotificationService.create_notification(
+                    user_id=post.seller.user_id,
+                    notification_type=NotificationType.NICHE_POST_REJECTED,
+                    reference_type="post",
+                    reference_id=post_id,
+                    metadata_={
+                        "niche_id": niche_id,
+                        "niche_name": niche_post.niche.name,
+                        "reason": reason,
+                    },
+                )
+
+            return niche_post
+
+    @staticmethod
+    def update_niche(niche_id: str, user_id: str, data: Dict[str, Any]) -> Niche:
+        """Update niche details (owner only)"""
+        with session_scope() as session:
+            niche = session.query(Niche).get(niche_id)
+            if not niche:
+                raise NotFoundError("Community not found")
+
+            # Check ownership
+            membership = (
+                session.query(NicheMembership)
+                .filter_by(
+                    niche_id=niche_id, user_id=user_id, role=NicheMembershipRole.OWNER
+                )
+                .first()
+            )
+            if not membership:
+                raise ForbiddenError("Only community owners can update settings")
+
+            # Update fields
+            if data.get("name"):
+                # Check if new name would create duplicate slug
+                new_slug = NicheService._generate_slug(data["name"])
+                existing = (
+                    session.query(Niche)
+                    .filter(Niche.slug == new_slug, Niche.id != niche_id)
+                    .first()
+                )
+                if existing:
+                    raise ConflictError("A community with this name already exists")
+
+                niche.name = data["name"]
+                niche.slug = new_slug
+
+            if data.get("description"):
+                niche.description = data["description"]
+
+            if data.get("visibility"):
+                niche.visibility = NicheVisibility(data["visibility"])
+
+            if data.get("allow_buyer_posts") is not None:
+                niche.allow_buyer_posts = data["allow_buyer_posts"]
+
+            if data.get("allow_seller_posts") is not None:
+                niche.allow_seller_posts = data["allow_seller_posts"]
+
+            if data.get("require_approval") is not None:
+                niche.require_approval = data["require_approval"]
+
+            if data.get("max_members"):
+                niche.max_members = data["max_members"]
+
+            if data.get("category_id") is not None:
+                niche.category_id = data["category_id"]
+
+            if data.get("tags") is not None:
+                niche.tags = data["tags"]
+
+            if data.get("rules") is not None:
+                niche.rules = data["rules"]
+
+            if data.get("settings") is not None:
+                niche.settings = data["settings"]
+
+            # Cache invalidation
+            NicheService._invalidate_niche_cache(niche_id)
+
+            return niche
+
     # Private helper methods
     @staticmethod
     def _generate_slug(name: str) -> str:
@@ -555,7 +901,7 @@ class PostService:
             logger.error(f"Error creating post: {str(e)}")
             raise ConflictError("Failed to create post")
         except (RedisError, RedisConnectionError) as e:
-            logger.warning(f"Redis error while creating post: {str(e)}")
+            logger.warning(f"Redis error while creating post: {str(e)}", exc_info=True)
 
     @staticmethod
     def get_post(post_id):
@@ -569,6 +915,7 @@ class PostService:
                         joinedload(Post.tagged_products).joinedload(
                             PostProduct.product
                         ),
+                        joinedload(Post.niche_posts).joinedload(NichePost.niche),
                     )
                     .get(post_id)
                 )
@@ -578,6 +925,63 @@ class PostService:
         except SQLAlchemyError as e:
             logger.error(f"Error fetching post {post_id}: {str(e)}")
             raise NotFoundError("Failed to fetch post")
+
+    @staticmethod
+    def get_post_with_niche_context(post_id):
+        """Get post with niche context if it's posted in a niche"""
+        try:
+            with session_scope() as session:
+                post = (
+                    session.query(Post)
+                    .options(
+                        joinedload(Post.seller).joinedload(Seller.user),
+                        joinedload(Post.media),
+                        joinedload(Post.tagged_products).joinedload(
+                            PostProduct.product
+                        ),
+                        joinedload(Post.niche_posts).joinedload(NichePost.niche),
+                    )
+                    .get(post_id)
+                )
+                if not post:
+                    raise NotFoundError("Post not found")
+
+                # Add niche context if available
+                niche_context = PostService._get_niche_context(post)
+                if niche_context:
+                    post.niche_context = niche_context
+
+                return post
+        except SQLAlchemyError as e:
+            logger.error(f"Error fetching post {post_id}: {str(e)}")
+            raise NotFoundError("Failed to fetch post")
+
+    @staticmethod
+    def _get_niche_context(post):
+        """Get niche context for a post"""
+        if hasattr(post, "niche_posts") and post.niche_posts:
+            niche_post = post.niche_posts[0]  # Assuming one niche per post for now
+            return {
+                "niche_id": niche_post.niche_id,
+                "niche_name": niche_post.niche.name,
+                "niche_slug": niche_post.niche.slug,
+                "is_pinned": niche_post.is_pinned,
+                "is_featured": niche_post.is_featured,
+                "is_approved": niche_post.is_approved,
+                "niche_likes": niche_post.niche_likes,
+                "niche_comments": niche_post.niche_comments,
+                "niche_visibility": niche_post.niche.visibility.value,
+            }
+        return None
+
+    @staticmethod
+    def _enhance_posts_with_niche_context(posts):
+        """Add niche context to a list of posts"""
+        for post in posts:
+            niche_context = PostService._get_niche_context(post)
+            if niche_context:
+                post.niche_context = niche_context
+        return posts
 
     @staticmethod
     def get_seller_posts(seller_id, page=1, per_page=20):
@@ -592,13 +996,18 @@ class PostService:
                     # Add these to load the relationships needed for counting
                     joinedload(Post.likes),
                     joinedload(Post.comments),
+                    # Add niche posts relationship
+                    joinedload(Post.niche_posts).joinedload(NichePost.niche),
                 )
             )
             paginator = Paginator(base_query, page=page, per_page=per_page)
             result = paginator.paginate({})  # Pass empty dict if no filters
 
+            # Enhance posts with niche context
+            posts = PostService._enhance_posts_with_niche_context(result["items"])
+
             return {
-                "items": result["items"],
+                "items": posts,
                 "pagination": {
                     "page": result["page"],
                     "per_page": result["per_page"],
@@ -646,7 +1055,7 @@ class PostService:
             logger.error(f"Error liking post: {str(e)}")
             raise ConflictError("Failed to like post")
         except (RedisError, RedisConnectionError) as e:
-            logger.warning(f"Redis error while liking post: {str(e)}")
+            logger.warning(f"Redis error while liking post: {str(e)}", exc_info=True)
 
     @staticmethod
     def unlike_post(user_id, post_id):
@@ -665,7 +1074,7 @@ class PostService:
             logger.error(f"Error unliking post: {str(e)}")
             raise ConflictError("Failed to unlike post")
         except (RedisError, RedisConnectionError) as e:
-            logger.warning(f"Redis error while unliking post: {str(e)}")
+            logger.warning(f"Redis error while unliking post: {str(e)}", exc_info=True)
 
     @staticmethod
     def update_post(post_id, seller_id, update_data):
@@ -761,7 +1170,9 @@ class PostService:
             logger.error(f"Error changing post status {post_id}: {str(e)}")
             raise ConflictError("Failed to change post status")
         except (RedisError, RedisConnectionError) as e:
-            logger.warning(f"Redis error while changing post status: {str(e)}")
+            logger.warning(
+                f"Redis error while changing post status: {str(e)}", exc_info=True
+            )
 
     @staticmethod
     def get_seller_drafts(seller_id, page=1, per_page=20):
@@ -776,7 +1187,16 @@ class PostService:
                 )
             )
             paginator = Paginator(base_query, page=page, per_page=per_page)
-            return paginator.paginate({})
+            result = paginator.paginate({})
+            return {
+                "items": result["items"],
+                "pagination": {
+                    "page": result["page"],
+                    "per_page": result["per_page"],
+                    "total_items": result["total_items"],
+                    "total_pages": result["total_pages"],
+                },
+            }
 
     @staticmethod
     def get_seller_archived(seller_id, page=1, per_page=20):
@@ -791,7 +1211,16 @@ class PostService:
                 )
             )
             paginator = Paginator(base_query, page=page, per_page=per_page)
-            return paginator.paginate({})
+            result = paginator.paginate({})
+            return {
+                "items": result["items"],
+                "pagination": {
+                    "page": result["page"],
+                    "per_page": result["per_page"],
+                    "total_items": result["total_items"],
+                    "total_pages": result["total_pages"],
+                },
+            }
 
     @staticmethod
     def add_comment(user_id, post_id, content, parent_id=None):
@@ -830,7 +1259,7 @@ class PostService:
             logger.error(f"Error adding comment: {str(e)}")
             raise ConflictError("Failed to add comment")
         except (RedisError, RedisConnectionError) as e:
-            logger.warning(f"Redis error while adding comment: {str(e)}")
+            logger.warning(f"Redis error while adding comment: {str(e)}", exc_info=True)
 
     @staticmethod
     def update_comment(comment_id, user_id, content):
@@ -887,7 +1316,16 @@ class PostService:
                 .order_by(PostComment.created_at.desc())
             )
             paginator = Paginator(base_query, page=page, per_page=per_page)
-            return paginator.paginate({})
+            result = paginator.paginate({})
+            return {
+                "items": result["items"],
+                "pagination": {
+                    "page": result["page"],
+                    "per_page": result["per_page"],
+                    "total_items": result["total_items"],
+                    "total_pages": result["total_pages"],
+                },
+            }
 
     @staticmethod
     def get_posts(args):
@@ -902,6 +1340,8 @@ class PostService:
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
                     joinedload(Post.likes),
                     joinedload(Post.comments),
+                    # Add niche posts relationship
+                    joinedload(Post.niche_posts).joinedload(NichePost.niche),
                 )
             )
 
@@ -922,8 +1362,11 @@ class PostService:
             )
             result = paginator.paginate(args)
 
+            # Enhance posts with niche context
+            posts = PostService._enhance_posts_with_niche_context(result["items"])
+
             return {
-                "items": result["items"],
+                "items": posts,
                 "pagination": {
                     "page": result["page"],
                     "per_page": result["per_page"],
@@ -1162,7 +1605,7 @@ class ProductSocialService:
             logger.error(f"Error adding review: {str(e)}")
             raise ConflictError("Failed to add review")
         except (RedisError, RedisConnectionError) as e:
-            logger.warning(f"Redis error while adding review: {str(e)}")
+            logger.warning(f"Redis error while adding review: {str(e)}", exc_info=True)
 
     @staticmethod
     def upvote_review(user_id, review_id):
@@ -1211,7 +1654,9 @@ class ProductSocialService:
             logger.error(f"Error upvoting review: {str(e)}")
             raise ConflictError("Failed to upvote review")
         except (RedisError, RedisConnectionError) as e:
-            logger.warning(f"Redis error while upvoting review: {str(e)}")
+            logger.warning(
+                f"Redis error while upvoting review: {str(e)}", exc_info=True
+            )
 
     @staticmethod
     def get_product_reviews(product_id, page=1, per_page=10):
@@ -1224,7 +1669,16 @@ class ProductSocialService:
             )
 
             paginator = Paginator(base_query, page=page, per_page=per_page)
-            return paginator.paginate({})
+            result = paginator.paginate({})
+            return {
+                "items": result["items"],
+                "pagination": {
+                    "page": result["page"],
+                    "per_page": result["per_page"],
+                    "total_items": result["total_items"],
+                    "total_pages": result["total_pages"],
+                },
+            }
 
     @staticmethod
     def track_product_view(product_id, user_id=None, ip_address=None):
@@ -1345,7 +1799,9 @@ class FollowService:
             logger.error(f"Error unfollowing user: {str(e)}")
             raise ConflictError("Failed to unfollow user")
         except (RedisError, RedisConnectionError) as e:
-            logger.warning(f"Redis error while unfollowing user: {str(e)}")
+            logger.warning(
+                f"Redis error while unfollowing user: {str(e)}", exc_info=True
+            )
 
 
 class FeedService:
@@ -1481,12 +1937,14 @@ class FeedService:
                 .subquery()
             )
 
-            return (
+            posts = (
                 session.query(Post)
                 .options(
                     joinedload(Post.seller).joinedload(Seller.user),
                     joinedload(Post.media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
+                    # Add niche posts relationship
+                    joinedload(Post.niche_posts).joinedload(NichePost.niche),
                 )
                 .filter(
                     Post.seller_id.in_(followed_sellers),
@@ -1496,6 +1954,9 @@ class FeedService:
                 .limit(100)
                 .all()
             )
+
+            # Enhance posts with niche context
+            return PostService._enhance_posts_with_niche_context(posts)
 
     @staticmethod
     def _score_posts(posts, user_id):
@@ -1666,13 +2127,17 @@ class FeedService:
 
 class TrendingService:
     @staticmethod
-    def get_trending_content(user_id=None, limit=5):
-        """Get trending content personalized for user"""
+    def get_trending_content(user_id=None, page=1, per_page=20):
+        """Get trending content personalized for user with pagination"""
         try:
             trending = []
 
-            # Get globally popular posts
-            post_ids = redis_client.zrevrange("popular_posts", 0, limit - 1)
+            # Calculate offset for pagination
+            offset = (page - 1) * per_page
+            end_index = offset + per_page - 1
+
+            # Get globally popular posts with pagination
+            post_ids = redis_client.zrevrange("popular_posts", offset, end_index)
             if post_ids:
                 with session_scope() as session:
                     posts = (
@@ -1681,6 +2146,11 @@ class TrendingService:
                         .options(
                             joinedload(Post.seller).joinedload(Seller.user),
                             joinedload(Post.media),
+                            joinedload(Post.tagged_products).joinedload(
+                                PostProduct.product
+                            ),
+                            joinedload(Post.likes),
+                            joinedload(Post.comments),
                         )
                         .all()
                     )
@@ -1690,15 +2160,36 @@ class TrendingService:
                             {
                                 "type": "post",
                                 "data": p,
-                                "score": redis_client.zscore("popular_posts", p.id),
+                                "score": redis_client.zscore("popular_posts", p.id)
+                                or 0,
                                 "created_at": p.created_at,
                             }
                             for p in posts
                         ]
                     )
 
-            return trending
+            # Get total count for pagination
+            total_items = redis_client.zcard("popular_posts")
+            total_pages = (total_items + per_page - 1) // per_page if total_items else 0
+
+            return {
+                "items": trending,
+                "pagination": {
+                    "page": page,
+                    "per_page": per_page,
+                    "total_items": total_items,
+                    "total_pages": total_pages,
+                },
+            }
 
         except Exception as e:
             logger.error(f"Trending content error: {str(e)}")
-            return []
+            return {
+                "items": [],
+                "pagination": {
+                    "page": page,
+                    "per_page": per_page,
+                    "total_items": 0,
+                    "total_pages": 0,
+                },
+            }

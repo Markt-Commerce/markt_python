@@ -27,12 +27,21 @@ from .schemas import (
     HybridFeedSchema,
     # Niche schemas
     NicheSchema,
+    NicheSearchResultSchema,
     NicheCreateSchema,
     NicheUpdateSchema,
     NicheSearchSchema,
     NicheMembershipSchema,
     NicheModerationActionSchema,
     ModerationActionSchema,
+    NicheMembershipSearchResultSchema,
+    PostDetailSearchResultSchema,
+    # Niche post schemas
+    NichePostCreateSchema,
+    NichePostResponseSchema,
+    NichePostListSchema,
+    NichePostApprovalSchema,
+    NichePostSchema,
 )
 from .services import (
     PostService,
@@ -52,7 +61,7 @@ bp = Blueprint(
 @bp.route("/niches")
 class NicheList(MethodView):
     @bp.arguments(NicheSearchSchema, location="query")
-    @bp.response(200, NicheSchema(many=True))
+    @bp.response(200, NicheSearchResultSchema)
     def get(self, args):
         """Search and list niche communities"""
         try:
@@ -90,8 +99,7 @@ class NicheDetail(MethodView):
     def put(self, niche_data, niche_id):
         """Update niche (owner only)"""
         try:
-            # TODO: Implement niche update logic
-            abort(501, message="Niche updates not yet implemented")
+            return NicheService.update_niche(niche_id, current_user.id, niche_data)
         except APIError as e:
             abort(e.status_code, message=e.message)
 
@@ -125,7 +133,7 @@ class NicheLeave(MethodView):
 class NicheMembers(MethodView):
     @login_required
     @bp.arguments(PaginationQueryArgs, location="query")
-    @bp.response(200, NicheMembershipSchema(many=True))
+    @bp.response(200, NicheMembershipSearchResultSchema)
     def get(self, args, niche_id):
         """Get niche members with role filtering"""
         try:
@@ -153,7 +161,7 @@ class NicheModeration(MethodView):
 class MyNiches(MethodView):
     @login_required
     @bp.arguments(PaginationQueryArgs, location="query")
-    @bp.response(200, NicheMembershipSchema(many=True))
+    @bp.response(200, NicheMembershipSearchResultSchema)
     def get(self, args):
         """Get current user's niche memberships"""
         try:
@@ -170,6 +178,52 @@ class NichePostPermission(MethodView):
         """Check if user can post in niche"""
         try:
             return NicheService.can_user_post_in_niche(niche_id, current_user.id)
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+# Niche Posts
+# -----------------------------------------------
+@bp.route("/niches/<niche_id>/posts")
+class NichePosts(MethodView):
+    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.response(200, NichePostListSchema)
+    def get(self, args, niche_id):
+        """Get posts from a specific niche"""
+        try:
+            args["user_id"] = current_user.id if current_user.is_authenticated else None
+            return NicheService.get_niche_posts(niche_id, args)
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+    @login_required
+    @bp.arguments(NichePostCreateSchema)
+    @bp.response(201, NichePostResponseSchema)
+    def post(self, post_data, niche_id):
+        """Create a post in a specific niche"""
+        try:
+            return NicheService.create_niche_post(niche_id, current_user.id, post_data)
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/niches/<niche_id>/posts/<post_id>/approve")
+class NichePostApproval(MethodView):
+    @login_required
+    @bp.arguments(NichePostApprovalSchema)
+    @bp.response(200, NichePostSchema)
+    def post(self, approval_data, niche_id, post_id):
+        """Approve or reject a pending post in a niche (moderators only)"""
+        try:
+            if approval_data["action"] == "approve":
+                return NicheService.approve_niche_post(
+                    niche_id, post_id, current_user.id
+                )
+            else:
+                reason = approval_data.get("reason", "No reason provided")
+                return NicheService.reject_niche_post(
+                    niche_id, post_id, current_user.id, reason
+                )
         except APIError as e:
             abort(e.status_code, message=e.message)
 
@@ -203,7 +257,7 @@ class UserCollections(MethodView):
 @bp.route("/posts")
 class PostList(MethodView):
     @bp.arguments(PaginationQueryArgs, location="query")
-    @bp.response(200, PostDetailSchema(many=True))
+    @bp.response(200, PostDetailSearchResultSchema)
     def get(self, args):
         """Get paginated posts with filters"""
         return PostService.get_posts(args)

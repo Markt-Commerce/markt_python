@@ -276,6 +276,9 @@ class Post(BaseModel, UniqueIdMixin):
     comments = db.relationship(
         "PostComment", back_populates="post", cascade="all, delete-orphan"
     )
+    niche_posts = db.relationship(
+        "NichePost", back_populates="post", cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         # Seller post history
@@ -322,6 +325,37 @@ class Post(BaseModel, UniqueIdMixin):
             .correlate(None)
             .scalar_subquery()
         )
+
+    def get_niche_context(self):
+        """Get niche context for this post if it's posted in a niche"""
+        if hasattr(self, "niche_posts") and self.niche_posts:
+            niche_post = self.niche_posts[0]  # Assuming one niche per post for now
+            return {
+                "niche_id": niche_post.niche_id,
+                "niche_name": niche_post.niche.name,
+                "niche_slug": niche_post.niche.slug,
+                "is_pinned": niche_post.is_pinned,
+                "is_featured": niche_post.is_featured,
+                "is_approved": niche_post.is_approved,
+                "niche_likes": niche_post.niche_likes,
+                "niche_comments": niche_post.niche_comments,
+                "niche_visibility": niche_post.niche.visibility.value,
+            }
+        return None
+
+    @hybrid_property
+    def is_niche_post(self):
+        """Check if this post is posted in a niche"""
+        if hasattr(self, "niche_posts") and self.niche_posts:
+            return True
+        return False
+
+    @is_niche_post.expression
+    def is_niche_post(cls):
+        """SQL expression to check if post is in a niche"""
+        from sqlalchemy import exists
+
+        return exists().where(NichePost.post_id == cls.id)
 
 
 class PostMedia(BaseModel):

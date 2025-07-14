@@ -84,3 +84,35 @@ def update_popular_content(self):
 @celery_app.task
 def cleanup_old_feed_cache():
     """Clean up old cached feeds"""
+    try:
+        # Clean up old feed cache entries (older than 24 hours)
+        cutoff_time = datetime.utcnow() - timedelta(hours=24)
+
+        # Get all feed cache keys
+        feed_keys = redis_client.keys("feed:*")
+        cleaned_count = 0
+
+        for key in feed_keys:
+            # Check if cache is old (this is a simplified approach)
+            # In production, you might want to store timestamps with cache entries
+            if redis_client.ttl(key) == -1:  # No expiration set
+                redis_client.delete(key)
+                cleaned_count += 1
+
+        logger.info(f"Cleaned up {cleaned_count} old feed cache entries")
+
+        # Clean up old typing indicators (older than 10 minutes)
+        typing_keys = redis_client.keys("typing:*")
+        for key in typing_keys:
+            if redis_client.ttl(key) == -1:
+                redis_client.delete(key)
+
+        # Clean up old online status (older than 5 minutes)
+        online_keys = redis_client.keys("user_online:*")
+        for key in online_keys:
+            if redis_client.ttl(key) == -1:
+                redis_client.delete(key)
+
+    except Exception as e:
+        logger.error(f"Feed cache cleanup failed: {str(e)}")
+        raise
