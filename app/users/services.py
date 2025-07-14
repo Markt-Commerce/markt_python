@@ -77,10 +77,33 @@ class AuthService:
             if not user or not user.check_password(password):
                 raise AuthError("Invalid credentials")
 
-            if account_type == "buyer" and not user.is_buyer:
-                raise AuthError("Buyer account not found")
-            if account_type == "seller" and not user.is_seller:
-                raise AuthError("Seller account not found")
+            # Check if user is active
+            if not user.is_active:
+                raise AuthError("Account is deactivated")
+
+            if account_type == "buyer":
+                if not user.is_buyer:
+                    raise AuthError("Buyer account not found")
+
+                # Check if buyer account is active
+                buyer = session.query(Buyer).filter_by(user_id=user.id).first()
+                if not buyer:
+                    raise AuthError("Buyer account not found")
+                if not buyer.is_active:
+                    raise AuthError("Buyer account is deactivated")
+
+            elif account_type == "seller":
+                if not user.is_seller:
+                    raise AuthError("Seller account not found")
+
+                # Check if seller account is active
+                seller = session.query(Seller).filter_by(user_id=user.id).first()
+                if not seller:
+                    raise AuthError("Seller account not found")
+                if not seller.is_active:
+                    raise AuthError("Seller account is deactivated")
+            else:
+                raise AuthError("Invalid account type")
 
             user.current_role = account_type
             return user
@@ -301,6 +324,98 @@ class AccountService:
             session.add(seller)
             user.is_seller = True
             return seller
+
+    @staticmethod
+    def deactivate_user(user_id: str) -> bool:
+        """Deactivate a user account"""
+        with session_scope() as session:
+            user = session.query(User).get(user_id)
+            if not user:
+                raise NotFoundError("User not found")
+
+            user.deactivate()
+            session.commit()
+            return True
+
+    @staticmethod
+    def activate_user(user_id: str) -> bool:
+        """Activate a user account"""
+        try:
+            with session_scope() as session:
+                user = session.query(User).filter(User.id == user_id).first()
+                if not user:
+                    raise NotFoundError("User not found")
+
+                user.activate()
+                session.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Failed to activate user: {str(e)}")
+            return False
+
+    @staticmethod
+    def deactivate_buyer_account(user_id: str) -> bool:
+        """Deactivate a buyer account"""
+        try:
+            with session_scope() as session:
+                buyer = session.query(Buyer).filter_by(user_id=user_id).first()
+                if not buyer:
+                    raise NotFoundError("Buyer account not found")
+
+                buyer.deactivate()
+                session.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Failed to deactivate buyer account: {str(e)}")
+            return False
+
+    @staticmethod
+    def activate_buyer_account(user_id: str) -> bool:
+        """Activate a buyer account"""
+        try:
+            with session_scope() as session:
+                buyer = session.query(Buyer).filter_by(user_id=user_id).first()
+                if not buyer:
+                    raise NotFoundError("Buyer account not found")
+
+                buyer.activate()
+                session.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Failed to activate buyer account: {str(e)}")
+            return False
+
+    @staticmethod
+    def deactivate_seller_account(user_id: str) -> bool:
+        """Deactivate a seller account"""
+        try:
+            with session_scope() as session:
+                seller = session.query(Seller).filter_by(user_id=user_id).first()
+                if not seller:
+                    raise NotFoundError("Seller account not found")
+
+                seller.deactivate()
+                session.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Failed to deactivate seller account: {str(e)}")
+            return False
+
+    @staticmethod
+    def activate_seller_account(user_id: str) -> bool:
+        """Activate a seller account"""
+        try:
+            with session_scope() as session:
+                seller = session.query(Seller).filter_by(user_id=user_id).first()
+                if not seller:
+                    raise NotFoundError("Seller account not found")
+
+                seller.activate()
+                session.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Failed to activate seller account: {str(e)}")
+            return False
 
 
 class ShopService:

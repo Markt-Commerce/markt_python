@@ -25,10 +25,7 @@ def generate_all_feeds(self):
     """Full feed regeneration for all users with personalization"""
     try:
         with session_scope() as session:
-            # users = session.query(User.id).filter(User.is_active == True).all()
-            users = session.query(
-                User.id
-            ).all()  # I'd add a filter for the user to be active
+            users = session.query(User.id).filter(User.is_active == True).all()
             for (user_id,) in users:
                 # Generate different feed types for each user
                 for feed_type in ["personalized", "trending", "following"]:
@@ -288,10 +285,7 @@ def generate_discovery_feeds(self):
     """Generate discovery feeds for users based on their interests"""
     try:
         with session_scope() as session:
-            # users = session.query(User.id).filter(User.is_active == True).all()
-            users = session.query(
-                User.id
-            ).all()  # I'd add a filter for the user to be active
+            users = session.query(User.id).filter(User.is_active == True).all()
 
             for (user_id,) in users:
                 try:
