@@ -109,6 +109,18 @@ class TrendingProducts(MethodView):
         )
 
 
+@bp.route("/recommended")
+class RecommendedProducts(MethodView):
+    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.response(200, ProductSchema(many=True))
+    def get(self, args):
+        """Get personalized product recommendations"""
+        user_id = current_user.id if current_user.is_authenticated else None
+        limit = min(args.get("per_page", 10), 50)
+
+        return ProductService.get_recommended_products(user_id, limit)
+
+
 @bp.route("/<product_id>/reviews")
 class ProductReviews(MethodView):
     @bp.arguments(PaginationQueryArgs, location="query")

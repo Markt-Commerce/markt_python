@@ -59,6 +59,69 @@ class RedisClient:
         """Wrapper for Redis zcard command"""
         return self.client.zcard(name)
 
+    def zrange(
+        self, name, start, end, withscores=False, desc=False, score_cast_func=float
+    ):
+        """Wrapper for Redis zrange command with optional score processing"""
+        return self.client.zrange(
+            name,
+            start,
+            end,
+            withscores=withscores,
+            desc=desc,
+            score_cast_func=score_cast_func,
+        )
+
+    def zrangebyscore(
+        self,
+        name,
+        min_score,
+        max_score,
+        withscores=False,
+        score_cast_func=float,
+        offset=None,
+        count=None,
+    ):
+        """Wrapper for Redis zrangebyscore command"""
+        return self.client.zrangebyscore(
+            name,
+            min_score,
+            max_score,
+            withscores=withscores,
+            score_cast_func=score_cast_func,
+            start=offset,
+            num=count,
+        )
+
+    def zrevrangebyscore(
+        self,
+        name,
+        max_score,
+        min_score,
+        withscores=False,
+        score_cast_func=float,
+        offset=None,
+        count=None,
+    ):
+        """Wrapper for Redis zrevrangebyscore command (reverse order)"""
+        return self.client.zrevrangebyscore(
+            name,
+            max_score,
+            min_score,
+            withscores=withscores,
+            score_cast_func=score_cast_func,
+            start=offset,
+            num=count,
+        )
+
+    def zpopmax(self, name, count=1):
+        """Wrapper for Redis zpopmax command"""
+        return self.client.zpopmax(name, count)
+
+    def zpopmin(self, name, count=1):
+        """Wrapper for Redis zpopmin command"""
+        return self.client.zpopmin(name, count)
+
     # Basic operations you might also need
     def get(self, name):
         """Wrapper for Redis get command"""
