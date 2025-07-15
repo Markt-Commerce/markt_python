@@ -1,5 +1,6 @@
 # python imports
 import logging
+import time
 
 # package imports
 from flask import Flask
@@ -54,6 +55,9 @@ def create_app():
 
     app = Flask(__name__)
     app.wsgi_app = AuthMiddleware(app.wsgi_app)
+
+    # Track application start time for health checks
+    app.start_time = time.time()
 
     # Get both login_manager and api
     login_manager, api, socketio = configure_app(app)

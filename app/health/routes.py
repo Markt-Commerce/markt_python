@@ -5,6 +5,7 @@ from flask import jsonify, current_app
 import time
 import psutil
 import os
+from sqlalchemy import text
 
 # project imports
 from external.redis import redis_client
@@ -41,7 +42,7 @@ class DetailedHealthCheck(MethodView):
 
         # Database health check
         try:
-            db.session.execute("SELECT 1")
+            db.session.execute(text("SELECT 1"))
             health_status["components"]["database"] = {
                 "status": "healthy",
                 "response_time": self._measure_db_response_time(),
@@ -55,7 +56,8 @@ class DetailedHealthCheck(MethodView):
 
         # Redis health check
         try:
-            redis_client.ping()
+            # Use the Redis client's ping method properly
+            redis_client.client.ping()
             health_status["components"]["redis"] = {
                 "status": "healthy",
                 "response_time": self._measure_redis_response_time(),
@@ -90,7 +92,7 @@ class DetailedHealthCheck(MethodView):
         """Measure database response time"""
         start_time = time.time()
         try:
-            db.session.execute("SELECT 1")
+            db.session.execute(text("SELECT 1"))
             return round((time.time() - start_time) * 1000, 2)  # milliseconds
         except:
             return None
@@ -99,7 +101,7 @@ class DetailedHealthCheck(MethodView):
         """Measure Redis response time"""
         start_time = time.time()
         try:
-            redis_client.ping()
+            redis_client.client.ping()
             return round((time.time() - start_time) * 1000, 2)  # milliseconds
         except:
             return None
@@ -108,7 +110,7 @@ class DetailedHealthCheck(MethodView):
         """Get number of active database connections"""
         try:
             result = db.session.execute(
-                "SELECT count(*) FROM pg_stat_activity WHERE state = 'active'"
+                text("SELECT count(*) FROM pg_stat_activity WHERE state = 'active'")
             )
             return result.scalar()
         except:
@@ -130,7 +132,7 @@ class ReadinessCheck(MethodView):
 
         # Database readiness
         try:
-            db.session.execute("SELECT 1")
+            db.session.execute(text("SELECT 1"))
             readiness_status["checks"]["database"] = True
         except Exception:
             readiness_status["checks"]["database"] = False
@@ -138,7 +140,7 @@ class ReadinessCheck(MethodView):
 
         # Redis readiness
         try:
-            redis_client.ping()
+            redis_client.client.ping()
             readiness_status["checks"]["redis"] = True
         except Exception:
             readiness_status["checks"]["redis"] = False
@@ -205,7 +207,7 @@ class MetricsEndpoint(MethodView):
     def _get_db_connection_metrics(self):
         """Get database connection metrics"""
         try:
-            result = db.session.execute("SELECT count(*) FROM pg_stat_activity")
+            result = db.session.execute(text("SELECT count(*) FROM pg_stat_activity"))
             return result.scalar()
         except:
             return 0
@@ -213,7 +215,7 @@ class MetricsEndpoint(MethodView):
     def _get_redis_connection_metrics(self):
         """Get Redis connection metrics"""
         try:
-            info = redis_client.info()
+            info = redis_client.client.info()
             return info.get("connected_clients", 0)
         except:
             return 0
@@ -261,13 +263,22 @@ class StatusEndpoint(MethodView):
 
     def _get_system_metrics(self):
         """Get system performance metrics"""
-        return {
-            "cpu_usage": psutil.cpu_percent(interval=1),
-            "memory_usage": psutil.virtual_memory().percent,
-            "disk_usage": psutil.disk_usage("/").percent,
-            "load_average": os.getloadavg() if hasattr(os, "getloadavg") else None,
-            "network_io": self._get_network_io(),
-        }
+        try:
+            return {
+                "cpu_usage": psutil.cpu_percent(interval=1),
+                "memory_usage": psutil.virtual_memory().percent,
+                "disk_usage": psutil.disk_usage("/").percent,
+                "network_io": self._get_network_io(),
+                "load_average": os.getloadavg() if hasattr(os, "getloadavg") else None,
+            }
+        except:
+            return {
+                "cpu_usage": 0,
+                "memory_usage": 0,
+                "disk_usage": 0,
+                "network_io": {},
+                "load_average": None,
+            }
 
     def _get_network_io(self):
         """Get network I/O statistics"""
@@ -283,27 +294,24 @@ class StatusEndpoint(MethodView):
             return {}
 
     def _get_dependency_status(self):
-        """Get status of external dependencies"""
+        """Get dependency health status"""
         dependencies = {}
 
-        # Database
+        # Database status
         try:
-            db.session.execute("SELECT 1")
+            db.session.execute(text("SELECT 1"))
             dependencies["database"] = "healthy"
-        except:
-            dependencies["database"] = "unhealthy"
+        except Exception as e:
+            dependencies["database"] = f"unhealthy: {str(e)}"
 
-        # Redis
+        # Redis status
         try:
-            redis_client.ping()
+            redis_client.client.ping()
             dependencies["redis"] = "healthy"
-        except:
-            dependencies["redis"] = "unhealthy"
+        except Exception as e:
+            dependencies["redis"] = f"unhealthy: {str(e)}"
 
-        # Payment gateway (if configured)
-        if current_app.config.get("PAYSTACK_SECRET_KEY"):
-            dependencies["payment_gateway"] = "configured"
-        else:
-            dependencies["payment_gateway"] = "not_configured"
+        # Application status
+        dependencies["application"] = "healthy"
 
         return dependencies
