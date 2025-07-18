@@ -29,7 +29,16 @@ class Database:
         with app.app_context():
             from app.users.models import User, Buyer, Seller, UserAddress
             from app.products.models import Product, ProductVariant, ProductInventory
-            from app.categories.models import Category, ProductCategory, Tag, ProductTag
+            from app.categories.models import (
+                Category,
+                ProductCategory,
+                Tag,
+                ProductTag,
+                PostCategory,
+                RequestCategory,
+                SellerCategory,
+                NicheCategory,
+            )
             from app.orders.models import Order, Shipment
             from app.payments.models import Payment, Transaction
             from app.socials.models import (
@@ -39,7 +48,6 @@ class Database:
                 Post,
                 PostComment,
                 PostLike,
-                PostMedia,
                 PostProduct,
                 Niche,
                 NicheMembership,
@@ -47,8 +55,13 @@ class Database:
                 NicheModerationAction,
             )
             from app.notifications.models import Notification
-            from app.requests.models import BuyerRequest, SellerOffer, RequestImage
-            from app.media.models import Media, MediaVariant, ProductImage
+            from app.requests.models import BuyerRequest, SellerOffer
+            from app.media.models import (
+                Media,
+                ProductImage,
+                SocialMediaPost,
+                RequestImage,
+            )
             from app.chats.models import ChatRoom, ChatMessage, ChatOffer
             from app.cart.models import Cart, CartItem
 
