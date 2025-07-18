@@ -58,6 +58,13 @@ class Config:
         self.PAYMENT_CURRENCY = config("PAYMENT_CURRENCY", default="NGN")
         self.PAYMENT_GATEWAY = config("PAYMENT_GATEWAY", default="paystack")
 
+        # AWS Configuration
+        self.AWS_ACCESS_KEY = config("AWS_ACCESS_KEY", default="")
+        self.AWS_SECRET_KEY = config("AWS_SECRET_KEY", default="")
+        self.AWS_REGION = config("AWS_REGION", default="us-east-1")
+        self.AWS_S3_BUCKET = config("AWS_S3_BUCKET", default="markt-media")
+        self.CDN_DOMAIN = config("CDN_DOMAIN", default="")
+
         # Build Redis URL
         REDIS_URL = f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
