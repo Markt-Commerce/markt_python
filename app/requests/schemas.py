@@ -10,14 +10,6 @@ from app.libs.schemas import PaginationSchema
 from .models import RequestStatus
 
 
-class RequestImageSchema(Schema):
-    """Schema for request images"""
-
-    id = fields.Int(dump_only=True)
-    url = fields.Str(required=True, validate=validate.URL())
-    is_primary = fields.Bool(allow_none=True)
-
-
 class SellerOfferSchema(Schema):
     """Schema for seller offers"""
 
@@ -50,7 +42,6 @@ class BuyerRequestSchema(Schema):
     user_id = fields.Str(dump_only=True)
     title = fields.Str(required=True, validate=validate.Length(min=1, max=100))
     description = fields.Str(required=True, validate=validate.Length(min=10, max=2000))
-    category_id = fields.Int(allow_none=True)
     budget = fields.Float(validate=validate.Range(min=0))
     status = fields.Enum(RequestStatus, dump_only=True)
     request_metadata = fields.Dict(dump_only=True)
@@ -62,8 +53,8 @@ class BuyerRequestSchema(Schema):
 
     # Nested relationships
     user = fields.Nested("UserSchema", dump_only=True)
-    category = fields.Nested("CategorySchema", dump_only=True)
-    images = fields.Nested(RequestImageSchema, many=True, dump_only=True)
+    categories = fields.Nested("CategorySchema", many=True, dump_only=True)
+    images = fields.Nested("RequestImageSchema", many=True, dump_only=True)
     offers = fields.Nested(SellerOfferSchema, many=True, dump_only=True)
 
 
@@ -77,11 +68,14 @@ class BuyerRequestCreateSchema(Schema):
 
     title = fields.Str(required=True, validate=validate.Length(min=1, max=100))
     description = fields.Str(required=True, validate=validate.Length(min=10, max=2000))
-    category_id = fields.Int(allow_none=True)
+    category_ids = fields.List(fields.Int(), allow_none=True)
     budget = fields.Float(validate=validate.Range(min=0))
     expires_at = fields.DateTime(allow_none=True)
     metadata = fields.Dict(allow_none=True)
-    images = fields.Nested(RequestImageSchema, many=True, allow_none=True)
+    media_ids = fields.List(
+        fields.Int(), description="List of media IDs to link to request"
+    )
+    # Note: Images can also be uploaded separately via media endpoints
 
     @validates("expires_at")
     def validate_expires_at(self, value):
@@ -100,7 +94,7 @@ class BuyerRequestUpdateSchema(Schema):
 
     title = fields.Str(validate=validate.Length(min=1, max=100))
     description = fields.Str(validate=validate.Length(min=10, max=2000))
-    category_id = fields.Int(allow_none=True)
+    category_ids = fields.List(fields.Int(), allow_none=True)
     budget = fields.Float(validate=validate.Range(min=0))
     expires_at = fields.DateTime(allow_none=True)
     metadata = fields.Dict(allow_none=True)
@@ -121,7 +115,7 @@ class BuyerRequestSearchSchema(Schema):
     """Schema for searching buyer requests"""
 
     search = fields.Str(allow_none=True)
-    category_id = fields.Int(allow_none=True)
+    category_ids = fields.List(fields.Int(), allow_none=True)
     min_budget = fields.Float(validate=validate.Range(min=0), allow_none=True)
     max_budget = fields.Float(validate=validate.Range(min=0), allow_none=True)
     status = fields.Enum(RequestStatus, allow_none=True)

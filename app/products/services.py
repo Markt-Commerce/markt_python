@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 import time
 from typing import List, Dict, Any, Optional
+from io import BytesIO
 
 # package imports
 from sqlalchemy import or_, and_, func, desc, asc, text
@@ -22,6 +23,7 @@ from app.libs.errors import (
     ConflictError,
     APIError,
     ForbiddenError,
+    AuthError,
 )
 
 from app.users.models import Seller
@@ -38,6 +40,8 @@ from app.socials.models import (
 from .models import Product, ProductVariant, ProductInventory
 from .constants import PRODUCT_FILTER_KEYS, OPTIONAL_PRODUCT_FIELDS
 from app.orders.models import OrderItem
+from app.media.services import media_service
+from app.media.models import Media, ProductImage, MediaVariantType
 
 
 logger = logging.getLogger(__name__)
@@ -144,7 +148,8 @@ class ProductService:
             }
 
     @staticmethod
-    def create_product(product_data, seller_id):
+    def create_product(product_data, current_user):
+        seller_id = current_user.seller_account.id
         try:
             with session_scope() as session:
                 product = Product(
@@ -171,6 +176,29 @@ class ProductService:
                             options=variant_data["options"],
                         )
                         session.add(variant)
+
+                # Handle media linking if provided
+                if "media_ids" in product_data and product_data["media_ids"]:
+                    for idx, media_id in enumerate(product_data["media_ids"]):
+                        # Verify media exists and belongs to user
+                        media = session.query(Media).get(media_id)
+                        if not media:
+                            raise ValidationError(f"Media {media_id} not found")
+
+                        if media.user_id != current_user.id:
+                            raise ValidationError(
+                                f"Media {media_id} does not belong to you"
+                            )
+
+                        # Create product image relationship
+                        product_image = ProductImage(
+                            product_id=product.id,
+                            media_id=media_id,
+                            sort_order=idx,
+                            is_featured=(idx == 0),  # First image is featured
+                            alt_text=media.alt_text or f"Product image {idx + 1}",
+                        )
+                        session.add(product_image)
 
                 return product
         except SQLAlchemyError as e:
@@ -947,3 +975,133 @@ class ProductStatsService:
 
         except Exception as e:
             logger.warning(f"Failed to update product stats for {product_id}: {e}")
+
+
+class ProductImageService:
+    """Service for managing product images and media"""
+
+    @staticmethod
+    def add_product_image(
+        product_id: str,
+        file_stream: BytesIO,
+        filename: str,
+        user_id: str,
+        sort_order: int = 0,
+        is_featured: bool = False,
+        alt_text: str = None,
+    ):
+        """Add image to product"""
+        try:
+            # Verify product exists and user owns it
+            product = Product.query.get(product_id)
+            if not product:
+                raise NotFoundError("Product not found")
+
+            if product.seller.user_id != user_id:
+                raise AuthError("You can only add images to your own products")
+
+            # 1. Upload media using updated media service (returns only media object)
+            media = media_service.upload_image(
+                file_stream=file_stream,
+                filename=filename,
+                user_id=user_id,
+                alt_text=alt_text or f"Product image for {product_id}",
+                caption=f"Product image",
+            )
+
+            # 2. Create product image relationship
+            with session_scope() as session:
+                product_image = ProductImage(
+                    product_id=product_id,
+                    media_id=media.id,
+                    sort_order=sort_order,
+                    is_featured=is_featured,
+                    alt_text=alt_text,
+                )
+
+                session.add(product_image)
+                session.commit()
+
+            return product_image
+
+        except Exception as e:
+            logger.error(f"Failed to add product image: {e}")
+            raise ValidationError(f"Failed to add product image: {str(e)}")
+
+    @staticmethod
+    def get_product_images(product_id: str):
+        """Get all images for a product"""
+        with session_scope() as session:
+            return (
+                session.query(ProductImage)
+                .filter_by(product_id=product_id)
+                .order_by(ProductImage.sort_order)
+                .all()
+            )
+
+    @staticmethod
+    def delete_product_image(image_id: int, user_id: str):
+        """Delete a product image"""
+        try:
+            with session_scope() as session:
+                product_image = session.query(ProductImage).get(image_id)
+                if not product_image:
+                    raise NotFoundError("Product image not found")
+
+                # Verify user owns the product
+                if product_image.product.seller.user_id != user_id:
+                    raise AuthError("You can only delete images from your own products")
+
+                # Get the media object
+                media = product_image.media
+                if media:
+                    # Delete from S3 using media service
+                    success = media_service.delete_media(media)
+                    if not success:
+                        logger.warning(f"Failed to delete media {media.id} from S3")
+
+                    # Delete media object from database
+                    session.delete(media)
+
+                # Delete product image relationship
+                session.delete(product_image)
+                session.commit()
+
+            return {"success": True, "message": "Product image deleted"}
+
+        except Exception as e:
+            logger.error(f"Failed to delete product image: {e}")
+            raise ValidationError(f"Failed to delete product image: {str(e)}")
+
+    @staticmethod
+    def update_product_image_order(
+        product_id: str, image_orders: List[Dict[str, Any]], user_id: str
+    ):
+        """Update the sort order of product images"""
+        try:
+            with session_scope() as session:
+                # Verify user owns the product
+                product = session.query(Product).get(product_id)
+                if not product:
+                    raise NotFoundError("Product not found")
+
+                if product.seller.user_id != user_id:
+                    raise AuthError("You can only update images for your own products")
+
+                # Update sort orders
+                for order_data in image_orders:
+                    image_id = order_data.get("image_id")
+                    sort_order = order_data.get("sort_order", 0)
+                    is_featured = order_data.get("is_featured", False)
+
+                    product_image = session.query(ProductImage).get(image_id)
+                    if product_image and product_image.product_id == product_id:
+                        product_image.sort_order = sort_order
+                        product_image.is_featured = is_featured
+
+                session.commit()
+            return {"success": True, "message": "Product image order updated"}
+
+        except Exception as e:
+            logger.error(f"Failed to update product image order: {e}")
+            raise ValidationError(f"Failed to update product image order: {str(e)}")

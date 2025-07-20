@@ -12,6 +12,7 @@ from app.libs.session import session_scope
 
 from app.users.models import User
 from app.products.services import ProductService
+from app.categories.models import Category, PostCategory, ProductCategory
 
 # app imports
 from .models import Post, ProductView, PostLike
@@ -92,16 +93,38 @@ def update_user_activity_metrics(self, user_id):
             # Calculate category preferences
             category_engagement = {}
             for like in recent_likes:
-                if like.post.category:
-                    category_engagement[like.post.category] = (
-                        category_engagement.get(like.post.category, 0) + 1
+                # Get post with categories loaded
+                post = (
+                    session.query(Post)
+                    .options(
+                        joinedload(Post.categories).joinedload(PostCategory.category)
                     )
+                    .get(like.post_id)
+                )
+                if post and post.categories:
+                    for post_category in post.categories:
+                        category_id = post_category.category_id
+                        category_engagement[category_id] = (
+                            category_engagement.get(category_id, 0) + 1
+                        )
 
             for view in recent_views:
-                if view.product.category_id:
-                    category_engagement[view.product.category_id] = (
-                        category_engagement.get(view.product.category_id, 0) + 1
+                # Get product with categories loaded
+                product = (
+                    session.query(Product)
+                    .options(
+                        joinedload(Product.categories).joinedload(
+                            ProductCategory.category
+                        )
                     )
+                    .get(view.product_id)
+                )
+                if product and product.categories:
+                    for product_category in product.categories:
+                        category_id = product_category.category_id
+                        category_engagement[category_id] = (
+                            category_engagement.get(category_id, 0) + 1
+                        )
 
             # Cache user preferences
             cache_key = f"user:{user_id}:preferences"
@@ -164,18 +187,16 @@ def update_category_trending(self):
     """Update trending content by category"""
     try:
         with session_scope() as session:
-            # Get all categories
-            categories = session.query(db.func.distinct(Post.category)).all()
+            # Get all categories with posts
+            categories = session.query(Category).join(PostCategory).distinct().all()
 
-            for (category,) in categories:
-                if not category:
-                    continue
-
+            for category in categories:
                 # Get trending posts for this category
                 category_posts = (
                     session.query(Post)
+                    .join(PostCategory)
                     .filter(
-                        Post.category == category,
+                        PostCategory.category_id == category.id,
                         Post.created_at >= datetime.utcnow() - timedelta(days=7),
                     )
                     .order_by(db.func.array_length(Post.likes, 1).desc())
@@ -184,7 +205,7 @@ def update_category_trending(self):
                 )
 
                 # Cache category trending
-                cache_key = f"trending:category:{category}"
+                cache_key = f"trending:category:{category.id}"
                 trending_data = []
 
                 for post in category_posts:

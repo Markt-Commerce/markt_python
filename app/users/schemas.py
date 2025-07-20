@@ -1,5 +1,6 @@
 from marshmallow import Schema, fields, validate, ValidationError, EXCLUDE
 from app.libs.schemas import PaginationSchema
+from app.categories.schemas import CategorySchema
 
 from .models import SellerVerificationStatus
 
@@ -45,7 +46,10 @@ class BuyerCreateSchema(Schema):
 class SellerCreateSchema(Schema):
     shop_name = fields.Str(required=True)
     description = fields.Str(required=True)
-    category = fields.Str(required=True)
+    category_ids = fields.List(
+        fields.Int(), required=True, description="List of category IDs"
+    )
+    policies = fields.Dict(required=False)
 
 
 class UserRegisterSchema(UserSchema):
@@ -82,7 +86,8 @@ class BuyerUpdateSchema(Schema):
 class SellerUpdateSchema(Schema):
     shop_name = fields.Str(validate=validate.Length(min=2, max=100))
     description = fields.Str()
-    category = fields.Str()
+    category_ids = fields.List(fields.Int(), description="List of category IDs")
+    policies = fields.Dict()
 
 
 class UserLoginSchema(Schema):
@@ -132,14 +137,19 @@ class BuyerProfileSchema(BuyerCreateSchema):
     last_order_date = fields.DateTime(dump_only=True)
 
 
-class SellerProfileSchema(SellerCreateSchema):
+class SellerProfileSchema(Schema):
+    id = fields.Int(dump_only=True)
+    shop_name = fields.Str()
+    description = fields.Str()
     verification_status = fields.Enum(
         SellerVerificationStatus, by_value=True, dump_only=True
     )
     total_products = fields.Int(dump_only=True)
-    total_sales = fields.Int(dump_only=True)
+    total_sales = fields.Float(dump_only=True)
     average_rating = fields.Float(dump_only=True)
     joined_date = fields.DateTime(dump_only=True)
+    categories = fields.List(fields.Nested("CategorySchema"), dump_only=True)
+    policies = fields.Dict(dump_only=True)
 
 
 class UsernameCheckSchema(Schema):
@@ -174,7 +184,7 @@ class UserSimpleSchema(Schema):
 class SellerSimpleSchema(Schema):
     id = fields.Int(dump_only=True)
     shop_name = fields.Str()
-    category = fields.Str()
+    categories = fields.List(fields.Nested("CategorySchema"), dump_only=True)
     average_rating = fields.Float(dump_only=True)
     total_products = fields.Int(dump_only=True)
 
@@ -194,4 +204,3 @@ class PublicProfileSchema(Schema):
 # Legacy schema for backward compatibility
 class SellerSchema(SellerCreateSchema):
     """Legacy schema alias"""
-

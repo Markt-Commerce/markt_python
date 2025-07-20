@@ -75,7 +75,6 @@ class Niche(BaseModel, UniqueIdMixin):
     max_members = db.Column(db.Integer, default=10000)
 
     # Metadata
-    category_id = db.Column(db.Integer, db.ForeignKey("categories.id"))
     tags = db.Column(db.JSON)  # Array of tags
     rules = db.Column(db.JSON)  # Community rules
     settings = db.Column(db.JSON)  # Additional settings
@@ -89,7 +88,7 @@ class Niche(BaseModel, UniqueIdMixin):
     updated_at = db.Column(db.DateTime, onupdate=db.func.now())
 
     # Relationships
-    category = db.relationship("Category")
+    categories = db.relationship("NicheCategory", back_populates="niche")
     members = db.relationship(
         "NicheMembership", back_populates="niche", cascade="all, delete-orphan"
     )
@@ -103,7 +102,6 @@ class Niche(BaseModel, UniqueIdMixin):
     __table_args__ = (
         db.Index("idx_niche_slug", "slug"),
         db.Index("idx_niche_status", "status"),
-        db.Index("idx_niche_category", "category_id"),
         db.Index("idx_niche_visibility", "visibility"),
     )
 
@@ -260,12 +258,17 @@ class Post(BaseModel, UniqueIdMixin):
     seller_id = db.Column(db.Integer, db.ForeignKey("sellers.id"))
     caption = db.Column(db.Text)
     status = db.Column(db.Enum(PostStatus), default=PostStatus.DRAFT, nullable=False)
+
+    # Categories and tags
+    tags = db.Column(db.JSON)  # Array of tag strings
+
     created_at = db.Column(db.DateTime, server_default=db.func.now())
 
     # Relationships
     seller = db.relationship("Seller", back_populates="posts")
-    media = db.relationship(
-        "PostMedia", back_populates="post", cascade="all, delete-orphan"
+    categories = db.relationship("PostCategory", back_populates="post")
+    social_media = db.relationship(
+        "SocialMediaPost", back_populates="post", cascade="all, delete-orphan"
     )
     tagged_products = db.relationship(
         "PostProduct", back_populates="post", cascade="all, delete-orphan"
@@ -358,15 +361,7 @@ class Post(BaseModel, UniqueIdMixin):
         return exists().where(NichePost.post_id == cls.id)
 
 
-class PostMedia(BaseModel):
-    __tablename__ = "post_media"
-    id = db.Column(db.Integer, primary_key=True)
-    post_id = db.Column(db.String(12), db.ForeignKey("posts.id"))
-    media_url = db.Column(db.String(255))
-    media_type = db.Column(db.String(20))  # 'image', 'video'
-    sort_order = db.Column(db.Integer, default=0)
-
-    post = db.relationship("Post", back_populates="media")
+# PostMedia model removed - replaced by SocialMediaPost in media module
 
 
 class PostProduct(BaseModel):
