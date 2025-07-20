@@ -232,5 +232,15 @@ class RedisClient:
         """Return Redis pipeline object"""
         return self.client.pipeline()
 
+    # Ping operation
+    def ping(self):
+        """Wrapper for Redis ping command"""
+        return self.client.ping()
+
+    # Close connection
+    def close(self):
+        """Wrapper for Redis close command"""
+        self.client.close()
+
 
 redis_client = RedisClient()
