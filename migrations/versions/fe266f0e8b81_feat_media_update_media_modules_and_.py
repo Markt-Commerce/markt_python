@@ -50,6 +50,7 @@ def upgrade():
         batch_op.add_column(sa.Column('background_removed', sa.Boolean(), nullable=True))
         batch_op.add_column(sa.Column('compression_quality', sa.Integer(), nullable=True))
         batch_op.add_column(sa.Column('exif_data', sa.JSON(), nullable=True))
+        batch_op.add_column(sa.Column('processing_error', sa.Text(), nullable=True))
 
     with op.batch_alter_table('media_variants', schema=None) as batch_op:
         batch_op.add_column(sa.Column('quality', sa.Integer(), nullable=True))
@@ -107,6 +108,7 @@ def downgrade():
         batch_op.drop_column('background_removed')
         batch_op.drop_column('processing_status')
         batch_op.drop_column('original_filename')
+        batch_op.drop_column('processing_error')
 
     op.create_table('post_media',
     sa.Column('id', sa.INTEGER(), autoincrement=True, nullable=False),

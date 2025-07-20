@@ -48,6 +48,7 @@ class Media(BaseModel):
     processing_status = db.Column(
         db.String(50), default="completed"
     )  # pending, processing, completed, failed
+    processing_error = db.Column(db.Text)  # Error message if processing failed
     background_removed = db.Column(
         db.Boolean, default=False
     )  # Placeholder for future background removal
