@@ -7,6 +7,7 @@ from io import BytesIO
 from PIL import Image
 import mimetypes
 from datetime import datetime
+import time
 
 from main.config import settings
 
@@ -24,10 +25,16 @@ class S3Service:
                 aws_access_key_id=settings.AWS_ACCESS_KEY,
                 aws_secret_access_key=settings.AWS_SECRET_KEY,
                 region_name=settings.AWS_REGION,
+                config=boto3.session.Config(
+                    connect_timeout=10,  # Reduced from 30
+                    read_timeout=30,  # Reduced from 60
+                    retries={"max_attempts": 2},  # Reduced from 3
+                ),
             )
             self.bucket = settings.AWS_S3_BUCKET
             self.cdn_domain = getattr(settings, "CDN_DOMAIN", None)
-            self.default_acl = "public-read"
+            # Don't use ACLs by default - modern S3 buckets have ACLs disabled
+            self.default_acl = None
 
         except (NoCredentialsError, PartialCredentialsError) as e:
             logger.error(f"AWS credentials not found: {e}")
@@ -61,10 +68,9 @@ class S3Service:
             extra_args = {}
             if content_type:
                 extra_args["ContentType"] = content_type
+            # Only set ACL if explicitly provided and bucket supports it
             if acl:
                 extra_args["ACL"] = acl
-            else:
-                extra_args["ACL"] = self.default_acl
 
             self.s3.upload_file(file_path, bucket_name, s3_key, ExtraArgs=extra_args)
             s3_url = self._generate_url(bucket_name, s3_key)
@@ -100,17 +106,53 @@ class S3Service:
             S3 URL of the uploaded file
         """
         try:
+            start_time = time.time()
+
+            # Validate input
+            if not file_obj:
+                raise ValueError("File object is None")
+
+            # Check if file object has data
+            file_obj.seek(0)
+            file_size = file_obj.getbuffer().nbytes
+            if file_size == 0:
+                raise ValueError("File object is empty")
+
             extra_args = {}
             if content_type:
                 extra_args["ContentType"] = content_type
+            # Only set ACL if explicitly provided and bucket supports it
             if acl:
                 extra_args["ACL"] = acl
-            else:
-                extra_args["ACL"] = self.default_acl
 
-            self.s3.upload_fileobj(file_obj, bucket_name, s3_key, ExtraArgs=extra_args)
+            # Ensure file_obj is at the beginning
+            file_obj.seek(0)
+
+            # For smaller files (< 5MB), use put_object to avoid multipart upload issues
+            # For larger files, use upload_fileobj with single-part config
+            if file_size < 5 * 1024 * 1024:  # Less than 5MB
+                file_data = file_obj.read()
+                self.s3.put_object(
+                    Bucket=bucket_name, Key=s3_key, Body=file_data, **extra_args
+                )
+            else:
+                # Use single-part upload config to avoid multipart issues
+                from boto3.s3.transfer import TransferConfig
+
+                config = TransferConfig(
+                    multipart_threshold=1024
+                    * 1024
+                    * 1024,  # 1GB - effectively disable multipart
+                    max_concurrency=1,  # Single thread
+                    use_threads=False,  # No threading
+                )
+                self.s3.upload_fileobj(
+                    file_obj, bucket_name, s3_key, ExtraArgs=extra_args, Config=config
+                )
+
+            upload_time = time.time() - start_time
             s3_url = self._generate_url(bucket_name, s3_key)
-            logger.info(f"Successfully uploaded file object to {s3_url}")
+            logger.info(f"S3 upload completed: {s3_key} in {upload_time:.2f}s")
             return s3_url
 
         except ClientError as e:
@@ -138,6 +180,30 @@ class S3Service:
         except ClientError as e:
             logger.error(f"Failed to delete {s3_key}: {e}")
             return False
+
+    def download_fileobj(self, bucket_name: str, s3_key: str) -> BytesIO:
+        """
+        Download a file from S3 as BytesIO object
+
+        Args:
+            bucket_name: S3 bucket name
+            s3_key: S3 object key
+
+        Returns:
+            File content as BytesIO object
+        """
+        try:
+            file_obj = BytesIO()
+            self.s3.download_fileobj(bucket_name, s3_key, file_obj)
+            file_obj.seek(0)
+            logger.info(f"Successfully downloaded {s3_key} from {bucket_name}")
+            return file_obj
+        except ClientError as e:
+            logger.error(f"Failed to download {s3_key}: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error downloading {s3_key}: {e}")
+            raise
 
     def generate_presigned_url(
         self,
