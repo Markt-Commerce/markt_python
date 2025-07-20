@@ -104,6 +104,11 @@ class Config:
             "task_acks_late": self.CELERY_TASK_ACKS_LATE,
             "worker_disable_rate_limits": self.CELERY_WORKER_DISABLE_RATE_LIMITS,
             "broker_connection_retry_on_startup": self.CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP,
+            "task_routes": {
+                "app.media.tasks.*": {"queue": "media"},
+                "app.socials.tasks.*": {"queue": "social"},
+                "app.notifications.tasks.*": {"queue": "notifications"},
+            },
         }
 
     @property

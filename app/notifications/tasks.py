@@ -11,7 +11,7 @@ from .models import Notification, NotificationType
 logger = logging.getLogger(__name__)
 
 
-@celery_app.task(bind=True, max_retries=3)
+@celery_app.task(bind=True, max_retries=3, queue="notifications")
 def deliver_notification(self, notification_data: Dict, channels: List[str]):
     """
     Asynchronously deliver notification via specified channels
@@ -65,7 +65,7 @@ def deliver_notification(self, notification_data: Dict, channels: List[str]):
         raise
 
 
-@celery_app.task(bind=True)
+@celery_app.task(bind=True, queue="notifications")
 def send_push_notification(self, notification_data: Dict):
     """Send push notification to mobile devices"""
     try:
@@ -78,7 +78,7 @@ def send_push_notification(self, notification_data: Dict):
         logger.error(f"Push notification failed: {str(e)}")
 
 
-@celery_app.task(bind=True)
+@celery_app.task(bind=True, queue="notifications")
 def send_email_notification(self, notification_data: Dict):
     """Send email notification for important alerts"""
     try:
@@ -90,7 +90,7 @@ def send_email_notification(self, notification_data: Dict):
         logger.error(f"Email notification failed: {str(e)}")
 
 
-@celery_app.task
+@celery_app.task(queue="notifications")
 def cleanup_old_notifications():
     """Clean up old read notifications (keep for 30 days)"""
     try:
