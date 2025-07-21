@@ -2148,7 +2148,7 @@ class FeedService:
                             joinedload(Post.social_media),
                             joinedload(Post.likes),
                             joinedload(Post.comments),
-                            joinedload(Post.niche_post).joinedload(NichePost.niche),
+                            joinedload(Post.niche_posts).joinedload(NichePost.niche),
                         )
                         .filter(
                             Post.id.in_(post_ids),
@@ -2334,6 +2334,31 @@ class FeedService:
                 # Only followed content
                 followed_items = FeedService._get_followed_content(user_id)
                 feed_items.extend(followed_items)
+
+            elif feed_type == "discover":
+                # --- Discover Feed Implementation ---
+                # 1. Get trending content (platform-wide, not just user interests)
+                trending_items = FeedService._get_trending_content()
+                # 2. Get diverse content based on _get_discover_content (using broad preferences)
+                user_preferences = FeedService._get_user_preferences(user_id)
+                discover_items = FeedService._get_discover_content(
+                    user_id, user_preferences
+                )
+                # 3. Optionally, add more exploratory content (e.g., random/new sellers/products)
+                # For now, combine trending and discover, deduplicate by id
+                all_items = trending_items + discover_items
+                seen_ids = set()
+                unique_items = []
+                for item in all_items:
+                    if item["id"] not in seen_ids:
+                        unique_items.append(item)
+                        seen_ids.add(item["id"])
+                # 4. Apply lighter personalization (time decay, diversity/freshness)
+                scored_items = FeedService._apply_personalization_scoring(
+                    unique_items, user_id
+                )
+                final_items = FeedService._apply_diversity_and_freshness(scored_items)
+                return final_items
 
             elif feed_type.startswith("niche:"):
                 # Niche-specific content
@@ -2710,21 +2735,19 @@ class FeedService:
 
     @staticmethod
     def _get_discover_content(user_id, preferences):
-        """Get discovery content based on user preferences"""
+        """Get discovery content based on user preferences. All returned items must be dicts with 'id', 'type', 'score', and 'created_at'."""
         with session_scope() as session:
-            # Get content that matches user preferences
             discover_items = []
 
             # Get posts from categories user might like
+            posts = []
             if preferences.get("category_preferences"):
                 top_categories = sorted(
                     preferences["category_preferences"].items(),
                     key=lambda x: x[1],
                     reverse=True,
                 )[:5]
-
                 category_ids = [cat[0] for cat in top_categories]
-
                 posts = (
                     session.query(Post)
                     .join(PostCategory)
@@ -2739,13 +2762,27 @@ class FeedService:
                     .limit(20)
                     .all()
                 )
-
-                # Filter posts based on niche visibility
                 posts = FeedService._filter_posts_by_niche_visibility(posts, user_id)
+
+            for post in posts:
+                score = (
+                    FeedService._calculate_post_score(post, user_id)
+                    if hasattr(FeedService, "_calculate_post_score")
+                    else 1
+                )
+                discover_items.append(
+                    {
+                        "id": post.id,
+                        "type": "post",
+                        "score": score,
+                        "created_at": post.created_at
+                        if hasattr(post, "created_at")
+                        else datetime.utcnow(),
+                    }
+                )
 
             # Get products in user's price range
             price_range = preferences.get("price_range", {"min": 0, "max": 1000})
-
             products = (
                 session.query(Product)
                 .filter(
@@ -2756,15 +2793,20 @@ class FeedService:
                 .limit(20)
                 .all()
             )
-
             for product in products:
-                score = FeedService._calculate_product_score(product, user_id)
+                score = (
+                    FeedService._calculate_product_score(product, user_id)
+                    if hasattr(FeedService, "_calculate_product_score")
+                    else 1
+                )
                 discover_items.append(
                     {
                         "id": product.id,
                         "type": "product",
                         "score": score,
-                        "created_at": product.created_at,
+                        "created_at": product.created_at
+                        if hasattr(product, "created_at")
+                        else datetime.utcnow(),
                     }
                 )
 
@@ -2772,53 +2814,45 @@ class FeedService:
 
     @staticmethod
     def _apply_personalization_scoring(items, user_id):
-        """Apply personalized scoring to feed items"""
+        """Apply personalized scoring to feed items. Handles missing 'created_at' gracefully."""
         for item in items:
-            if item["type"] == "post":
-                # Enhance post score with personalization
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "post":
                 with session_scope() as session:
                     post = session.query(Post).filter(Post.id == item["id"]).first()
                     if post:
-                        # Check if from followed seller
                         is_followed = FeedService._is_from_followed_seller(
                             post, user_id
                         )
                         if is_followed:
                             item["score"] *= 1.5
-
-                        # Check if matches user interests
                         matches_interests = FeedService._matches_user_interests(
                             post, user_id
                         )
                         if matches_interests:
                             item["score"] *= 1.3
-
-                        # Time decay
-                        time_decay = FeedService._calculate_time_decay(
-                            item["created_at"]
+                        created_at = item.get("created_at") or getattr(
+                            post, "created_at", datetime.utcnow()
                         )
+                        time_decay = FeedService._calculate_time_decay(created_at)
                         item["score"] *= time_decay
-
-            elif item["type"] == "product":
-                # Enhance product score with personalization
+            elif item.get("type") == "product":
                 with session_scope() as session:
                     product = (
                         session.query(Product).filter(Product.id == item["id"]).first()
                     )
                     if product:
-                        # Check if matches user preferences
                         matches_preferences = FeedService._matches_user_preferences(
                             product, user_id
                         )
                         if matches_preferences:
                             item["score"] *= 1.4
-
-                        # Time decay
-                        time_decay = FeedService._calculate_time_decay(
-                            item["created_at"]
+                        created_at = item.get("created_at") or getattr(
+                            product, "created_at", datetime.utcnow()
                         )
+                        time_decay = FeedService._calculate_time_decay(created_at)
                         item["score"] *= time_decay
-
         return items
 
     @staticmethod
