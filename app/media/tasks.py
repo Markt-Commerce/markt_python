@@ -2,6 +2,7 @@
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict
+import json
 
 # project imports
 from main.workers import celery_app
@@ -13,12 +14,48 @@ from .errors import MediaProcessingError
 # app imports
 from .models import Media, MediaVariant, MediaType, MediaVariantType
 from .services import MediaService
+from app.users.models import User
 
 logger = logging.getLogger(__name__)
 
 
+def _update_user_profile_picture_url(media_id: int, user_id: str):
+    """Helper function to update user profile picture URL after variant generation"""
+    try:
+        with session_scope() as session:
+            # Get the media object
+            media = session.query(Media).get(media_id)
+            if not media:
+                logger.error(f"Media {media_id} not found")
+                return False
+
+            # Get the user
+            user = session.query(User).get(user_id)
+            if not user:
+                logger.error(f"User {user_id} not found")
+                return False
+
+            # Get the thumbnail URL
+            thumbnail_url = media.get_url(MediaVariantType.THUMBNAIL)
+
+            # Update user profile picture
+            user.profile_picture = thumbnail_url
+            session.commit()
+
+            logger.info(
+                f"Updated profile picture URL for user {user_id}: {thumbnail_url}"
+            )
+            return True
+
+    except Exception as e:
+        logger.error(f"Failed to update profile picture URL: {e}")
+        return False
+
+
 @celery_app.task(bind=True, max_retries=3, queue="media")
-def generate_media_variants(self, media_id: int, essential_only: bool = False):
+def generate_media_variants(
+    self, media_id: int, essential_only: bool = False, profile_picture: bool = False
+):
     """
     Generate image variants for a media object asynchronously
 
@@ -67,7 +104,12 @@ def generate_media_variants(self, media_id: int, essential_only: bool = False):
                 )
 
             # Generate variants (essential only or all)
-            if essential_only:
+            if profile_picture:
+                logger.info(f"Generating profile picture variants for media {media_id}")
+                variants = media_service._generate_profile_picture_variants_async(
+                    original_stream, media.original_filename, str(media.user_id), media
+                )
+            elif essential_only:
                 logger.info(f"Generating essential variants only for media {media_id}")
                 variants = media_service._generate_essential_variants_async(
                     original_stream, media.original_filename, str(media.user_id), media
@@ -98,19 +140,24 @@ def generate_media_variants(self, media_id: int, essential_only: bool = False):
             try:
                 urls = media_service.get_media_urls(media, include_variants=True)
                 cache_key = f"media:urls:{media_id}"
-                redis_client.setex(cache_key, 3600, str(urls))  # Cache for 1 hour
+                redis_client.setex(
+                    cache_key, 3600, json.dumps(urls)
+                )  # Cache for 1 hour
                 logger.info(f"Cached media URLs for media {media_id}")
             except Exception as cache_error:
-                logger.warning(
-                    f"Failed to cache media URLs for media {media_id}: {cache_error}"
+                logger.warning(f"Failed to cache media URLs: {cache_error}")
+
+            # If this is a profile picture, update the user's profile picture URL
+            if profile_picture:
+                _update_user_profile_picture_url(media_id, str(media.user_id))
+                logger.info(
+                    f"Queued profile picture URL update for user {media.user_id}"
                 )
 
             return {
                 "media_id": media_id,
                 "variants_generated": len(variants),
-                "essential_only": essential_only,
-                "status": "completed",
-                "urls": urls,
+                "processing_status": media.processing_status,
             }
 
     except Exception as e:

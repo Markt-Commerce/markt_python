@@ -32,6 +32,7 @@ from .schemas import (
     SellerUpdateSchema,
     SettingsSchema,
     SettingsUpdateSchema,
+    RoleSwitchSchema,
 )
 from .services import AuthService, UserService, AccountService
 from .models import User
@@ -180,11 +181,11 @@ class SellerProfile(MethodView):
 @bp.route("/switch-role")
 class SwitchRole(MethodView):
     @login_required
-    @bp.response(200, UserSchema)
+    @bp.response(200, RoleSwitchSchema)
     def post(self):
         try:
-            user = UserService.switch_role(current_user.id)
-            return user
+            result = UserService.switch_role(current_user.id)
+            return result
         except AuthError as e:
             abort(e.status_code, message=e.message)
 

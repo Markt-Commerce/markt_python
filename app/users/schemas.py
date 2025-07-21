@@ -23,8 +23,19 @@ class UserSchema(Schema):
         validate=[validate.Length(min=3, max=20), validate.Regexp(r"^[a-zA-Z0-9_]+$")],
     )
     profile_picture = fields.Str(dump_only=True)
+    profile_picture_url = fields.Method("get_profile_picture_url", dump_only=True)
+    is_buyer = fields.Bool(dump_only=True)
+    is_seller = fields.Bool(dump_only=True)
+    current_role = fields.Str(dump_only=True)
     created_at = fields.DateTime(dump_only=True)
     updated_at = fields.DateTime(dump_only=True)
+
+    def get_profile_picture_url(self, obj):
+        """Get profile picture URL with fallback to default"""
+        if hasattr(obj, "profile_picture") and obj.profile_picture:
+            # The profile_picture field should already contain the thumbnail URL
+            return obj.profile_picture
+        return "/static/images/default-avatar.jpg"
 
 
 class AddressSchema(Schema):
@@ -122,24 +133,25 @@ class UserPaginationSchema(Schema):
 
 
 class UserProfileSchema(UserSchema):
-    current_role = fields.Str(dump_only=True)
-    current_role = fields.Str(dump_only=True)
-    is_buyer = fields.Bool(dump_only=True)
-    is_seller = fields.Bool(dump_only=True)
-    address = fields.Nested(lambda: AddressSchema())
+    address = fields.Nested(lambda: AddressSchema(), dump_only=True)
     buyer_account = fields.Nested(lambda: BuyerProfileSchema(), dump_only=True)
     seller_account = fields.Nested(lambda: SellerProfileSchema(), dump_only=True)
+    # media_uploads = fields.List(fields.Nested("MediaSchema"), dump_only=True)
 
 
 class BuyerProfileSchema(BuyerCreateSchema):
+    id = fields.Int(dump_only=True)
     total_orders = fields.Int(dump_only=True)
     pending_orders = fields.Int(dump_only=True)
     last_order_date = fields.DateTime(dump_only=True)
+    is_active = fields.Bool(dump_only=True)
+    created_at = fields.DateTime(dump_only=True)
 
 
 class SellerProfileSchema(Schema):
     id = fields.Int(dump_only=True)
     shop_name = fields.Str()
+    shop_slug = fields.Str(dump_only=True)
     description = fields.Str()
     verification_status = fields.Enum(
         SellerVerificationStatus, by_value=True, dump_only=True
@@ -147,7 +159,10 @@ class SellerProfileSchema(Schema):
     total_products = fields.Int(dump_only=True)
     total_sales = fields.Float(dump_only=True)
     average_rating = fields.Float(dump_only=True)
+    total_rating = fields.Int(dump_only=True)
+    total_raters = fields.Int(dump_only=True)
     joined_date = fields.DateTime(dump_only=True)
+    is_active = fields.Bool(dump_only=True)
     categories = fields.List(fields.Nested("CategorySchema"), dump_only=True)
     policies = fields.Dict(dump_only=True)
 
@@ -170,23 +185,54 @@ class UsernameAvailableSchema(Schema):
     message = fields.Str()
 
 
+class RoleSwitchSchema(Schema):
+    """Schema for role switching responses"""
+
+    success = fields.Bool(required=True)
+    previous_role = fields.Str(dump_only=True)
+    current_role = fields.Bool(required=True)
+    message = fields.Str(required=True)
+    user = fields.Nested(UserSchema, dump_only=True)
+
+
 class BuyerSimpleSchema(Schema):
     id = fields.Int(dump_only=True)
     buyername = fields.Str()
+    profile_picture_url = fields.Method("get_profile_picture_url", dump_only=True)
+
+    def get_profile_picture_url(self, obj):
+        """Get profile picture URL with fallback to default"""
+        if hasattr(obj, "user") and obj.user and obj.user.profile_picture:
+            return obj.user.profile_picture
+        return "/static/images/default-avatar.jpg"
 
 
 class UserSimpleSchema(Schema):
     id = fields.Str(dump_only=True)
     username = fields.Str()
-    profile_picture = fields.Str()
+    profile_picture_url = fields.Method("get_profile_picture_url", dump_only=True)
+
+    def get_profile_picture_url(self, obj):
+        """Get profile picture URL with fallback to default"""
+        if hasattr(obj, "profile_picture") and obj.profile_picture:
+            return obj.profile_picture
+        return "/static/images/default-avatar.jpg"
 
 
 class SellerSimpleSchema(Schema):
     id = fields.Int(dump_only=True)
-    shop_name = fields.Str()
-    categories = fields.List(fields.Nested("CategorySchema"), dump_only=True)
+    shop_name = fields.Str(dump_only=True)
+    shop_slug = fields.Str(dump_only=True)
+    verification_status = fields.Str(dump_only=True)
     average_rating = fields.Float(dump_only=True)
     total_products = fields.Int(dump_only=True)
+    profile_picture_url = fields.Method("get_profile_picture_url", dump_only=True)
+
+    def get_profile_picture_url(self, obj):
+        """Get profile picture URL with fallback to default"""
+        if hasattr(obj, "user") and obj.user and obj.user.profile_picture:
+            return obj.user.profile_picture
+        return "/static/images/default-avatar.jpg"
 
 
 class SettingsSchema(Schema):

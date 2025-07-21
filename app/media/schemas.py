@@ -1,5 +1,7 @@
 from marshmallow import Schema, fields, validate, ValidationError
 from enum import Enum
+from app.libs.schemas import PaginationSchema
+from .models import MediaType, MediaVariantType
 
 
 class MediaTypeEnum(Enum):
@@ -88,49 +90,37 @@ class MediaSchema(Schema):
 
     def get_thumbnail_url(self, obj):
         return (
-            obj.get_url(MediaVariantTypeEnum.THUMBNAIL)
-            if hasattr(obj, "get_url")
-            else None
+            obj.get_url(MediaVariantType.THUMBNAIL) if hasattr(obj, "get_url") else None
         )
 
     def get_mobile_url(self, obj):
-        return (
-            obj.get_url(MediaVariantTypeEnum.MOBILE)
-            if hasattr(obj, "get_url")
-            else None
-        )
+        return obj.get_url(MediaVariantType.MOBILE) if hasattr(obj, "get_url") else None
 
     def get_tablet_url(self, obj):
-        return (
-            obj.get_url(MediaVariantTypeEnum.TABLET)
-            if hasattr(obj, "get_url")
-            else None
-        )
+        return obj.get_url(MediaVariantType.TABLET) if hasattr(obj, "get_url") else None
 
     def get_desktop_url(self, obj):
         return (
-            obj.get_url(MediaVariantTypeEnum.DESKTOP)
-            if hasattr(obj, "get_url")
-            else None
+            obj.get_url(MediaVariantType.DESKTOP) if hasattr(obj, "get_url") else None
         )
 
     def get_social_square_url(self, obj):
         return (
-            obj.get_url(MediaVariantTypeEnum.SOCIAL_SQUARE)
+            obj.get_url(MediaVariantType.SOCIAL_SQUARE)
             if hasattr(obj, "get_url")
             else None
         )
 
     def get_social_story_url(self, obj):
         return (
-            obj.get_url(MediaVariantTypeEnum.SOCIAL_STORY)
+            obj.get_url(MediaVariantType.SOCIAL_STORY)
             if hasattr(obj, "get_url")
             else None
         )
 
     def get_social_post_url(self, obj):
         return (
-            obj.get_url(MediaVariantTypeEnum.SOCIAL_POST)
+            obj.get_url(MediaVariantType.SOCIAL_POST)
             if hasattr(obj, "get_url")
             else None
         )

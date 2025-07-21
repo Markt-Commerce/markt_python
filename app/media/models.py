@@ -76,7 +76,7 @@ class Media(BaseModel):
             return f"https://{settings.AWS_S3_BUCKET}.s3.amazonaws.com/{variant.storage_key}"
 
         # Fallback to original
-        return f"https://{settings.AWS_S3_BUCKET}.s3.amazonaws.com/{self.storage_key}"
+        return None
 
     def get_best_variant_for_screen(self, screen_type="desktop"):
         """Get the best variant for a specific screen type"""

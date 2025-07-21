@@ -4,7 +4,8 @@ from app.libs.schemas import PaginationSchema
 from app.libs.errors import ValidationError
 
 from app.products.schemas import ProductSchema
-from app.users.schemas import UserSimpleSchema
+from app.users.schemas import UserSimpleSchema, SellerSimpleSchema
+from app.categories.schemas import CategorySchema
 
 from .models import (
     FollowType,
@@ -315,6 +316,8 @@ class PostSchema(Schema):
     comment_count = fields.Int(dump_only=True)
     niche_context = fields.Dict(dump_only=True)
     categories = fields.List(fields.Nested("CategorySchema"), dump_only=True)
+    social_media = fields.List(fields.Nested("SocialMediaPostSchema"), dump_only=True)
+    seller = fields.Nested("SellerSimpleSchema", dump_only=True)
 
 
 class SellerPostsSchema(Schema):

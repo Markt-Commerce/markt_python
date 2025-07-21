@@ -173,6 +173,21 @@ class ShareProduct(MethodView):
         # TODO: Reward system for shares
 
 
+@bp.route("/seller/my-products")
+class SellerProducts(MethodView):
+    @login_required
+    @seller_required
+    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.response(200, ProductSearchResultSchema)
+    def get(self, args):
+        """Get seller's own products"""
+        return ProductService.get_seller_products(
+            seller_id=current_user.seller_account.id,
+            page=args.get("page", 1),
+            per_page=args.get("per_page", 20),
+        )
+
+
 # Note: Product image management is now handled via the media module
 # Use /api/v1/media/products/{product_id}/images for image operations
 

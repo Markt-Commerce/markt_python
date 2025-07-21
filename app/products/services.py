@@ -71,6 +71,9 @@ class ProductService:
                     .options(
                         joinedload(Product.seller),
                         joinedload(Product.variants),
+                        joinedload(Product.images)
+                        .joinedload(ProductImage.media)
+                        .joinedload(Media.variants),
                         joinedload(Product.categories).joinedload(
                             ProductCategory.category
                         ),
@@ -87,7 +90,17 @@ class ProductService:
     @staticmethod
     def search_products(args):
         with session_scope() as session:
-            base_query = session.query(Product).filter_by(status=Product.Status.ACTIVE)
+            base_query = (
+                session.query(Product)
+                .filter_by(status=Product.Status.ACTIVE)
+                .options(
+                    joinedload(Product.seller),
+                    joinedload(Product.images)
+                    .joinedload(ProductImage.media)
+                    .joinedload(Media.variants),
+                    joinedload(Product.categories).joinedload(ProductCategory.category),
+                )
+            )
 
             # Initialize paginator
             paginator = Paginator(
@@ -484,7 +497,12 @@ class ProductService:
                     Product.status == Product.Status.ACTIVE,
                     Product.seller_id.in_(followed_seller_ids),
                 )
-                .options(joinedload(Product.seller), joinedload(Product.images))
+                .options(
+                    joinedload(Product.seller),
+                    joinedload(Product.images)
+                    .joinedload(ProductImage.media)
+                    .joinedload(Media.variants),
+                )
                 .order_by(Product.created_at.desc())
                 .limit(limit)
                 .all()
@@ -525,7 +543,12 @@ class ProductService:
                         .subquery()
                     ),
                 )
-                .options(joinedload(Product.seller), joinedload(Product.images))
+                .options(
+                    joinedload(Product.seller),
+                    joinedload(Product.images)
+                    .joinedload(ProductImage.media)
+                    .joinedload(Media.variants),
+                )
                 .order_by(Product.view_count.desc())
                 .limit(limit)
                 .all()
@@ -560,7 +583,12 @@ class ProductService:
                     Product.id.notin_(exclude_ids),
                     Product.price.between(min_price, max_price),
                 )
-                .options(joinedload(Product.seller), joinedload(Product.images))
+                .options(
+                    joinedload(Product.seller),
+                    joinedload(Product.images)
+                    .joinedload(ProductImage.media)
+                    .joinedload(Media.variants),
+                )
                 .order_by(Product.view_count.desc(), Product.average_rating.desc())
                 .limit(limit)
                 .all()
@@ -580,7 +608,12 @@ class ProductService:
                     Product.id.notin_(exclude_ids),
                     Product.average_rating > 0,
                 )
-                .options(joinedload(Product.seller), joinedload(Product.images))
+                .options(
+                    joinedload(Product.seller),
+                    joinedload(Product.images)
+                    .joinedload(ProductImage.media)
+                    .joinedload(Media.variants),
+                )
                 .order_by(Product.average_rating.desc(), Product.review_count.desc())
                 .limit(limit)
                 .all()
@@ -599,7 +632,12 @@ class ProductService:
                     Product.status == Product.Status.ACTIVE,
                     Product.id.notin_(exclude_ids),
                 )
-                .options(joinedload(Product.seller), joinedload(Product.images))
+                .options(
+                    joinedload(Product.seller),
+                    joinedload(Product.images)
+                    .joinedload(ProductImage.media)
+                    .joinedload(Media.variants),
+                )
                 .order_by(func.random())
                 .limit(limit)
                 .all()
@@ -621,7 +659,12 @@ class ProductService:
                     products = (
                         session.query(Product)
                         .filter(Product.status == Product.Status.ACTIVE)
-                        .options(joinedload(Product.seller), joinedload(Product.images))
+                        .options(
+                            joinedload(Product.seller),
+                            joinedload(Product.images)
+                            .joinedload(ProductImage.media)
+                            .joinedload(Media.variants),
+                        )
                         .order_by(Product.view_count.desc())
                         .limit(limit)
                         .all()
@@ -638,7 +681,12 @@ class ProductService:
                 products = (
                     session.query(Product)
                     .filter(Product.id.in_(product_ids))
-                    .options(joinedload(Product.seller), joinedload(Product.images))
+                    .options(
+                        joinedload(Product.seller),
+                        joinedload(Product.images)
+                        .joinedload(ProductImage.media)
+                        .joinedload(Media.variants),
+                    )
                     .all()
                 )
 
@@ -689,7 +737,12 @@ class ProductService:
                 return (
                     session.query(Product)
                     .filter(Product.status == Product.Status.ACTIVE)
-                    .options(joinedload(Product.seller), joinedload(Product.images))
+                    .options(
+                        joinedload(Product.seller),
+                        joinedload(Product.images)
+                        .joinedload(ProductImage.media)
+                        .joinedload(Media.variants),
+                    )
                     .order_by(func.random())
                     .limit(limit)
                     .all()
@@ -936,6 +989,52 @@ class ProductService:
             session.flush()
             logger.info(f"Updated stock for product {product_id} to {quantity}")
             return True
+
+    @staticmethod
+    def get_seller_products(seller_id: int, page: int = 1, per_page: int = 20):
+        """Get products for a specific seller with pagination"""
+        try:
+            with session_scope() as session:
+                # Query products for the seller
+                query = (
+                    session.query(Product)
+                    .filter(Product.seller_id == seller_id)
+                    .options(
+                        joinedload(Product.seller),
+                        joinedload(Product.images)
+                        .joinedload(ProductImage.media)
+                        .joinedload(Media.variants),
+                        joinedload(Product.categories).joinedload(
+                            ProductCategory.category
+                        ),
+                    )
+                    .order_by(Product.created_at.desc())
+                )
+
+                # Apply pagination
+                total = query.count()
+                products = query.offset((page - 1) * per_page).limit(per_page).all()
+
+                # Calculate pagination info
+                total_pages = (total + per_page - 1) // per_page
+                has_next = page < total_pages
+                has_prev = page > 1
+
+                return {
+                    "items": products,
+                    "pagination": {
+                        "page": page,
+                        "per_page": per_page,
+                        "total": total,
+                        "total_pages": total_pages,
+                        "has_next": has_next,
+                        "has_prev": has_prev,
+                    },
+                }
+
+        except Exception as e:
+            logger.error(f"Failed to get seller products: {e}")
+            raise APIError("Failed to get seller products", 500)
 
 
 class ProductStatsService:

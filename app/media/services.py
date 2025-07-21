@@ -62,6 +62,7 @@ class MediaService:
         user_id: str,
         alt_text: Optional[str] = None,
         caption: Optional[str] = None,
+        is_profile_picture: bool = False,
     ) -> Media:
         """
         Upload image and queue async variant generation
@@ -157,14 +158,16 @@ class MediaService:
                     from .tasks import generate_media_variants
 
                     task_result = generate_media_variants.delay(
-                        media.id, essential_only=True
+                        media.id,
+                        essential_only=True,
+                        profile_picture=is_profile_picture,
                     )
                     logger.info(
                         f"Essential variant generation queued for media {media.id} (task: {task_result.id})"
                     )
 
-                    # Return the media object (variants will be generated asynchronously)
-                    return media
+                # Return the media object (variants will be generated asynchronously)
+                return media
             except Exception as e:
                 logger.error(f"Database operation failed: {e}")
                 raise MediaUploadError(f"Database operation failed: {str(e)}")
@@ -371,24 +374,27 @@ class MediaService:
 
         logger.info(f"Generating essential variants for media {media.id}")
 
+        # Reset stream position and load the original image once
+        original_stream.seek(0)
+
         # Load the original image once and convert to RGB
         try:
-            with Image.open(original_stream) as original_img:
+            with Image.open(original_stream) as img:
                 # Convert to RGB if necessary
-                if original_img.mode in ("RGBA", "LA", "P"):
+                if img.mode in ("RGBA", "LA", "P"):
                     # Create white background for transparent images
-                    background = Image.new("RGB", original_img.size, (255, 255, 255))
-                    if original_img.mode == "P":
-                        original_img = original_img.convert("RGBA")
+                    background = Image.new("RGB", img.size, (255, 255, 255))
+                    if img.mode == "P":
+                        img = img.convert("RGBA")
                     background.paste(
-                        original_img,
-                        mask=original_img.split()[-1]
-                        if original_img.mode == "RGBA"
-                        else None,
+                        img,
+                        mask=img.split()[-1] if img.mode == "RGBA" else None,
                     )
                     original_img = background
-                elif original_img.mode != "RGB":
-                    original_img = original_img.convert("RGB")
+                elif img.mode != "RGB":
+                    original_img = img.convert("RGB")
+                else:
+                    original_img = img.copy()
 
                 logger.info(
                     f"Original image loaded: {original_img.size} {original_img.mode}"
@@ -457,6 +463,111 @@ class MediaService:
 
         logger.info(
             f"Generated {len(variants)} essential variants for media {media.id}"
+        )
+        return variants
+
+    def _generate_profile_picture_variants_async(
+        self, original_stream: BytesIO, filename: str, user_id: str, media: Media
+    ) -> List[MediaVariant]:
+        """
+        Generate only thumbnail variant for profile pictures
+
+        Args:
+            original_stream: Original image stream
+            filename: Original filename
+            user_id: User ID
+            media: Media object
+
+        Returns:
+            List of MediaVariant objects (thumbnail only)
+        """
+        variants = []
+
+        logger.info(f"Generating profile picture variants for media {media.id}")
+
+        # Reset stream position and load the original image once
+        original_stream.seek(0)
+
+        # Load the original image once and convert to RGB
+        try:
+            with Image.open(original_stream) as img:
+                # Convert to RGB if necessary
+                if img.mode in ("RGBA", "LA", "P"):
+                    # Create white background for transparent images
+                    background = Image.new("RGB", img.size, (255, 255, 255))
+                    if img.mode == "P":
+                        img = img.convert("RGBA")
+                    background.paste(
+                        img,
+                        mask=img.split()[-1] if img.mode == "RGBA" else None,
+                    )
+                    original_img = background
+                elif img.mode != "RGB":
+                    original_img = img.convert("RGB")
+                else:
+                    original_img = img.copy()
+
+                logger.info(
+                    f"Original image loaded: {original_img.size} {original_img.mode}"
+                )
+
+        except Exception as e:
+            logger.error(f"Failed to load original image: {e}")
+            raise MediaProcessingError(f"Failed to load original image: {str(e)}")
+
+        # Generate only thumbnail variant for profile pictures
+        try:
+            logger.info("Generating profile picture thumbnail variant")
+
+            # Create a fresh copy of the original image for this variant
+            variant_img = original_img.copy()
+
+            # Resize maintaining aspect ratio (square thumbnail for profile pictures)
+            variant_img.thumbnail((150, 150), Image.Resampling.LANCZOS)
+
+            # Save optimized image to BytesIO
+            variant_stream = BytesIO()
+            variant_img.save(
+                variant_stream,
+                format="JPEG",
+                quality=85,
+                optimize=True,
+            )
+            variant_stream.seek(0)
+
+            # Generate S3 key for variant
+            variant_key = self.s3.generate_s3_key(
+                "images", filename, variant="thumbnail", user_id=user_id
+            )
+
+            # Upload variant to S3
+            variant_url = self.s3.upload_fileobj(
+                variant_stream, str(self.bucket), variant_key, "image/jpeg"
+            )
+
+            logger.info(f"Profile picture thumbnail uploaded to S3: {variant_key}")
+
+            # Create MediaVariant record
+            variant = MediaVariant()
+            variant.media_id = media.id
+            variant.variant_type = MediaVariantType.THUMBNAIL
+            variant.storage_key = variant_key
+            variant.width = variant_img.size[0]
+            variant.height = variant_img.size[1]
+            variant.file_size = variant_stream.getbuffer().nbytes
+            variant.quality = 85
+            variant.format = "JPEG"
+
+            variants.append(variant)
+
+            logger.info(f"Profile picture thumbnail created: {variant_img.size}")
+
+        except Exception as e:
+            logger.error(f"Failed to generate profile picture thumbnail: {e}")
+            # Don't continue - profile picture needs thumbnail
+
+        logger.info(
+            f"Generated {len(variants)} profile picture variants for media {media.id}"
         )
         return variants
 

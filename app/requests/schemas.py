@@ -56,6 +56,7 @@ class BuyerRequestSchema(Schema):
     categories = fields.Nested("CategorySchema", many=True, dump_only=True)
     images = fields.Nested("RequestImageSchema", many=True, dump_only=True)
     offers = fields.Nested(SellerOfferSchema, many=True, dump_only=True)
+    media_ids = fields.List(fields.Int(), dump_only=True)
 
 
 class BuyerRequestSearchResultSchema(Schema):

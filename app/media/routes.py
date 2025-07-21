@@ -652,7 +652,7 @@ class SocialMediaPostDetail(MethodView):
             else:
                 # No media associated, just delete the relationship
                 result = PostService.delete_post_media(media_id, current_user.id)
-                return result
+            return result
 
         except Exception as e:
             logger.error(f"Error deleting social media post: {e}")
@@ -765,7 +765,7 @@ class RequestImageDetail(MethodView):
                 result = BuyerRequestService.delete_request_image(
                     image_id, current_user.id
                 )
-                return result
+            return result
 
         except Exception as e:
             logger.error(f"Error deleting request image: {e}")

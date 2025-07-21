@@ -16,7 +16,7 @@ from app.libs.pagination import Paginator
 from app.products.models import Product
 from app.socials.models import Post, PostStatus, Follow
 from app.media.services import media_service
-from app.media.models import Media, MediaVariantType
+from app.media.models import Media, MediaVariantType, MediaVariant
 from app.categories.models import Category, SellerCategory
 from app.libs.errors import ValidationError
 
@@ -280,9 +280,17 @@ class UserService:
             if not (user.is_buyer and user.is_seller):
                 raise AuthError("User doesn't have both account types")
 
+            previous_role = user.current_role
             user.current_role = "seller" if user.current_role == "buyer" else "buyer"
             session.commit()
-            return user
+
+            return {
+                "success": True,
+                "previous_role": previous_role,
+                "current_role": user.current_role,
+                "message": f"Successfully switched from {previous_role} to {user.current_role}",
+                "user": user,
+            }
 
     @staticmethod
     def check_username_availability(username):
@@ -318,33 +326,60 @@ class UserService:
 
     @staticmethod
     def upload_profile_picture(user_id: str, file_stream, filename: str):
-        """Upload and set user profile picture"""
+        """Upload and set user profile picture (idempotent: deletes old one)"""
         try:
             from io import BytesIO
-            from app.media.models import MediaVariantType
+            from app.media.models import MediaVariantType, Media
+            from app.media.services import media_service
+            from urllib.parse import urlparse
 
             # Ensure file_stream is BytesIO
             if not isinstance(file_stream, BytesIO):
                 file_stream = BytesIO(file_stream.read())
 
-            # 1. Upload media using updated media service (returns only media object)
+            # 1. Delete old profile picture if it exists
+            with session_scope() as session:
+                user = session.query(User).get(user_id)
+                if not user:
+                    raise AuthError("User not found")
+
+                if user.profile_picture:
+                    # Extract storage_key from the URL
+                    old_url = user.profile_picture
+                    parsed = urlparse(old_url)
+                    storage_key = parsed.path.lstrip("/")
+                    old_media = (
+                        session.query(Media).filter_by(storage_key=storage_key).first()
+                    )
+                    if old_media:
+                        # Delete from S3
+                        media_service.delete_media(old_media)
+                        # Delete variants from DB
+                        session.query(MediaVariant).filter_by(
+                            media_id=old_media.id
+                        ).delete()
+                        # Delete media from DB
+                        session.delete(old_media)
+                        session.commit()
+                        user.profile_picture = None
+                        session.commit()
+
+            # 2. Upload media using updated media service (returns only media object)
             media = media_service.upload_image(
                 file_stream=file_stream,
                 filename=filename,
                 user_id=user_id,
                 alt_text=f"Profile picture for user {user_id}",
                 caption="Profile picture",
+                is_profile_picture=True,
             )
 
-            # 2. Update user profile picture with thumbnail URL
+            # 3. Update user profile picture with original URL (thumbnail will be set async)
             with session_scope() as session:
                 user = session.query(User).get(user_id)
                 if not user:
                     raise AuthError("User not found")
-
-                # Use thumbnail URL for profile picture (essential variant generated asynchronously)
-                user.profile_picture = media.get_url(MediaVariantType.THUMBNAIL)
-
+                user.profile_picture = media.get_url()  # Original URL for now
                 session.commit()
 
             return {
