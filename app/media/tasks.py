@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict
 import json
+from io import BytesIO
 
 # project imports
 from main.workers import celery_app
@@ -291,36 +292,158 @@ def remove_background_from_image(self, media_id: int):
 @celery_app.task(bind=True, queue="media")
 def process_video_metadata(self, media_id: int):
     """
-    Process video metadata (placeholder for future implementation)
+    Process video metadata for MVP
 
     Args:
         media_id: ID of the media object to process
     """
     try:
-        logger.info(
-            f"Video metadata processing requested for media {media_id} (not implemented yet)"
-        )
-
-        # TODO: Implement video metadata extraction
-        # - Duration
-        # - Resolution
-        # - Codec information
-        # - Thumbnail generation
+        logger.info(f"Processing video metadata for media {media_id}")
 
         with session_scope() as session:
             media = session.query(Media).get(media_id)
-            if media:
-                media.processing_status = "completed"
-                session.flush()
+            if not media:
+                raise MediaProcessingError(f"Media {media_id} not found")
 
-        return {
-            "media_id": media_id,
-            "status": "video_processing_completed",
-            "message": "Video processing completed (placeholder)",
-        }
+            # Update status to processing
+            media.processing_status = "processing"
+            session.flush()
+
+            # Get video from S3
+            media_service = MediaService()
+            try:
+                video_stream = media_service.s3.download_fileobj(
+                    str(media_service.bucket), media.storage_key
+                )
+                logger.info(f"Downloaded video for metadata extraction: {media_id}")
+            except Exception as download_error:
+                logger.error(f"Failed to download video {media_id}: {download_error}")
+                raise MediaProcessingError(
+                    f"Failed to download video: {str(download_error)}"
+                )
+
+            # Extract basic metadata using ffmpeg-python
+            try:
+                import ffmpeg
+                import tempfile
+                import os
+
+                # Save video to temporary file for ffmpeg processing
+                with tempfile.NamedTemporaryFile(
+                    suffix=".mp4", delete=False
+                ) as temp_file:
+                    temp_file.write(video_stream.read())
+                    temp_file_path = temp_file.name
+
+                try:
+                    # Extract video metadata
+                    probe = ffmpeg.probe(temp_file_path)
+                    video_info = next(
+                        s for s in probe["streams"] if s["codec_type"] == "video"
+                    )
+
+                    # Extract duration
+                    duration = float(probe["format"]["duration"])
+                    media.duration = int(duration)
+
+                    # Extract resolution
+                    media.width = int(video_info["width"])
+                    media.height = int(video_info["height"])
+
+                    logger.info(
+                        f"Extracted metadata for video {media_id}: {media.width}x{media.height}, {duration}s"
+                    )
+
+                    # Generate thumbnail
+                    thumbnail_path = temp_file_path.replace(".mp4", "_thumb.jpg")
+                    try:
+                        ffmpeg.input(temp_file_path, ss="00:00:01").output(
+                            thumbnail_path,
+                            vframes=1,
+                            vf="scale=320:240:force_original_aspect_ratio=decrease",
+                            acodec="none",
+                        ).overwrite_output().run(
+                            capture_stdout=True, capture_stderr=True
+                        )
+
+                        # Upload thumbnail to S3
+                        with open(thumbnail_path, "rb") as thumb_file:
+                            thumbnail_key = media_service.s3.generate_s3_key(
+                                "thumbnails",
+                                f"{media.id}_thumb.jpg",
+                                user_id=media.user_id,
+                            )
+                            # Convert file object to BytesIO for S3 upload
+                            thumb_data = thumb_file.read()
+                            thumb_stream = BytesIO(thumb_data)
+                            media_service.s3.upload_fileobj(
+                                thumb_stream,
+                                str(media_service.bucket),
+                                thumbnail_key,
+                                "image/jpeg",
+                            )
+
+                        # Create thumbnail variant record
+                        thumbnail_variant = MediaVariant(
+                            media_id=media.id,
+                            variant_type=MediaVariantType.THUMBNAIL,
+                            storage_key=thumbnail_key,
+                            width=320,
+                            height=240,
+                            file_size=os.path.getsize(thumbnail_path),
+                        )
+                        session.add(thumbnail_variant)
+
+                        logger.info(f"Generated thumbnail for video {media_id}")
+
+                        # Clean up thumbnail file
+                        os.unlink(thumbnail_path)
+
+                    except Exception as thumb_error:
+                        logger.warning(
+                            f"Failed to generate thumbnail for video {media_id}: {thumb_error}"
+                        )
+                        # Continue without thumbnail - not critical for MVP
+
+                finally:
+                    # Clean up temporary video file
+                    os.unlink(temp_file_path)
+
+            except Exception as metadata_error:
+                logger.error(
+                    f"Failed to extract video metadata for {media_id}: {metadata_error}"
+                )
+                # For MVP, continue without metadata rather than failing completely
+
+            # Update status to completed
+            media.processing_status = "completed"
+            session.flush()
+
+            logger.info(f"Video metadata processing completed for media {media_id}")
+
+            return {
+                "media_id": media_id,
+                "status": "video_processing_completed",
+                "duration": media.duration,
+                "width": media.width,
+                "height": media.height,
+                "message": "Video processing completed successfully",
+            }
 
     except Exception as e:
         logger.error(f"Video processing failed for media {media_id}: {str(e)}")
+
+        # Update status to failed
+        try:
+            with session_scope() as session:
+                media = session.query(Media).get(media_id)
+                if media:
+                    media.processing_status = "failed"
+                    media.processing_error = str(e)
+                    session.flush()
+        except Exception as update_error:
+            logger.error(f"Failed to update media status: {update_error}")
+
         raise MediaProcessingError(f"Video processing failed: {str(e)}")
 
 
@@ -366,6 +489,60 @@ def cleanup_failed_media(self):
     except Exception as e:
         logger.error(f"Media cleanup failed: {str(e)}")
         raise MediaProcessingError(f"Media cleanup failed: {str(e)}")
+
+
+@celery_app.task(bind=True, queue="media")
+def cleanup_orphaned_media(self):
+    """
+    Clean up orphaned media records (uploaded but never processed)
+    """
+    try:
+        with session_scope() as session:
+            # Find media that was uploaded but never processed (older than 1 hour)
+            cutoff_time = datetime.utcnow() - timedelta(hours=1)
+
+            orphaned_media = (
+                session.query(Media)
+                .filter(
+                    Media.processing_status == "uploaded",
+                    Media.created_at < cutoff_time,
+                )
+                .all()
+            )
+
+            cleaned_count = 0
+            for media in orphaned_media:
+                try:
+                    logger.info(
+                        f"Cleaning up orphaned media {media.id} (uploaded but never processed)"
+                    )
+
+                    # Delete from S3
+                    media_service = MediaService()
+                    media_service.delete_media(media)
+
+                    # Delete from database
+                    session.delete(media)
+                    cleaned_count += 1
+
+                except Exception as e:
+                    logger.error(
+                        f"Failed to cleanup orphaned media {media.id}: {str(e)}"
+                    )
+                    continue
+
+            session.flush()
+
+            logger.info(f"Cleaned up {cleaned_count} orphaned media objects")
+
+            return {
+                "cleaned_count": cleaned_count,
+                "status": "orphaned_cleanup_completed",
+            }
+
+    except Exception as e:
+        logger.error(f"Orphaned media cleanup failed: {str(e)}")
+        raise MediaProcessingError(f"Orphaned media cleanup failed: {str(e)}")
 
 
 @celery_app.task(bind=True, queue="media")

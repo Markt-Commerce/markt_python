@@ -64,6 +64,9 @@ class MediaUpload(MethodView):
         - Social media optimization
         - Responsive variants for different screen sizes
         """
+        media = None
+        file_stream = None
+
         try:
             # Check if file is present
             if "file" not in request.files:
@@ -83,10 +86,18 @@ class MediaUpload(MethodView):
             # Track upload start time
             start_time = time.time()
 
-            # Read file into memory - IMPORTANT: Read once and create a proper BytesIO
-            file_data = file.read()
-            if not file_data:
-                abort(400, message="Empty file provided")
+            # Read file into memory with timeout protection
+            try:
+                # Read file data with a reasonable timeout
+                file_data = file.read()
+                if not file_data:
+                    abort(400, message="Empty file provided")
+            except (OSError, IOError) as read_error:
+                logger.warning(f"File read interrupted for {filename}: {read_error}")
+                abort(499, message="Request cancelled by client")
+            except Exception as read_error:
+                logger.error(f"Failed to read file {filename}: {read_error}")
+                abort(400, message="Failed to read file")
 
             file_stream = BytesIO(file_data)
             file_size = len(file_data)
@@ -123,23 +134,30 @@ class MediaUpload(MethodView):
                 request.form.get("optimize_for_social", "true").lower() == "true"
             )
 
-            # Upload based on media type (now returns only media object)
-            if media_type == MediaType.IMAGE:
-                media = media_service.upload_image(
-                    file_stream=file_stream,
-                    filename=filename,
-                    user_id=user_id,
-                    alt_text=alt_text,
-                    caption=caption,
-                )
-            else:  # Video
-                media = media_service.upload_video(
-                    file_stream=file_stream,
-                    filename=filename,
-                    user_id=user_id,
-                    alt_text=alt_text,
-                    caption=caption,
-                )
+            # Upload based on media type with timeout protection
+            try:
+                if media_type == MediaType.IMAGE:
+                    media = media_service.upload_image(
+                        file_stream=file_stream,
+                        filename=filename,
+                        user_id=user_id,
+                        alt_text=alt_text,
+                        caption=caption,
+                    )
+                else:  # Video
+                    media = media_service.upload_video(
+                        file_stream=file_stream,
+                        filename=filename,
+                        user_id=user_id,
+                        alt_text=alt_text,
+                        caption=caption,
+                    )
+            except (OSError, IOError) as upload_error:
+                logger.warning(f"Upload interrupted for {filename}: {upload_error}")
+                abort(499, message="Request cancelled by client")
+            except Exception as upload_error:
+                logger.error(f"Upload failed for {filename}: {upload_error}")
+                raise upload_error
 
             # Get basic URLs (original only, variants will be available later)
             urls = media_service.get_media_urls(media, include_variants=False)
@@ -178,13 +196,55 @@ class MediaUpload(MethodView):
 
         except MediaUploadError as e:
             logger.error(f"Media upload error: {e}")
+            # Clean up any partial uploads
+            if media:
+                try:
+                    media_service.delete_media(media)
+                    logger.info(f"Cleaned up failed media {media.id}")
+                except Exception as cleanup_error:
+                    logger.error(
+                        f"Failed to cleanup failed media {media.id}: {cleanup_error}"
+                    )
             abort(400, message=str(e))
+
         except MediaProcessingError as e:
             logger.error(f"Media processing error: {e}")
+            # Clean up any partial uploads
+            if media:
+                try:
+                    media_service.delete_media(media)
+                    logger.info(f"Cleaned up failed media {media.id}")
+                except Exception as cleanup_error:
+                    logger.error(
+                        f"Failed to cleanup failed media {media.id}: {cleanup_error}"
+                    )
             abort(500, message=str(e))
+
         except Exception as e:
             logger.error(f"Unexpected error in upload_media: {e}", exc_info=True)
+            # Clean up any partial uploads
+            if media:
+                try:
+                    media_service.delete_media(media)
+                    logger.info(f"Cleaned up failed media {media.id}")
+                except Exception as cleanup_error:
+                    logger.error(
+                        f"Failed to cleanup failed media {media.id}: {cleanup_error}"
+                    )
             abort(500, message="Internal server error")
+
+        finally:
+            # Always clean up file streams
+            if file_stream:
+                try:
+                    file_stream.close()
+                except Exception as close_error:
+                    logger.warning(f"Failed to close file stream: {close_error}")
+
+            # Force garbage collection to free memory
+            import gc
+
+            gc.collect()
 
 
 @bp.route("/<int:media_id>")
