@@ -23,6 +23,9 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
     is_active = db.Column(db.Boolean, default=True)
     deactivated_at = db.Column(db.DateTime)
 
+    # Email verification
+    email_verified = db.Column(db.Boolean, default=False)
+
     # Relationships
     address = db.relationship("UserAddress", uselist=False, back_populates="user")
     buyer_account = db.relationship("Buyer", uselist=False, back_populates="user")
