@@ -259,7 +259,7 @@ class EmailService:
 
                 <div class="footer">
                     <p>Best regards,<br>The Markt Team</p>
-                    <p>© 2024 Markt. All rights reserved.</p>
+                    <p>© 2025 Markt. All rights reserved.</p>
                 </div>
             </div>
         </body>
@@ -316,7 +316,7 @@ class EmailService:
 
                 <div class="footer">
                     <p>Best regards,<br>The Markt Team</p>
-                    <p>© 2024 Markt. All rights reserved.</p>
+                    <p>© 2025 Markt. All rights reserved.</p>
                 </div>
             </div>
         </body>
@@ -392,7 +392,7 @@ class EmailService:
 
                 <div class="footer">
                     <p>Best regards,<br>The Markt Team</p>
-                    <p>© 2024 Markt. All rights reserved.</p>
+                    <p>© 2025 Markt. All rights reserved.</p>
                 </div>
             </div>
         </body>
@@ -448,7 +448,7 @@ class EmailService:
 
                 <div class="footer">
                     <p>Best regards,<br>The Markt Team</p>
-                    <p>© 2024 Markt. All rights reserved.</p>
+                    <p>© 2025 Markt. All rights reserved.</p>
                 </div>
             </div>
         </body>
@@ -526,7 +526,7 @@ class EmailService:
 
                 <div class="footer">
                     <p>Best regards,<br>The Markt Team</p>
-                    <p>© 2024 Markt. All rights reserved.</p>
+                    <p>© 2025 Markt. All rights reserved.</p>
                 </div>
             </div>
         </body>
@@ -579,7 +579,7 @@ class EmailService:
 
                 <div class="footer">
                     <p>Best regards,<br>The Markt Team</p>
-                    <p>© 2024 Markt. All rights reserved.</p>
+                    <p>© 2025 Markt. All rights reserved.</p>
                 </div>
             </div>
         </body>
@@ -632,7 +632,7 @@ class EmailService:
 
                 <div class="footer">
                     <p>Best regards,<br>The Markt Team</p>
-                    <p>© 2024 Markt. All rights reserved.</p>
+                    <p>© 2025 Markt. All rights reserved.</p>
                 </div>
             </div>
         </body>
@@ -733,7 +733,7 @@ class EmailService:
 
                 <div class="footer">
                     <p>Best regards,<br>The Markt Team</p>
-                    <p>© 2024 Markt. All rights reserved.</p>
+                    <p>© 2025 Markt. All rights reserved.</p>
                 </div>
             </div>
         </body>
