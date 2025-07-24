@@ -33,7 +33,7 @@ def configure_app(app):
 
     database.init_app(app)
     Migrate(app, db)
-    CORS(app)
+    CORS(app, supports_credentials=True, origins=["*"])
 
     # Initialize Flask-Smorest API
     api = Api(app)
