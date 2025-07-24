@@ -69,7 +69,7 @@ class UserLogin(MethodView):
             user = AuthService.login_user(
                 credentials["email"],
                 credentials["password"],
-                credentials["account_type"],
+                credentials.get("account_type"),  # Use .get() to handle optional field
             )
             login_user(user)
             return user

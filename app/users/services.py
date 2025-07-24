@@ -94,7 +94,7 @@ class AuthService:
             return user
 
     @staticmethod
-    def login_user(email, password, account_type):
+    def login_user(email, password, account_type=None):
         with session_scope() as session:
             user = session.query(User).filter(User.email == email).first()
             if not user or not user.check_password(password):
@@ -104,6 +104,22 @@ class AuthService:
             if not user.is_active:
                 raise AuthError("Account is deactivated")
 
+            # Intelligent login: if account_type not provided, use current_role or default
+            if account_type is None:
+                # Use current_role if set, otherwise determine based on available accounts
+                if hasattr(user, "_current_role") and user._current_role:
+                    account_type = user._current_role
+                elif user.is_buyer and user.is_seller:
+                    # If user has both accounts, default to buyer
+                    account_type = "buyer"
+                elif user.is_buyer:
+                    account_type = "buyer"
+                elif user.is_seller:
+                    account_type = "seller"
+                else:
+                    raise AuthError("No valid account type found")
+
+            # Validate the account type
             if account_type == "buyer":
                 if not user.is_buyer:
                     raise AuthError("Buyer account not found")
@@ -128,6 +144,7 @@ class AuthService:
             else:
                 raise AuthError("Invalid account type")
 
+            # Update current_role
             user.current_role = account_type
             return user
 

@@ -105,7 +105,9 @@ class UserLoginSchema(Schema):
     email = fields.Email(required=True)
     password = fields.Str(required=True, load_only=True)
     account_type = fields.Str(
-        required=True, validate=validate.OneOf(["buyer", "seller"])
+        required=False,
+        validate=validate.OneOf(["buyer", "seller"]),
+        description="Optional: If not provided, will use current_role or default to available account type",
     )
 
 
