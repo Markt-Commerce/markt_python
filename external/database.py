@@ -47,6 +47,7 @@ class Database:
                 Follow,
                 Post,
                 PostComment,
+                PostCommentReaction,
                 PostLike,
                 PostProduct,
                 Niche,
@@ -62,7 +63,7 @@ class Database:
                 SocialMediaPost,
                 RequestImage,
             )
-            from app.chats.models import ChatRoom, ChatMessage, ChatOffer
+            from app.chats.models import ChatRoom, ChatMessage, ChatOffer, ChatMessageReaction
             from app.cart.models import Cart, CartItem
 
         # Import other models as needed
