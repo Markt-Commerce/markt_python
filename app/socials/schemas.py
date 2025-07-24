@@ -14,6 +14,7 @@ from .models import (
     NicheVisibility,
     NicheMembershipRole,
 )
+from app.libs.constants import REACTION_EMOJIS
 
 
 # Niche/Community Schemas
@@ -481,3 +482,46 @@ class FeedResponseSchema(Schema):
 
     items = fields.List(fields.Dict(), dump_only=True)  # Mixed post/product items
     pagination = fields.Nested(PaginationSchema, dump_only=True)
+
+
+# Reaction Schemas
+class ReactionSchema(Schema):
+    """Schema for reactions"""
+
+    id = fields.Int(dump_only=True)
+    user_id = fields.Str(dump_only=True)
+    reaction_type = fields.Str(dump_only=True)
+    emoji = fields.Str(dump_only=True)
+    created_at = fields.DateTime(dump_only=True)
+    user = fields.Nested("UserSimpleSchema", dump_only=True)
+
+    def get_emoji(self, obj):
+        """Get emoji for reaction type"""
+        return REACTION_EMOJIS.get(obj.reaction_type.value, "👍")
+
+
+class ReactionCreateSchema(Schema):
+    """Schema for creating reactions"""
+
+    reaction_type = fields.Str(
+        required=True, validate=validate.OneOf(list(REACTION_EMOJIS.keys()))
+    )
+
+
+class ReactionSummarySchema(Schema):
+    """Schema for reaction summaries (counts by type)"""
+
+    reaction_type = fields.Str(dump_only=True)
+    emoji = fields.Str(dump_only=True)
+    count = fields.Int(dump_only=True)
+    has_reacted = fields.Bool(dump_only=True)  # Whether current user has reacted
+
+    def get_emoji(self, obj):
+        """Get emoji for reaction type"""
+        return REACTION_EMOJIS.get(obj.reaction_type, "👍")
+
+
+class PostCommentReactionSchema(ReactionSchema):
+    """Schema for comment reactions"""
+
+    comment_id = fields.Int(dump_only=True)

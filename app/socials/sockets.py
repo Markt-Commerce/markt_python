@@ -279,31 +279,206 @@ class SocialNamespace(Namespace):
             if not UserService.user_exists(user_id):
                 return emit("error", {"message": "User not found"})
 
-            # Broadcast updates
+            # Emit follow event to target user
             emit(
-                "follower_update",
+                "follow_update",
                 {
-                    "user_id": user_id,
-                    "follower_count": redis_client.scard(f"user:{user_id}:followers"),
+                    "follower_id": current_user.id,
+                    "follower_name": current_user.username,
                     "timestamp": datetime.utcnow().isoformat(),
                 },
                 room=f"user_{user_id}",
             )
 
+            # Emit confirmation to current user
             emit(
-                "following_update",
+                "follow_success",
                 {
-                    "user_id": current_user.id,
-                    "following_count": redis_client.scard(
-                        f"user:{current_user.id}:following"
-                    ),
+                    "followed_user_id": user_id,
                     "timestamp": datetime.utcnow().isoformat(),
                 },
             )
 
         except Exception as e:
             logger.error(f"Follow error: {e}")
-            emit("error", {"message": "Failed to process follow"})
+            emit("error", {"message": "Follow failed"})
+
+    # ==================== POST LIKES ====================
+    def on_post_liked(self, data):
+        """Handle real-time post like updates"""
+        try:
+            if not current_user.is_authenticated:
+                return emit("error", {"message": "Unauthorized"})
+
+            # Data validation
+            is_valid, error_msg = self._validate_data(data, ["post_id"])
+            if not is_valid:
+                return emit("error", {"message": error_msg})
+
+            post_id = data.get("post_id")
+
+            # Emit like event to post room
+            emit(
+                "post_liked",
+                {
+                    "post_id": post_id,
+                    "user_id": current_user.id,
+                    "username": current_user.username,
+                    "timestamp": datetime.utcnow().isoformat(),
+                },
+                room=f"post_{post_id}",
+            )
+
+            # Update Redis cache
+            redis_client.zadd(
+                f"post:{post_id}:likes",
+                {current_user.id: datetime.utcnow().timestamp()},
+            )
+
+        except Exception as e:
+            logger.error(f"Post like error: {e}")
+            emit("error", {"message": "Like failed"})
+
+    def on_post_unliked(self, data):
+        """Handle real-time post unlike updates"""
+        try:
+            if not current_user.is_authenticated:
+                return emit("error", {"message": "Unauthorized"})
+
+            # Data validation
+            is_valid, error_msg = self._validate_data(data, ["post_id"])
+            if not is_valid:
+                return emit("error", {"message": error_msg})
+
+            post_id = data.get("post_id")
+
+            # Emit unlike event to post room
+            emit(
+                "post_unliked",
+                {
+                    "post_id": post_id,
+                    "user_id": current_user.id,
+                    "username": current_user.username,
+                    "timestamp": datetime.utcnow().isoformat(),
+                },
+                room=f"post_{post_id}",
+            )
+
+            # Update Redis cache
+            redis_client.zrem(f"post:{post_id}:likes", current_user.id)
+
+        except Exception as e:
+            logger.error(f"Post unlike error: {e}")
+            emit("error", {"message": "Unlike failed"})
+
+    # ==================== COMMENT REACTIONS ====================
+    def on_comment_reaction_added(self, data):
+        """Handle real-time comment reaction updates"""
+        try:
+            if not current_user.is_authenticated:
+                return emit("error", {"message": "Unauthorized"})
+
+            # Data validation
+            is_valid, error_msg = self._validate_data(
+                data, ["comment_id", "reaction_type"]
+            )
+            if not is_valid:
+                return emit("error", {"message": error_msg})
+
+            comment_id = data.get("comment_id")
+            reaction_type = data.get("reaction_type")
+
+            # Emit reaction event to post room (comments are part of posts)
+            emit(
+                "comment_reaction_added",
+                {
+                    "comment_id": comment_id,
+                    "user_id": current_user.id,
+                    "username": current_user.username,
+                    "reaction_type": reaction_type,
+                    "timestamp": datetime.utcnow().isoformat(),
+                },
+                room=f"comment_{comment_id}",
+            )
+
+            # Update Redis cache
+            redis_client.hincrby(f"comment:{comment_id}:reactions", reaction_type, 1)
+
+        except Exception as e:
+            logger.error(f"Comment reaction error: {e}")
+            emit("error", {"message": "Reaction failed"})
+
+    def on_comment_reaction_removed(self, data):
+        """Handle real-time comment reaction removal"""
+        try:
+            if not current_user.is_authenticated:
+                return emit("error", {"message": "Unauthorized"})
+
+            # Data validation
+            is_valid, error_msg = self._validate_data(
+                data, ["comment_id", "reaction_type"]
+            )
+            if not is_valid:
+                return emit("error", {"message": error_msg})
+
+            comment_id = data.get("comment_id")
+            reaction_type = data.get("reaction_type")
+
+            # Emit reaction removal event
+            emit(
+                "comment_reaction_removed",
+                {
+                    "comment_id": comment_id,
+                    "user_id": current_user.id,
+                    "username": current_user.username,
+                    "reaction_type": reaction_type,
+                    "timestamp": datetime.utcnow().isoformat(),
+                },
+                room=f"comment_{comment_id}",
+            )
+
+            # Update Redis cache
+            redis_client.hincrby(f"comment:{comment_id}:reactions", reaction_type, -1)
+
+        except Exception as e:
+            logger.error(f"Comment reaction removal error: {e}")
+            emit("error", {"message": "Reaction removal failed"})
+
+    def on_join_comment(self, comment_id):
+        """Join room for comment updates"""
+        try:
+            if not current_user.is_authenticated:
+                return emit("error", {"message": "Unauthorized"})
+
+            if not comment_id:
+                return emit("error", {"message": "Comment ID required"})
+
+            join_room(f"comment_{comment_id}")
+
+            # Get real-time reaction stats
+            reactions = redis_client.hgetall(f"comment:{comment_id}:reactions")
+            reaction_stats = {k.decode(): int(v) for k, v in reactions.items()}
+
+            emit(
+                "comment_reaction_stats",
+                {
+                    "comment_id": comment_id,
+                    "reactions": reaction_stats,
+                    "timestamp": datetime.utcnow().isoformat(),
+                },
+            )
+
+        except Exception as e:
+            logger.error(f"Join comment error: {e}")
+            emit("error", {"message": "Failed to join comment"})
+
+    def on_leave_comment(self, comment_id):
+        """Leave comment room"""
+        try:
+            if current_user.is_authenticated and comment_id:
+                leave_room(f"comment_{comment_id}")
+        except Exception as e:
+            logger.error(f"Leave comment error: {e}")
 
     # ==================== UTILITY ====================
     def on_ping(self, data):

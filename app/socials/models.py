@@ -1,9 +1,10 @@
 from enum import Enum
 from sqlalchemy import text, func, select
 from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy.ext.declarative import declared_attr
 
 from external.database import db
-from app.libs.models import BaseModel
+from app.libs.models import BaseModel, ReactionMixin, BaseReaction, ReactionType
 from app.libs.helpers import UniqueIdMixin
 
 
@@ -385,7 +386,7 @@ class PostLike(BaseModel):
     user = db.relationship("User")
 
 
-class PostComment(BaseModel):
+class PostComment(BaseModel, ReactionMixin):
     __tablename__ = "post_comments"
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.String(12), db.ForeignKey("users.id"))
@@ -400,3 +401,25 @@ class PostComment(BaseModel):
         "PostComment", back_populates="parent", remote_side=[parent_id]
     )
     parent = db.relationship("PostComment", back_populates="replies", remote_side=[id])
+
+
+class PostCommentReaction(BaseReaction):
+    __tablename__ = "post_comment_reactions"
+
+    comment_id = db.Column(
+        db.Integer, db.ForeignKey("post_comments.id"), nullable=False
+    )
+
+    # Relationships
+    @declared_attr
+    def content(cls):
+        return db.relationship("PostComment", back_populates="reactions")
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            "comment_id", "user_id", "reaction_type", name="uq_comment_reaction"
+        ),
+        db.Index("idx_comment_reaction_comment", "comment_id"),
+        db.Index("idx_comment_reaction_user", "user_id"),
+        db.Index("idx_comment_reaction_type", "reaction_type"),
+    )
