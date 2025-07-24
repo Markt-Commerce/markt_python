@@ -3,6 +3,7 @@ from marshmallow import Schema, fields, validate
 
 # project imports
 from app.libs.schemas import PaginationSchema
+from app.libs.constants import REACTION_EMOJIS
 
 
 class ChatRoomSchema(Schema):
@@ -132,3 +133,40 @@ class RequestBasicSchema(Schema):
     id = fields.String(required=True)
     title = fields.String(required=True)
     description = fields.String(allow_none=True)
+
+
+# Reaction Schemas for Chat Messages
+class ChatMessageReactionSchema(Schema):
+    """Schema for chat message reactions"""
+
+    id = fields.Int(dump_only=True)
+    message_id = fields.Int(dump_only=True)
+    user_id = fields.Str(dump_only=True)
+    reaction_type = fields.Str(dump_only=True)
+    emoji = fields.Str(dump_only=True)
+    created_at = fields.DateTime(dump_only=True)
+
+    def get_emoji(self, obj):
+        """Get emoji for reaction type"""
+        return REACTION_EMOJIS.get(obj.reaction_type.value, "👍")
+
+
+class ChatMessageReactionCreateSchema(Schema):
+    """Schema for creating chat message reactions"""
+
+    reaction_type = fields.Str(
+        required=True, validate=validate.OneOf(list(REACTION_EMOJIS.keys()))
+    )
+
+
+class ChatMessageReactionSummarySchema(Schema):
+    """Schema for chat message reaction summaries"""
+
+    reaction_type = fields.Str(dump_only=True)
+    emoji = fields.Str(dump_only=True)
+    count = fields.Int(dump_only=True)
+    has_reacted = fields.Bool(dump_only=True)
+
+    def get_emoji(self, obj):
+        """Get emoji for reaction type"""
+        return REACTION_EMOJIS.get(obj.reaction_type, "👍")

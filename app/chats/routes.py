@@ -19,8 +19,10 @@ from .schemas import (
     ChatMessageListSchema,
     CreateChatRoomSchema,
     SendMessageSchema,
+    ChatMessageReactionCreateSchema,
+    ChatMessageReactionSummarySchema,
 )
-from .services import ChatService
+from .services import ChatService, ChatReactionService
 
 bp = Blueprint("chats", __name__, description="Chat operations", url_prefix="/chats")
 
@@ -165,5 +167,46 @@ class ChatOffers(MethodView):
                 "is_read": message.is_read,
                 "created_at": message.created_at.isoformat(),
             }
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+# Reaction Routes for Chat Messages
+# -----------------------------------------------
+@bp.route("/messages/<int:message_id>/reactions")
+class ChatMessageReactions(MethodView):
+    @bp.response(200, ChatMessageReactionSummarySchema(many=True))
+    def get(self, message_id):
+        """Get all reactions for a chat message"""
+        try:
+            user_id = current_user.id if current_user.is_authenticated else None
+            return ChatReactionService.get_message_reactions(message_id, user_id)
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+    @login_required
+    @bp.arguments(ChatMessageReactionCreateSchema)
+    @bp.response(201)
+    def post(self, reaction_data, message_id):
+        """Add a reaction to a chat message"""
+        try:
+            return ChatReactionService.add_message_reaction(
+                current_user.id, message_id, reaction_data["reaction_type"]
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/messages/<int:message_id>/reactions/<reaction_type>")
+class ChatMessageReactionDetail(MethodView):
+    @login_required
+    @bp.response(204)
+    def delete(self, message_id, reaction_type):
+        """Remove a reaction from a chat message"""
+        try:
+            ChatReactionService.remove_message_reaction(
+                current_user.id, message_id, reaction_type
+            )
+            return "", 204
         except APIError as e:
             abort(e.status_code, message=e.message)

@@ -22,7 +22,7 @@ from app.products.models import Product
 from app.requests.models import BuyerRequest
 
 # app imports
-from .models import ChatRoom, ChatMessage, ChatOffer
+from .models import ChatRoom, ChatMessage, ChatOffer, ChatMessageReaction
 
 logger = logging.getLogger(__name__)
 
@@ -775,3 +775,150 @@ class ChatService:
                 session.commit()
         except Exception as e:
             logger.error(f"Failed to mark messages as read: {str(e)}")
+
+
+class ChatReactionService:
+    """Service for managing reactions on chat messages"""
+
+    @staticmethod
+    def add_message_reaction(user_id: str, message_id: int, reaction_type: str):
+        """Add or update a reaction on a chat message"""
+        try:
+            with session_scope() as session:
+                # Check if message exists
+                message = session.query(ChatMessage).get(message_id)
+                if not message:
+                    raise NotFoundError("Message not found")
+
+                # Check if user already has this reaction
+                existing_reaction = (
+                    session.query(ChatMessageReaction)
+                    .filter_by(
+                        message_id=message_id,
+                        user_id=user_id,
+                        reaction_type=reaction_type,
+                    )
+                    .first()
+                )
+
+                if existing_reaction:
+                    # User already has this reaction, return existing
+                    return existing_reaction
+
+                # Create new reaction
+                reaction = ChatMessageReaction(
+                    message_id=message_id, user_id=user_id, reaction_type=reaction_type
+                )
+                session.add(reaction)
+                session.commit()
+
+                # Emit real-time websocket event
+                try:
+                    from flask_socketio import emit
+
+                    emit(
+                        "message_reaction_added",
+                        {
+                            "message_id": message_id,
+                            "user_id": user_id,
+                            "reaction_type": reaction_type,
+                            "timestamp": datetime.utcnow().isoformat(),
+                        },
+                        room=f"message_{message_id}",
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to emit message_reaction_added event: {e}")
+
+                return reaction
+
+        except Exception as e:
+            logger.error(f"Failed to add message reaction: {str(e)}")
+            raise APIError("Failed to add reaction")
+
+    @staticmethod
+    def remove_message_reaction(user_id: str, message_id: int, reaction_type: str):
+        """Remove a reaction from a chat message"""
+        try:
+            with session_scope() as session:
+                reaction = (
+                    session.query(ChatMessageReaction)
+                    .filter_by(
+                        message_id=message_id,
+                        user_id=user_id,
+                        reaction_type=reaction_type,
+                    )
+                    .first()
+                )
+
+                if not reaction:
+                    raise NotFoundError("Reaction not found")
+
+                session.delete(reaction)
+                session.commit()
+
+                # Emit real-time websocket event
+                try:
+                    from flask_socketio import emit
+
+                    emit(
+                        "message_reaction_removed",
+                        {
+                            "message_id": message_id,
+                            "user_id": user_id,
+                            "reaction_type": reaction_type,
+                            "timestamp": datetime.utcnow().isoformat(),
+                        },
+                        room=f"message_{message_id}",
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to emit message_reaction_removed event: {e}"
+                    )
+
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to remove message reaction: {str(e)}")
+            raise APIError("Failed to remove reaction")
+
+    @staticmethod
+    def get_message_reactions(message_id: int, user_id: str = None):
+        """Get all reactions for a chat message with counts and user's reactions"""
+        try:
+            with session_scope() as session:
+                # Get all reactions for the message
+                reactions = (
+                    session.query(ChatMessageReaction)
+                    .filter_by(message_id=message_id)
+                    .all()
+                )
+
+                # Group by reaction type and count
+                reaction_counts = {}
+                user_reactions = set()
+
+                for reaction in reactions:
+                    reaction_type = reaction.reaction_type.value
+                    reaction_counts[reaction_type] = (
+                        reaction_counts.get(reaction_type, 0) + 1
+                    )
+
+                    if user_id and reaction.user_id == user_id:
+                        user_reactions.add(reaction_type)
+
+                # Format response
+                result = []
+                for reaction_type, count in reaction_counts.items():
+                    result.append(
+                        {
+                            "reaction_type": reaction_type,
+                            "count": count,
+                            "has_reacted": reaction_type in user_reactions,
+                        }
+                    )
+
+                return result
+
+        except Exception as e:
+            logger.error(f"Failed to get message reactions: {str(e)}")
+            raise APIError("Failed to get reactions")
