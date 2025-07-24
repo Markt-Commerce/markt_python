@@ -2,6 +2,7 @@
 import logging
 from datetime import datetime, timedelta
 import json
+from sqlalchemy.orm import joinedload
 
 # project imports
 from main.workers import celery_app
@@ -12,6 +13,7 @@ from app.libs.session import session_scope
 
 from app.users.models import User
 from app.products.services import ProductService
+from app.products.models import Product
 from app.categories.models import Category, PostCategory, ProductCategory
 
 # app imports
