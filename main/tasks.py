@@ -23,6 +23,7 @@ def create_celery_app(app: Flask = None) -> Celery:
             "app.socials.tasks",
             "app.notifications.tasks",
             "app.media.tasks",
+            "app.realtime.tasks",  # New real-time tasks module
             # add more task modules here
         ]
     )
@@ -37,6 +38,7 @@ def create_celery_app(app: Flask = None) -> Celery:
         "app.media.tasks.*": {"queue": "media"},
         "app.socials.tasks.*": {"queue": "social"},
         "app.notifications.tasks.*": {"queue": "notifications"},
+        "app.realtime.tasks.*": {"queue": "realtime"},  # New real-time queue
     }
 
     return celery
