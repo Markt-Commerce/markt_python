@@ -20,6 +20,8 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
 
     is_buyer = db.Column(db.Boolean, default=False)
     is_seller = db.Column(db.Boolean, default=False)
+    is_active = db.Column(db.Boolean, default=True)
+    deactivated_at = db.Column(db.DateTime)
 
     # Relationships
     address = db.relationship("UserAddress", uselist=False, back_populates="user")
@@ -103,6 +105,16 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
             raise ValueError("User doesn't have seller account")
         self._current_role = value
 
+    def deactivate(self):
+        """Deactivate user account"""
+        self.is_active = False
+        self.deactivated_at = datetime.utcnow()
+
+    def activate(self):
+        """Reactivate user account"""
+        self.is_active = True
+        self.deactivated_at = None
+
 
 class Buyer(BaseModel):
     __tablename__ = "buyers"
@@ -111,6 +123,8 @@ class Buyer(BaseModel):
     user_id = db.Column(db.String(12), db.ForeignKey("users.id"))
     buyername = db.Column(db.String(50))
     shipping_address = db.Column(db.JSON)
+    is_active = db.Column(db.Boolean, default=True)
+    deactivated_at = db.Column(db.DateTime)
 
     # Relationships
     user = db.relationship("User", back_populates="buyer_account")
@@ -118,6 +132,16 @@ class Buyer(BaseModel):
         "Cart", back_populates="buyer", cascade="all, delete-orphan"
     )
     orders = db.relationship("Order", back_populates="buyer", lazy="dynamic")
+
+    def deactivate(self):
+        """Deactivate buyer account"""
+        self.is_active = False
+        self.deactivated_at = datetime.utcnow()
+
+    def activate(self):
+        """Reactivate buyer account"""
+        self.is_active = True
+        self.deactivated_at = None
 
 
 class SellerVerificationStatus(Enum):

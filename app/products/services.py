@@ -2,9 +2,10 @@
 import logging
 from datetime import datetime
 import time
+from typing import List, Dict, Any, Optional
 
 # package imports
-from sqlalchemy import or_, and_
+from sqlalchemy import or_, and_, func, desc, asc, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import joinedload
 
@@ -15,14 +16,28 @@ from external.redis import redis_client
 from app.libs.session import session_scope
 from app.libs.pagination import Paginator
 from app.categories.models import ProductCategory, ProductTag
-from app.libs.errors import NotFoundError, ValidationError, ConflictError, APIError
+from app.libs.errors import (
+    NotFoundError,
+    ValidationError,
+    ConflictError,
+    APIError,
+    ForbiddenError,
+)
 
 from app.users.models import Seller
-from app.socials.models import Follow, Post, PostProduct, PostStatus
+from app.socials.models import (
+    Follow,
+    Post,
+    PostProduct,
+    PostStatus,
+    ProductView,
+    ProductReview,
+)
 
 # app imports
 from .models import Product, ProductVariant, ProductInventory
 from .constants import PRODUCT_FILTER_KEYS, OPTIONAL_PRODUCT_FIELDS
+from app.orders.models import OrderItem
 
 
 logger = logging.getLogger(__name__)
@@ -50,9 +65,9 @@ class ProductService:
                 product = (
                     session.query(Product)
                     .options(
-                        db.joinedload(Product.seller),
-                        db.joinedload(Product.variants),
-                        db.joinedload(Product.categories).joinedload(
+                        joinedload(Product.seller),
+                        joinedload(Product.variants),
+                        joinedload(Product.categories).joinedload(
                             ProductCategory.category
                         ),
                     )
@@ -119,7 +134,7 @@ class ProductService:
             result = paginator.paginate(args)
 
             return {
-                "products": result["items"],
+                "items": result["items"],
                 "pagination": {
                     "page": result["page"],
                     "per_page": result["per_page"],
@@ -161,6 +176,83 @@ class ProductService:
         except SQLAlchemyError as e:
             logger.error(f"Database error creating product: {str(e)}")
             raise APIError("Failed to create product", 500)
+
+    @staticmethod
+    def update_product(product_id, seller_id, update_data):
+        """Update product details"""
+        try:
+            with session_scope() as session:
+                product = session.query(Product).get(product_id)
+                if not product:
+                    raise NotFoundError("Product not found")
+
+                if product.seller_id != seller_id:
+                    raise ValidationError("You can only update your own products")
+
+                # Update basic fields
+                if "name" in update_data:
+                    product.name = update_data["name"]
+                if "description" in update_data:
+                    product.description = update_data["description"]
+                if "price" in update_data:
+                    product.price = update_data["price"]
+                if "stock" in update_data:
+                    product.stock = update_data["stock"]
+                if "status" in update_data:
+                    product.status = update_data["status"]
+
+                # Update optional fields
+                for field in OPTIONAL_PRODUCT_FIELDS:
+                    if field in update_data:
+                        setattr(product, field, update_data[field])
+
+                # Handle variants if provided
+                if "variants" in update_data:
+                    # Clear existing variants
+                    session.query(ProductVariant).filter_by(
+                        product_id=product_id
+                    ).delete()
+
+                    # Add new variants
+                    for variant_data in update_data["variants"]:
+                        variant = ProductVariant(
+                            product_id=product.id,
+                            name=variant_data["name"],
+                            options=variant_data["options"],
+                        )
+                        session.add(variant)
+
+                product.updated_at = datetime.utcnow()
+                return product
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error updating product {product_id}: {str(e)}")
+            raise APIError("Failed to update product", 500)
+
+    @staticmethod
+    def delete_product(product_id, seller_id):
+        """Delete product (soft delete)"""
+        try:
+            with session_scope() as session:
+                product = session.query(Product).get(product_id)
+                if not product:
+                    raise NotFoundError("Product not found")
+
+                if product.seller_id != seller_id:
+                    raise ValidationError("You can only delete your own products")
+
+                # Soft delete by changing status
+                product.status = Product.Status.DELETED
+                product.updated_at = datetime.utcnow()
+
+                # Remove from trending products cache
+                redis_client.zrem("trending_products", product_id)
+
+                return True
+
+        except SQLAlchemyError as e:
+            logger.error(f"Database error deleting product {product_id}: {str(e)}")
+            raise APIError("Failed to delete product", 500)
 
     @staticmethod
     def bulk_create_products(products_data, seller_id):
@@ -273,46 +365,245 @@ class ProductService:
 
     @staticmethod
     def get_recommended_products(user_id, limit=10):
-        """Get personalized product recommendations"""
+        """Get personalized product recommendations with robust fallback strategies"""
         try:
             with session_scope() as session:
-                # Base query - could be enhanced with ML later
-                query = (
-                    session.query(Product)
-                    .filter(Product.status == Product.Status.ACTIVE)
-                    .options(joinedload(Product.seller), joinedload(Product.images))
-                )
+                final_products = []
+                seen_ids = set()
 
-                # Simple recommendation logic (will enhance later)
+                # Strategy 1: Products from followed sellers (highest priority)
                 if user_id:
-                    # Get products from followed sellers
-                    followed_sellers = (
-                        session.query(Seller.id)
-                        .join(Follow, Follow.followee_id == Seller.user_id)
-                        .filter(Follow.follower_id == user_id)
-                        .subquery()
+                    followed_products = ProductService._get_followed_seller_products(
+                        session, user_id, limit
                     )
+                    for product in followed_products:
+                        if product.id not in seen_ids:
+                            seen_ids.add(product.id)
+                            final_products.append(product)
 
-                    query = query.filter(Product.seller_id.in_(followed_sellers))
+                # Strategy 2: Products similar to recently viewed
+                if user_id and len(final_products) < limit:
+                    similar_products = ProductService._get_similar_products(
+                        session, user_id, limit - len(final_products), seen_ids
+                    )
+                    for product in similar_products:
+                        if product.id not in seen_ids:
+                            seen_ids.add(product.id)
+                            final_products.append(product)
 
-                return query.order_by(Product.view_count.desc()).limit(limit).all()
+                # Strategy 3: Popular products in user's price range
+                if len(final_products) < limit:
+                    popular_products = ProductService._get_popular_products_in_range(
+                        session, user_id, limit - len(final_products), seen_ids
+                    )
+                    for product in popular_products:
+                        if product.id not in seen_ids:
+                            seen_ids.add(product.id)
+                            final_products.append(product)
+
+                # Strategy 4: Trending products
+                if len(final_products) < limit:
+                    trending_products = ProductService.get_trending_products(
+                        user_id, limit - len(final_products)
+                    )
+                    for product in trending_products:
+                        if product.id not in seen_ids:
+                            seen_ids.add(product.id)
+                            final_products.append(product)
+
+                # Strategy 5: Fallback to best-rated products
+                if len(final_products) < limit:
+                    best_rated = ProductService._get_best_rated_products(
+                        session, limit - len(final_products), seen_ids
+                    )
+                    for product in best_rated:
+                        if product.id not in seen_ids:
+                            seen_ids.add(product.id)
+                            final_products.append(product)
+
+                # Strategy 6: Ultimate fallback - random active products
+                if len(final_products) < limit:
+                    random_products = ProductService._get_random_products(
+                        session, limit - len(final_products), seen_ids
+                    )
+                    final_products.extend(random_products)
+
+                return final_products
 
         except Exception as e:
             logger.error(f"Product recommendations failed: {str(e)}")
+            # Ultimate fallback: return trending products
+            return ProductService.get_trending_products(user_id, limit)
+
+    @staticmethod
+    def _get_followed_seller_products(session, user_id, limit):
+        """Get products from sellers the user follows"""
+        try:
+            followed_seller_ids = [
+                seller_id[0]
+                for seller_id in session.query(Seller.id)
+                .join(Follow, Follow.followee_id == Seller.user_id)
+                .filter(Follow.follower_id == user_id)
+                .all()
+            ]
+
+            if not followed_seller_ids:
+                return []
+
+            return (
+                session.query(Product)
+                .filter(
+                    Product.status == Product.Status.ACTIVE,
+                    Product.seller_id.in_(followed_seller_ids),
+                )
+                .options(joinedload(Product.seller), joinedload(Product.images))
+                .order_by(Product.created_at.desc())
+                .limit(limit)
+                .all()
+            )
+        except Exception as e:
+            logger.error(f"Error getting followed seller products: {e}")
+            return []
+
+    @staticmethod
+    def _get_similar_products(session, user_id, limit, exclude_ids):
+        """Get products similar to recently viewed ones"""
+        try:
+            # Get recently viewed products
+            recent_views = (
+                session.query(ProductView.product_id)
+                .filter(ProductView.user_id == user_id)
+                .order_by(ProductView.viewed_at.desc())
+                .limit(5)
+                .all()
+            )
+
+            if not recent_views:
+                return []
+
+            recent_product_ids = [view[0] for view in recent_views]
+
+            # Get products from same categories as recently viewed
+            return (
+                session.query(Product)
+                .join(ProductCategory)
+                .filter(
+                    Product.status == Product.Status.ACTIVE,
+                    Product.id.notin_(recent_product_ids),
+                    Product.id.notin_(exclude_ids),
+                    ProductCategory.category_id.in_(
+                        session.query(ProductCategory.category_id)
+                        .filter(ProductCategory.product_id.in_(recent_product_ids))
+                        .subquery()
+                    ),
+                )
+                .options(joinedload(Product.seller), joinedload(Product.images))
+                .order_by(Product.view_count.desc())
+                .limit(limit)
+                .all()
+            )
+        except Exception as e:
+            logger.error(f"Error getting similar products: {e}")
+            return []
+
+    @staticmethod
+    def _get_popular_products_in_range(session, user_id, limit, exclude_ids):
+        """Get popular products in user's price range"""
+        try:
+            # Get user's average viewed product price
+            avg_price = 50.0  # Default fallback
+            if user_id:
+                avg_price_result = (
+                    session.query(func.avg(Product.price))
+                    .join(ProductView, ProductView.product_id == Product.id)
+                    .filter(ProductView.user_id == user_id)
+                    .scalar()
+                )
+                if avg_price_result:
+                    avg_price = float(avg_price_result)
+
+            min_price = avg_price * 0.3
+            max_price = avg_price * 2.0
+
+            return (
+                session.query(Product)
+                .filter(
+                    Product.status == Product.Status.ACTIVE,
+                    Product.id.notin_(exclude_ids),
+                    Product.price.between(min_price, max_price),
+                )
+                .options(joinedload(Product.seller), joinedload(Product.images))
+                .order_by(Product.view_count.desc(), Product.average_rating.desc())
+                .limit(limit)
+                .all()
+            )
+        except Exception as e:
+            logger.error(f"Error getting popular products in range: {e}")
+            return []
+
+    @staticmethod
+    def _get_best_rated_products(session, limit, exclude_ids):
+        """Get best-rated products as fallback"""
+        try:
+            return (
+                session.query(Product)
+                .filter(
+                    Product.status == Product.Status.ACTIVE,
+                    Product.id.notin_(exclude_ids),
+                    Product.average_rating > 0,
+                )
+                .options(joinedload(Product.seller), joinedload(Product.images))
+                .order_by(Product.average_rating.desc(), Product.review_count.desc())
+                .limit(limit)
+                .all()
+            )
+        except Exception as e:
+            logger.error(f"Error getting best rated products: {e}")
+            return []
+
+    @staticmethod
+    def _get_random_products(session, limit, exclude_ids):
+        """Get random active products as ultimate fallback"""
+        try:
+            return (
+                session.query(Product)
+                .filter(
+                    Product.status == Product.Status.ACTIVE,
+                    Product.id.notin_(exclude_ids),
+                )
+                .options(joinedload(Product.seller), joinedload(Product.images))
+                .order_by(func.random())
+                .limit(limit)
+                .all()
+            )
+        except Exception as e:
+            logger.error(f"Error getting random products: {e}")
             return []
 
     @staticmethod
     def get_trending_products(user_id=None, limit=5):
-        """Get trending products with optional personalization"""
+        """Get trending products with improved personalization and robust fallback"""
         try:
             # Get top products from Redis
-            product_ids = [
-                pid.decode()
-                for pid in redis_client.zrevrange("trending_products", 0, limit - 1)
-            ]
+            trending_ids = redis_client.zrevrange("trending_products", 0, limit - 1)
 
-            if not product_ids:
-                return []
+            if not trending_ids:
+                # Fallback: get products by view count from database
+                with session_scope() as session:
+                    products = (
+                        session.query(Product)
+                        .filter(Product.status == Product.Status.ACTIVE)
+                        .options(joinedload(Product.seller), joinedload(Product.images))
+                        .order_by(Product.view_count.desc())
+                        .limit(limit)
+                        .all()
+                    )
+                    return products
+
+            # Convert bytes to strings if needed
+            product_ids = [
+                pid.decode() if isinstance(pid, bytes) else pid for pid in trending_ids
+            ]
 
             # Get full product data
             with session_scope() as session:
@@ -328,78 +619,295 @@ class ProductService:
 
                 # Basic personalization
                 if user_id:
-                    viewed = redis_client.zrange(
-                        f"user:{user_id}:viewed_products", 0, -1
-                    )
-                    viewed = {pid.decode() for pid in viewed}
+                    try:
+                        viewed = redis_client.zrange(
+                            f"user:{user_id}:viewed_products", 0, -1
+                        )
+                        viewed = {
+                            pid.decode() if isinstance(pid, bytes) else pid
+                            for pid in viewed
+                        }
 
-                    for p in products:
-                        if p.id in viewed:
-                            p._personalized_score = (
-                                redis_client.zscore("trending_products", p.id) * 0.7
-                            )  # Reduce score for seen products
-                        else:
-                            p._personalized_score = (
-                                redis_client.zscore("trending_products", p.id) * 1.3
-                            )  # Boost new products
+                        # Create personalized scores
+                        personalized_products = []
+                        for p in products:
+                            score = redis_client.zscore("trending_products", p.id)
+                            if score is None:
+                                score = 0
 
-                    products.sort(key=lambda p: p._personalized_score, reverse=True)
+                            # Adjust score based on user's viewing history
+                            if p.id in viewed:
+                                adjusted_score = (
+                                    score * 0.7
+                                )  # Reduce score for seen products
+                            else:
+                                adjusted_score = score * 1.3  # Boost new products
+
+                            personalized_products.append((p, adjusted_score))
+
+                        # Sort by personalized score
+                        personalized_products.sort(key=lambda x: x[1], reverse=True)
+                        products = [p[0] for p in personalized_products]
+                    except Exception as e:
+                        logger.warning(f"Personalization failed: {e}")
+                        # Continue without personalization
 
                 return products[:limit]
 
         except Exception as e:
             logger.error(f"Trending fetch failed: {str(e)}")
-            return []
+            # Ultimate fallback: random active products
+            with session_scope() as session:
+                return (
+                    session.query(Product)
+                    .filter(Product.status == Product.Status.ACTIVE)
+                    .options(joinedload(Product.seller), joinedload(Product.images))
+                    .order_by(func.random())
+                    .limit(limit)
+                    .all()
+                )
 
     @staticmethod
     def update_trending_products():
-        """Optimized trending products using complete Redis stats"""
+        """Optimized trending products using complete Redis stats with better error handling"""
         try:
             # Get all active products
-            product_ids = [
-                p.id
-                for p in Product.query.filter_by(status=Product.Status.ACTIVE).all()
-            ]
+            with session_scope() as session:
+                product_ids = [
+                    p.id
+                    for p in session.query(Product)
+                    .filter_by(status=Product.Status.ACTIVE)
+                    .all()
+                ]
 
-            if not product_ids:
-                return
+                if not product_ids:
+                    logger.info("No active products found for trending update")
+                    return
 
             # Calculate scores in pipeline
             with redis_client.pipeline() as pipe:
                 pipe.delete("trending_products_temp")
 
                 for pid in product_ids:
-                    # Get all stats in one call
-                    stats = redis_client.hgetall(f"product:{pid}:stats")
+                    try:
+                        # Get all stats in one call
+                        stats = redis_client.hgetall(f"product:{pid}:stats")
 
-                    # Default values
-                    view_count = int(stats.get(b"view_count", 0))
-                    avg_rating = float(stats.get(b"avg_rating", 0))
-                    last_viewed = float(stats.get(b"last_viewed", time.time()))
+                        # Default values
+                        view_count = int(stats.get("view_count", 0))
+                        avg_rating = float(stats.get("avg_rating", 0))
+                        last_viewed = float(stats.get("last_viewed", time.time()))
 
-                    # Calculate days since last view
-                    days_old = (
-                        datetime.now() - datetime.fromtimestamp(last_viewed)
-                    ).days
+                        # Calculate days since last view
+                        days_old = (
+                            datetime.now() - datetime.fromtimestamp(last_viewed)
+                        ).days
 
-                    # Calculate score (adjust weights as needed)
-                    score = (
-                        view_count * 0.6
-                        + avg_rating * 10  # 60% view count
-                        + max(0, (7 - days_old))  # 30% rating (scaled up)
-                        * 2  # 10% recency
-                    )
+                        # Calculate score with better weighting
+                        score = (
+                            view_count * 0.5  # 50% view count
+                            + avg_rating * 15  # 30% rating (scaled up)
+                            + max(0, (7 - days_old)) * 3  # 20% recency
+                        )
 
-                    pipe.zadd("trending_products_temp", {pid: score})
+                        pipe.zadd("trending_products_temp", {pid: score})
+                    except Exception as e:
+                        logger.warning(
+                            f"Error calculating score for product {pid}: {e}"
+                        )
+                        continue
 
                 # Atomic update
                 pipe.rename("trending_products_temp", "trending_products")
                 pipe.execute()
 
+            logger.info(
+                f"Successfully updated trending products for {len(product_ids)} products"
+            )
+
         except Exception as e:
             logger.error(f"Trending update failed: {str(e)}")
 
+    @staticmethod
+    def product_exists(product_id: str) -> bool:
+        """Check if a product exists"""
+        try:
+            with session_scope() as session:
+                product = (
+                    session.query(Product).filter(Product.id == product_id).first()
+                )
+                return product is not None
+        except Exception as e:
+            logger.error(f"Error checking if product exists: {e}")
+            return False
+
     # TODO: Add search, filtering, pagination
+
+    @staticmethod
+    def reduce_inventory_for_order(order_items: List[OrderItem]) -> bool:
+        """Reduce inventory for order items when payment is successful"""
+        try:
+            with session_scope() as session:
+                for item in order_items:
+                    # Get product inventory
+                    if item.variant_id:
+                        # Reduce variant inventory
+                        inventory = (
+                            session.query(ProductInventory)
+                            .filter_by(
+                                product_id=item.product_id, variant_id=item.variant_id
+                            )
+                            .first()
+                        )
+
+                        if inventory:
+                            if inventory.quantity < item.quantity:
+                                raise ValidationError(
+                                    f"Insufficient stock for product {item.product_id} variant {item.variant_id}"
+                                )
+                            inventory.quantity -= item.quantity
+                        else:
+                            # Create inventory record if it doesn't exist
+                            inventory = ProductInventory(
+                                product_id=item.product_id,
+                                variant_id=item.variant_id,
+                                quantity=0,  # Will be negative after reduction
+                            )
+                            session.add(inventory)
+                    else:
+                        # Reduce main product stock
+                        product = session.query(Product).get(item.product_id)
+                        if not product:
+                            raise NotFoundError(f"Product {item.product_id} not found")
+
+                        if product.stock < item.quantity:
+                            raise ValidationError(
+                                f"Insufficient stock for product {item.product_id}"
+                            )
+
+                        product.stock -= item.quantity
+
+                        # Update product status if stock becomes 0
+                        if product.stock == 0:
+                            product.status = Product.Status.OUT_OF_STOCK
+
+                session.flush()
+                logger.info(f"Successfully reduced inventory for order items")
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to reduce inventory: {str(e)}")
+            raise APIError(f"Inventory reduction failed: {str(e)}", 500)
+
+    @staticmethod
+    def check_inventory_availability(order_items: List[OrderItem]) -> bool:
+        """Check if all order items have sufficient inventory"""
+        try:
+            with session_scope() as session:
+                for item in order_items:
+                    if item.variant_id:
+                        # Check variant inventory
+                        inventory = (
+                            session.query(ProductInventory)
+                            .filter_by(
+                                product_id=item.product_id, variant_id=item.variant_id
+                            )
+                            .first()
+                        )
+
+                        if not inventory or inventory.quantity < item.quantity:
+                            return False
+                    else:
+                        # Check main product stock
+                        product = session.query(Product).get(item.product_id)
+                        if not product or product.stock < item.quantity:
+                            return False
+
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to check inventory availability: {str(e)}")
+            return False
+
+    @staticmethod
+    def get_product_inventory(
+        product_id: str, variant_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Get inventory information for a product"""
+        with session_scope() as session:
+            if variant_id:
+                inventory = (
+                    session.query(ProductInventory)
+                    .filter_by(product_id=product_id, variant_id=variant_id)
+                    .first()
+                )
+
+                if inventory:
+                    return {
+                        "product_id": product_id,
+                        "variant_id": variant_id,
+                        "quantity": inventory.quantity,
+                        "location": inventory.location,
+                        "available": inventory.quantity > 0,
+                    }
+                else:
+                    return {
+                        "product_id": product_id,
+                        "variant_id": variant_id,
+                        "quantity": 0,
+                        "location": None,
+                        "available": False,
+                    }
+            else:
+                product = session.query(Product).get(product_id)
+                if product:
+                    return {
+                        "product_id": product_id,
+                        "quantity": product.stock,
+                        "available": product.stock > 0,
+                        "status": product.status.value,
+                    }
+                else:
+                    raise NotFoundError(f"Product {product_id} not found")
+
+    @staticmethod
+    def update_product_stock(
+        product_id: str, quantity: int, variant_id: Optional[int] = None
+    ):
+        """Update product stock (for admin/seller use)"""
+        with session_scope() as session:
+            if variant_id:
+                inventory = (
+                    session.query(ProductInventory)
+                    .filter_by(product_id=product_id, variant_id=variant_id)
+                    .first()
+                )
+
+                if inventory:
+                    inventory.quantity = max(0, quantity)
+                else:
+                    inventory = ProductInventory(
+                        product_id=product_id,
+                        variant_id=variant_id,
+                        quantity=max(0, quantity),
+                    )
+                    session.add(inventory)
+            else:
+                product = session.query(Product).get(product_id)
+                if not product:
+                    raise NotFoundError(f"Product {product_id} not found")
+
+                product.stock = max(0, quantity)
+
+                # Update status based on stock
+                if product.stock == 0:
+                    product.status = Product.Status.OUT_OF_STOCK
+                elif product.status == Product.Status.OUT_OF_STOCK:
+                    product.status = Product.Status.ACTIVE
+
+            session.flush()
+            logger.info(f"Updated stock for product {product_id} to {quantity}")
+            return True
 
 
 class ProductStatsService:

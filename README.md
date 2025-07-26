@@ -1,13 +1,13 @@
 # Markt Python Backend
 
 
-<img 
-  src="https://avatars.githubusercontent.com/u/188402477?s=200&v=4" 
-  alt="Markt Logo" 
+<img
+  src="https://avatars.githubusercontent.com/u/188402477?s=200&v=4"
+  alt="Markt Logo"
   style="width: 100%; max-width: 800px; height: 150px; object-fit: cover; border-radius: 8px;"
 />
 
-*Empowering Student Entrepreneurs with Social Commerce*
+*Empowering Student (but not exclusive) Entrepreneurs with Social Commerce*
 
 ## 🚀 Tech Stack
 
@@ -20,10 +20,46 @@
 - **Caching**: Redis
 
 ### Key Features
-- Social commerce platform for student entrepreneurs
+- Social commerce platform for student entrepreneurs (but not exclusive)
 - Hybrid e-commerce with social media features
 - Real-time chat and notifications
 - Comprehensive API documentation
+
+## 🗺️ Project Architecture (not complete)
+
+```
+app/
+├── libs/              # Shared utilities and base classes
+├── users/             # Auth, profiles, accounts
+├── products/          # Inventory, categories, variants
+├── orders/            # Checkout, payments, transactions
+├── socials/           # Posts, reviews, niches
+├── requests/          # Buyer requests system
+├── notifications/     # Real-time alerts
+├── media/             # File uploads handling
+└── chat/              # Messaging system
+```
+
+## 🚧 Current Development Focus (July 2025)
+
+### Phase 1 Priority Features
+1. **Core Systems Audit**
+   - Review users, orders, products, cart, socials, libs modules
+   - Identify missing implementations
+   - Optimize existing queries for production
+
+2. **Buyer Request System**
+   - CRUD operations with dual-role validation
+   - Seller offer management (with notifications)
+   - Request status lifecycle hooks
+
+3. **Notifications System**
+   - User preference feature
+
+4. **Niche Communities**
+   - Membership management
+   - Role-based access control
+   - Moderation tools skeleton
 
 ## 🛠️ Development Setup
 
@@ -150,9 +186,9 @@ See our [Pull Request Guidelines](PULL_REQUEST_TEMPLATE.md) for details on:
 
 We welcome contributions! Please:
 1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
 3. Commit your changes (`cz commit`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
 ## 📜 License

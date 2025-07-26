@@ -168,7 +168,7 @@ class SellerOrderService:
             result = paginator.paginate({})
 
             return {
-                "order_items": result["items"],
+                "items": result["items"],
                 "pagination": {
                     "page": result["page"],
                     "per_page": result["per_page"],

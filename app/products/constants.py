@@ -9,4 +9,11 @@ PRODUCT_FILTER_KEYS = {
 }
 
 # Optional product fields during creation
-OPTIONAL_PRODUCT_FIELDS = ["compare_at_price", "sku", "barcode", "weight"]
+OPTIONAL_PRODUCT_FIELDS = [
+    "compare_at_price",
+    "cost_per_item",
+    "sku",
+    "barcode",
+    "weight",
+    "product_metadata",
+]

@@ -14,6 +14,7 @@ class ProductStatus(Enum):
     DRAFT = "draft"
     ARCHIVED = "archived"
     OUT_OF_STOCK = "out_of_stock"
+    DELETED = "deleted"  # soft delete
 
 
 class Product(BaseModel, StatusMixin, UniqueIdMixin):
@@ -25,6 +26,7 @@ class Product(BaseModel, StatusMixin, UniqueIdMixin):
         DRAFT = "draft"
         ARCHIVED = "archived"
         OUT_OF_STOCK = "out_of_stock"
+        DELETED = "deleted"  # soft delete
 
     id = db.Column(
         db.String(12), primary_key=True, default=None

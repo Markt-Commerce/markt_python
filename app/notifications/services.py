@@ -63,6 +63,69 @@ class NotificationService:
             "title": "System notification",
             "message": "{message}",
         },
+        # Buyer request notifications
+        NotificationType.REQUEST_OFFER: {
+            "title": "New offer",
+            "message": "{seller_name} made an offer on your request: {request_title}",
+        },
+        NotificationType.OFFER_ACCEPTED: {
+            "title": "Offer accepted",
+            "message": "Your offer for {request_title} was accepted!",
+        },
+        NotificationType.OFFER_REJECTED: {
+            "title": "Offer rejected",
+            "message": "Your offer for {request_title} was not selected",
+        },
+        NotificationType.OFFER_WITHDRAWN: {
+            "title": "Offer withdrawn",
+            "message": "{seller_name} withdrew their offer for {request_title}",
+        },
+        NotificationType.REQUEST_CLOSED: {
+            "title": "Request closed",
+            "message": "Your request '{request_title}' has been closed",
+        },
+        NotificationType.REQUEST_STATUS_CHANGE: {
+            "title": "Request status update",
+            "message": "Your request '{request_title}' status changed to {status}",
+        },
+        NotificationType.REQUEST_EXPIRED: {
+            "title": "Request expired",
+            "message": "Your request '{request_title}' has expired",
+        },
+        # Cart and order notifications
+        NotificationType.CART_ITEM_ADDED: {
+            "title": "Item added to cart",
+            "message": "{product_name} was added to a customer's cart",
+        },
+        NotificationType.ORDER_PLACED: {
+            "title": "New order",
+            "message": "New order #{order_id} has been placed",
+        },
+        NotificationType.PAYMENT_SUCCESS: {
+            "title": "Payment successful",
+            "message": "Payment for order #{order_id} was successful",
+        },
+        NotificationType.PAYMENT_FAILED: {
+            "title": "Payment failed",
+            "message": "Payment for order #{order_id} failed. Please try again.",
+        },
+        # Social notifications
+        NotificationType.NICHE_INVITATION: {
+            "title": "Community invitation",
+            "message": "{inviter_name} invited you to join {niche_name}",
+        },
+        NotificationType.NICHE_POST_APPROVED: {
+            "title": "Post approved",
+            "message": "Your post in {niche_name} has been approved",
+        },
+        NotificationType.NICHE_POST_REJECTED: {
+            "title": "Post rejected",
+            "message": "Your post in {niche_name} was not approved",
+        },
+        NotificationType.MODERATION_ACTION: {
+            "title": "Moderation action",
+            "message": "A moderation action was taken: {action_type}",
+        },
     }
 
     # Channel configuration by notification type
@@ -123,6 +186,114 @@ class NotificationService:
             "always_email": True,
             "always_push": True,
         },
+        # Buyer request notifications
+        NotificationType.REQUEST_OFFER: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,  # Important business notification
+        },
+        NotificationType.OFFER_ACCEPTED: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,  # Critical business notification
+        },
+        NotificationType.OFFER_REJECTED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.OFFER_WITHDRAWN: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.REQUEST_CLOSED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.REQUEST_STATUS_CHANGE: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.REQUEST_EXPIRED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        # Cart and order notifications
+        NotificationType.CART_ITEM_ADDED: {
+            "channels": [DeliveryChannel.WEBSOCKET],  # Seller notification only
+            "immediate_websocket": True,
+            "push_when_offline": False,
+        },
+        NotificationType.ORDER_PLACED: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,  # Critical business notification
+        },
+        NotificationType.PAYMENT_SUCCESS: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,  # Critical business notification
+        },
+        NotificationType.PAYMENT_FAILED: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,  # Critical business notification
+        },
+        # Social notifications
+        NotificationType.NICHE_INVITATION: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.NICHE_POST_APPROVED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.NICHE_POST_REJECTED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.MODERATION_ACTION: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,  # Important moderation notification
+        },
     }
 
     @staticmethod
@@ -164,6 +335,23 @@ class NotificationService:
                 if metadata_
                 else "updated",
                 "message": metadata_.get("message", "") if metadata_ else "",
+                # Buyer request variables
+                "seller_name": metadata_.get("seller_name", "A seller")
+                if metadata_
+                else "A seller",
+                "request_title": metadata_.get("request_title", "your request")
+                if metadata_
+                else "your request",
+                # Social variables
+                "inviter_name": metadata_.get("inviter_name", "Someone")
+                if metadata_
+                else "Someone",
+                "niche_name": metadata_.get("niche_name", "a community")
+                if metadata_
+                else "a community",
+                "action_type": metadata_.get("action_type", "moderation")
+                if metadata_
+                else "moderation",
             }
 
             message = template["message"].format(**format_data)
@@ -242,34 +430,36 @@ class NotificationService:
     ) -> bool:
         """Attempt immediate WebSocket delivery, return True if successful"""
         try:
-            # Check if user has active connections
-            if not redis_client.exists(f"online_users:{user_id}"):
+            # Check if user has active connections using centralized manager
+            from main.sockets import SocketManager
+
+            if not SocketManager.is_user_online(user_id):
                 return False
 
-            # Get all active sessions for this user (handles multiple devices/tabs)
-            user_room = f"user_{user_id}"
-
-            from main.extensions import socketio
+            # Use centralized emission methods
+            from main.sockets import emit_to_user
 
             # Emit notification
-            socketio.emit(
-                "notification",
-                notification_data,
-                room=user_room,
-                namespace="/notifications",
+            success = emit_to_user(
+                user_id, "notification", notification_data, namespace="/notifications"
             )
 
-            # Update unread count in real-time
-            unread_count = NotificationService.get_unread_count(user_id)
-            socketio.emit(
-                "unread_count_update",
-                {"count": unread_count},
-                room=user_room,
-                namespace="/notifications",
-            )
+            if success:
+                # Update unread count in real-time
+                unread_count = NotificationService.get_unread_count(user_id)
+                emit_to_user(
+                    user_id,
+                    "unread_count_update",
+                    {"count": unread_count},
+                    namespace="/notifications",
+                )
 
-            logger.info(f"Immediate WebSocket delivery successful for user {user_id}")
-            return True
+                logger.info(
+                    f"Immediate WebSocket delivery successful for user {user_id}"
+                )
+                return True
+
+            return False
 
         except Exception as e:
             logger.error(
@@ -330,15 +520,15 @@ class NotificationService:
                 updated = query.update({"is_read": True}, synchronize_session=False)
                 session.commit()
 
-                # Emit real-time unread count update
+                # Emit real-time unread count update using centralized method
                 if updated > 0:
-                    from main.extensions import socketio
+                    from main.sockets import emit_to_user
 
                     unread_count = NotificationService.get_unread_count(user_id)
-                    socketio.emit(
+                    emit_to_user(
+                        user_id,
                         "unread_count_update",
                         {"count": unread_count},
-                        room=f"user_{user_id}",
                         namespace="/notifications",
                     )
 

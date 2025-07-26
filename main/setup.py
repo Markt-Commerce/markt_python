@@ -1,5 +1,6 @@
 # python imports
 import logging
+import time
 
 # package imports
 from flask import Flask
@@ -55,6 +56,9 @@ def create_app():
     app = Flask(__name__)
     app.wsgi_app = AuthMiddleware(app.wsgi_app)
 
+    # Track application start time for health checks
+    app.start_time = time.time()
+
     # Get both login_manager and api
     login_manager, api, socketio = configure_app(app)
 
@@ -76,6 +80,19 @@ def create_app():
 
         # Register socket namespaces
         register_socket_namespaces(socketio)
+
+        # Initialize PaymentService with Paystack keys
+        if settings.PAYSTACK_SECRET_KEY and settings.PAYSTACK_PUBLIC_KEY:
+            from app.payments.services import PaymentService
+
+            PaymentService.initialize_paystack(
+                settings.PAYSTACK_SECRET_KEY, settings.PAYSTACK_PUBLIC_KEY
+            )
+            logger.info("PaymentService initialized with Paystack keys")
+        else:
+            logger.warning(
+                "Paystack keys not configured - payment features will not work"
+            )
 
     logger.info("Application initialized")
     return app, socketio

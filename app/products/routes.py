@@ -66,7 +66,9 @@ class ProductDetail(MethodView):
         product = ProductService.get_product(product_id)
         if product.seller_id != current_user.seller_account.id:
             abort(403, message="You can only update your own products")
-        return ProductService.update_product(product_id, product_data)
+        return ProductService.update_product(
+            product_id, current_user.seller_account.id, product_data
+        )
 
     @login_required
     @bp.response(204)
@@ -75,7 +77,7 @@ class ProductDetail(MethodView):
         product = ProductService.get_product(product_id)
         if product.seller_id != current_user.seller_account.id:
             abort(403, message="You can only delete your own products")
-        ProductService.delete_product(product_id)
+        ProductService.delete_product(product_id, current_user.seller_account.id)
         return None
 
 
@@ -105,6 +107,18 @@ class TrendingProducts(MethodView):
             user_id=current_user.id if current_user.is_authenticated else None,
             limit=min(args.get("per_page", 10), 50),
         )
+
+
+@bp.route("/recommended")
+class RecommendedProducts(MethodView):
+    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.response(200, ProductSchema(many=True))
+    def get(self, args):
+        """Get personalized product recommendations"""
+        user_id = current_user.id if current_user.is_authenticated else None
+        limit = min(args.get("per_page", 10), 50)
+
+        return ProductService.get_recommended_products(user_id, limit)
 
 
 @bp.route("/<product_id>/reviews")

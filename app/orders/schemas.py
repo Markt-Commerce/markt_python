@@ -71,7 +71,7 @@ class OrderSimpleSchema(Schema):
 
 
 class SellerOrderResponseSchema(Schema):
-    order_items = fields.Nested(SellerOrderItemSchema(many=True))
+    items = fields.Nested(SellerOrderItemSchema(many=True))
     pagination = fields.Nested(PaginationSchema())
 
 

@@ -27,23 +27,26 @@ def deliver_notification(self, notification_data: Dict, channels: List[str]):
                 elif channel == "email":  # DeliveryChannel.EMAIL.value
                     send_email_notification.delay(notification_data)
                 elif channel == "websocket":  # DeliveryChannel.WEBSOCKET.value
-                    from main.extensions import socketio
+                    # Use centralized emission method
+                    from main.sockets import emit_to_user
 
                     # Fallback WebSocket delivery (if immediate delivery failed)
-                    socketio.emit(
+                    success = emit_to_user(
+                        user_id,
                         "notification",
                         notification_data,
-                        room=f"user_{user_id}",
                         namespace="/notifications",
                     )
-                    # Update unread count
-                    unread_count = get_unread_count(user_id)
-                    socketio.emit(
-                        "unread_count_update",
-                        {"count": unread_count},
-                        room=f"user_{user_id}",
-                        namespace="/notifications",
-                    )
+
+                    if success:
+                        # Update unread count
+                        unread_count = get_unread_count(user_id)
+                        emit_to_user(
+                            user_id,
+                            "unread_count_update",
+                            {"count": unread_count},
+                            namespace="/notifications",
+                        )
 
             except Exception as channel_error:
                 logger.error(

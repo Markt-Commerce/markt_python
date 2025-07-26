@@ -39,6 +39,10 @@ class RedisClient:
         """Wrapper for Redis zadd command"""
         return self.client.zadd(name, mapping, nx=nx, xx=xx, ch=ch, incr=incr)
 
+    def zrem(self, name, *values):
+        """Wrapper for Redis zrem command"""
+        return self.client.zrem(name, *values)
+
     def zincrby(self, name, amount, value):
         """Wrapper for Redis zincrby command"""
         return self.client.zincrby(name, amount, value)
@@ -55,6 +59,69 @@ class RedisClient:
         """Wrapper for Redis zcard command"""
         return self.client.zcard(name)
 
+    def zrange(
+        self, name, start, end, withscores=False, desc=False, score_cast_func=float
+    ):
+        """Wrapper for Redis zrange command with optional score processing"""
+        return self.client.zrange(
+            name,
+            start,
+            end,
+            withscores=withscores,
+            desc=desc,
+            score_cast_func=score_cast_func,
+        )
+
+    def zrangebyscore(
+        self,
+        name,
+        min_score,
+        max_score,
+        withscores=False,
+        score_cast_func=float,
+        offset=None,
+        count=None,
+    ):
+        """Wrapper for Redis zrangebyscore command"""
+        return self.client.zrangebyscore(
+            name,
+            min_score,
+            max_score,
+            withscores=withscores,
+            score_cast_func=score_cast_func,
+            start=offset,
+            num=count,
+        )
+
+    def zrevrangebyscore(
+        self,
+        name,
+        max_score,
+        min_score,
+        withscores=False,
+        score_cast_func=float,
+        offset=None,
+        count=None,
+    ):
+        """Wrapper for Redis zrevrangebyscore command (reverse order)"""
+        return self.client.zrevrangebyscore(
+            name,
+            max_score,
+            min_score,
+            withscores=withscores,
+            score_cast_func=score_cast_func,
+            start=offset,
+            num=count,
+        )
+
+    def zpopmax(self, name, count=1):
+        """Wrapper for Redis zpopmax command"""
+        return self.client.zpopmax(name, count)
+
+    def zpopmin(self, name, count=1):
+        """Wrapper for Redis zpopmin command"""
+        return self.client.zpopmin(name, count)
+
     # Basic operations you might also need
     def get(self, name):
         """Wrapper for Redis get command"""
@@ -64,6 +131,10 @@ class RedisClient:
         """Wrapper for Redis set command"""
         return self.client.set(name, value, ex=ex, px=px, nx=nx, xx=xx)
 
+    def setex(self, name, time, value):
+        """Wrapper for Redis setex command"""
+        return self.client.setex(name, time, value)
+
     def delete(self, *names):
         """Wrapper for Redis delete command"""
         return self.client.delete(*names)
@@ -71,6 +142,14 @@ class RedisClient:
     def exists(self, *names):
         """Wrapper for Redis exists command"""
         return self.client.exists(*names)
+
+    def keys(self, pattern):
+        """Wrapper for Redis keys command"""
+        return self.client.keys(pattern)
+
+    def ttl(self, name):
+        """Wrapper for Redis ttl command"""
+        return self.client.ttl(name)
 
     # Pub/Sub operations
     def publish(self, channel, message):
@@ -106,6 +185,23 @@ class RedisClient:
     def scard(self, name):
         """Wrapper for Redis scard command"""
         return self.client.scard(name)
+
+    def srem(self, name, *values):
+        """Wrapper for Redis srem command"""
+        return self.client.srem(name, *values)
+
+    # String operations
+    def incr(self, name, amount=1):
+        """Wrapper for Redis incr command"""
+        return self.client.incr(name, amount)
+
+    def decr(self, name, amount=1):
+        """Wrapper for Redis decr command"""
+        return self.client.decr(name, amount)
+
+    def expire(self, name, time):
+        """Wrapper for Redis expire command"""
+        return self.client.expire(name, time)
 
     # Recovery code
     def store_recovery_code(self, email: str, code: str, expires_in: int = 600):

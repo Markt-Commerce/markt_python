@@ -14,6 +14,24 @@ class NotificationType(Enum):
     SHIPMENT_UPDATE = "shipment_update"
     PROMOTIONAL = "promotional"
     SYSTEM_ALERT = "system_alert"
+    # Buyer request notifications
+    REQUEST_OFFER = "request_offer"
+    OFFER_ACCEPTED = "offer_accepted"
+    OFFER_REJECTED = "offer_rejected"
+    OFFER_WITHDRAWN = "offer_withdrawn"
+    REQUEST_CLOSED = "request_closed"
+    REQUEST_STATUS_CHANGE = "request_status_change"
+    REQUEST_EXPIRED = "request_expired"
+    # Cart and order notifications
+    CART_ITEM_ADDED = "cart_item_added"
+    ORDER_PLACED = "order_placed"
+    PAYMENT_SUCCESS = "payment_success"
+    PAYMENT_FAILED = "payment_failed"
+    # Social notifications
+    NICHE_INVITATION = "niche_invitation"
+    NICHE_POST_APPROVED = "niche_post_approved"
+    NICHE_POST_REJECTED = "niche_post_rejected"
+    MODERATION_ACTION = "moderation_action"
 
 
 class Notification(BaseModel):
@@ -47,6 +65,6 @@ class Notification(BaseModel):
             "is_read": self.is_read,
             "reference_type": self.reference_type,
             "reference_id": self.reference_id,
-            "created_at": self.created_at.isoformat(),
+            "created_at": self.created_at,
             "metadata_": self.metadata_ or {},
         }
