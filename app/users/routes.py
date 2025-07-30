@@ -20,6 +20,8 @@ from .schemas import (
     UserLoginSchema,
     PasswordResetSchema,
     PasswordResetConfirmSchema,
+    EmailVerificationSendSchema,
+    EmailVerificationSchema,
     UserPaginationSchema,
     UserProfileSchema,
     PublicProfileSchema,
@@ -219,6 +221,36 @@ class PasswordResetConfirm(MethodView):
             data["email"], data["code"], data["new_password"]
         )
         return None
+
+
+@bp.route("/email-verification/send")
+class SendEmailVerification(MethodView):
+    @bp.arguments(EmailVerificationSendSchema)
+    @bp.response(202)
+    def post(self, data):
+        """Send email verification code"""
+        try:
+            AuthService.send_email_verification(data["email"])
+            return {"message": "Verification email sent"}
+        except AuthError as e:
+            abort(e.status_code, message=e.message)
+        except Exception as e:
+            abort(500, message=str(e))
+
+
+@bp.route("/email-verification/verify")
+class VerifyEmail(MethodView):
+    @bp.arguments(EmailVerificationSchema)
+    @bp.response(200)
+    def post(self, data):
+        """Verify email with code"""
+        try:
+            AuthService.verify_email(data["email"], data["verification_code"])
+            return {"message": "Email verified successfully"}
+        except AuthError as e:
+            abort(e.status_code, message=e.message)
+        except Exception as e:
+            abort(500, message=str(e))
 
 
 @bp.route("/")
