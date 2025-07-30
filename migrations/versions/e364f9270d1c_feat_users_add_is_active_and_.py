@@ -26,6 +26,7 @@ def upgrade():
     with op.batch_alter_table('users', schema=None) as batch_op:
         batch_op.add_column(sa.Column('is_active', sa.Boolean(), nullable=True))
         batch_op.add_column(sa.Column('deactivated_at', sa.DateTime(), nullable=True))
+        batch_op.add_column(sa.Column('email_verified', sa.Boolean(), nullable=True))
 
     # --- Product status enum update ---
     # Create new enum type with 'DELETED' (using uppercase to match original)
@@ -57,6 +58,7 @@ def downgrade():
     op.execute("ALTER TYPE products_status_old RENAME TO products_status")
     # --- End product status enum revert ---
     with op.batch_alter_table('users', schema=None) as batch_op:
+        batch_op.drop_column('email_verified')
         batch_op.drop_column('deactivated_at')
         batch_op.drop_column('is_active')
 

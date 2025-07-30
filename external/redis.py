@@ -215,6 +215,25 @@ class RedisClient:
     def delete_recovery_code(self, email: str):
         self.client.delete(f"recovery:{email}")
 
+    # Email verification code
+    def store_verification_code(self, email: str, code: str, expires_in: int = 600):
+        """Store email verification code with expiration (default 10 minutes)"""
+        key = f"email_verification:{email}"
+        self.client.setex(key, expires_in, code)
+
+    def verify_verification_code(self, email: str, code: str) -> bool:
+        """Verify email verification code"""
+        stored = self.client.get(f"email_verification:{email}")
+        return stored and stored == code
+
+    def delete_verification_code(self, email: str):
+        """Delete email verification code"""
+        self.client.delete(f"email_verification:{email}")
+
+    def get_verification_code(self, email: str) -> str:
+        """Get stored verification code for email"""
+        return self.client.get(f"email_verification:{email}")
+
     # Product views counter
     def increment_product_views(self, product_id):
         self.client.zincrby("product_views", 1, product_id)

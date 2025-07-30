@@ -65,6 +65,13 @@ class Config:
         self.AWS_S3_BUCKET = config("AWS_S3_BUCKET", default="markt-media")
         self.CDN_DOMAIN = config("CDN_DOMAIN", default="")
 
+        # Email Configuration (Resend)
+        self.RESEND_API_KEY = config("RESEND_API_KEY", default="")
+        self.RESEND_FROM_EMAIL = config(
+            "RESEND_FROM_EMAIL", default="noreply@markt.com"
+        )
+        self.RESEND_FROM_NAME = config("RESEND_FROM_NAME", default="Markt")
+
         # Build Redis URL
         REDIS_URL = f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
