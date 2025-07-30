@@ -161,7 +161,6 @@ class Seller(BaseModel):
     shop_slug = db.Column(db.String(110), unique=True)
     description = db.Column(db.Text)
     policies = db.Column(db.JSON)  # Return, shipping policies
-    category = db.Column(db.String(100))
     total_rating = db.Column(db.Integer, default=0)
     total_raters = db.Column(db.Integer, default=0)
     verification_status = db.Column(
@@ -177,6 +176,7 @@ class Seller(BaseModel):
     offers = db.relationship("SellerOffer", back_populates="seller", lazy="dynamic")
     transactions = db.relationship("Transaction", back_populates="seller")
     posts = db.relationship("Post", back_populates="seller", lazy="dynamic")
+    categories = db.relationship("SellerCategory", back_populates="seller")
 
     @property
     def pending_order_count(self):

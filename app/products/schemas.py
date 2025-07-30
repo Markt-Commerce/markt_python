@@ -1,5 +1,8 @@
 from marshmallow import Schema, fields, validate, ValidationError
 from app.libs.schemas import PaginationSchema
+from app.categories.schemas import CategorySchema
+from app.users.schemas import SellerSimpleSchema
+from app.media.schemas import ProductImageSchema
 from .models import ProductStatus
 
 
@@ -23,6 +26,9 @@ class ProductCreateSchema(Schema):
     category_ids = fields.List(fields.Int())
     tag_ids = fields.List(fields.Int())
     product_metadata = fields.Dict()
+    media_ids = fields.List(
+        fields.Int(), description="List of media IDs to link to product"
+    )
 
 
 class ProductUpdateSchema(ProductCreateSchema):
@@ -38,13 +44,15 @@ class ProductSchema(ProductCreateSchema):
     view_count = fields.Int(dump_only=True)
     average_rating = fields.Float(dump_only=True)
     review_count = fields.Int(dump_only=True)
+    categories = fields.List(fields.Nested("CategorySchema"), dump_only=True)
+    images = fields.List(fields.Nested("ProductImageSchema"), dump_only=True)
+    seller = fields.Nested("SellerSimpleSchema", dump_only=True)
 
 
 class ProductSearchSchema(Schema):
     search = fields.Str(required=False)
     min_price = fields.Float(required=False)
     max_price = fields.Float(required=False)
-    category_id = fields.Int(required=False)
     in_stock = fields.Bool(required=False)
     sort_by = fields.Str(
         required=False,

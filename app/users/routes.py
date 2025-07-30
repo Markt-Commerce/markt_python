@@ -1,3 +1,5 @@
+import logging
+
 # package imports
 from flask_smorest import Blueprint, abort
 from flask.views import MethodView
@@ -30,9 +32,12 @@ from .schemas import (
     SellerUpdateSchema,
     SettingsSchema,
     SettingsUpdateSchema,
+    RoleSwitchSchema,
 )
 from .services import AuthService, UserService, AccountService
 from .models import User
+
+logger = logging.getLogger(__name__)
 
 bp = Blueprint("users", __name__, description="User operations", url_prefix="/users")
 
@@ -176,11 +181,11 @@ class SellerProfile(MethodView):
 @bp.route("/switch-role")
 class SwitchRole(MethodView):
     @login_required
-    @bp.response(200, UserSchema)
+    @bp.response(200, RoleSwitchSchema)
     def post(self):
         try:
-            user = UserService.switch_role(current_user.id)
-            return user
+            result = UserService.switch_role(current_user.id)
+            return result
         except AuthError as e:
             abort(e.status_code, message=e.message)
 
@@ -247,9 +252,40 @@ class ProfilePictureUpload(MethodView):
     @bp.response(200, MediaSchema)
     def post(self):
         """Upload profile picture"""
-        # TODO: Integrate with media service
-        # TODO: Generate different image sizes
-        # TODO: Update all references to old picture
+        try:
+            from flask import request
+            from werkzeug.utils import secure_filename
+            from io import BytesIO
+
+            # Check if file is present
+            if "file" not in request.files:
+                abort(400, message="No file provided")
+
+            file = request.files["file"]
+            if file.filename == "":
+                abort(400, message="No file selected")
+
+            # Validate file
+            filename = secure_filename(file.filename)
+            if not filename:
+                abort(400, message="Invalid filename")
+
+            # Read file into memory
+            file_stream = BytesIO(file.read())
+            file_stream.seek(0)
+
+            # Upload profile picture
+            result = UserService.upload_profile_picture(
+                user_id=current_user.id, file_stream=file_stream, filename=filename
+            )
+
+            return result["media"]
+
+        except AuthError as e:
+            abort(e.status_code, message=e.message)
+        except Exception as e:
+            logger.error(f"Unexpected error in profile picture upload: {e}")
+            abort(500, message="Internal server error")
 
 
 @bp.route("/<user_id>/public")

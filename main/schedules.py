@@ -40,4 +40,15 @@ CELERYBEAT_SCHEDULE = {
         "schedule": crontab(hour="2", minute="0"),  # Daily at 2 AM
         "options": {"queue": "default"},
     },
+    # Media processing tasks
+    "cleanup-failed-media": {
+        "task": "app.media.tasks.cleanup_failed_media",
+        "schedule": crontab(hour="3", minute="0"),  # Daily at 3 AM
+        "options": {"queue": "media"},
+    },
+    "update-media-analytics": {
+        "task": "app.media.tasks.update_media_analytics",
+        "schedule": crontab(hour="*/4"),  # Every 4 hours
+        "options": {"queue": "analytics"},
+    },
 }

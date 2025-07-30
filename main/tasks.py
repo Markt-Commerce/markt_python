@@ -22,6 +22,7 @@ def create_celery_app(app: Flask = None) -> Celery:
         [
             "app.socials.tasks",
             "app.notifications.tasks",
+            "app.media.tasks",
             # add more task modules here
         ]
     )
@@ -30,6 +31,13 @@ def create_celery_app(app: Flask = None) -> Celery:
     from main.schedules import CELERYBEAT_SCHEDULE
 
     celery.conf.CELERYBEAT_SCHEDULE = CELERYBEAT_SCHEDULE
+
+    # Explicit task routing
+    celery.conf.task_routes = {
+        "app.media.tasks.*": {"queue": "media"},
+        "app.socials.tasks.*": {"queue": "social"},
+        "app.notifications.tasks.*": {"queue": "notifications"},
+    }
 
     return celery
 

@@ -19,7 +19,10 @@ class Category(BaseModel):
     parent = db.relationship("Category", remote_side=[id], back_populates="children")
     children = db.relationship("Category", back_populates="parent")
     products = db.relationship("ProductCategory", back_populates="category")
-    requests = db.relationship("BuyerRequest", back_populates="category")
+    posts = db.relationship("PostCategory", back_populates="category")
+    requests = db.relationship("RequestCategory", back_populates="category")
+    sellers = db.relationship("SellerCategory", back_populates="category")
+    niches = db.relationship("NicheCategory", back_populates="category")
 
     def __repr__(self):
         return f"<Category {self.name}>"
@@ -38,6 +41,60 @@ class ProductCategory(BaseModel):
 
     product = db.relationship("Product", back_populates="categories")
     category = db.relationship("Category", back_populates="products")
+
+
+class PostCategory(BaseModel):
+    __tablename__ = "post_categories"
+
+    post_id = db.Column(db.String(12), db.ForeignKey("posts.id"), primary_key=True)
+    category_id = db.Column(
+        db.Integer, db.ForeignKey("categories.id"), primary_key=True
+    )
+    is_primary = db.Column(db.Boolean, default=False)
+
+    post = db.relationship("Post", back_populates="categories")
+    category = db.relationship("Category", back_populates="posts")
+
+
+class RequestCategory(BaseModel):
+    __tablename__ = "request_categories"
+
+    request_id = db.Column(
+        db.String(12), db.ForeignKey("buyer_requests.id"), primary_key=True
+    )
+    category_id = db.Column(
+        db.Integer, db.ForeignKey("categories.id"), primary_key=True
+    )
+    is_primary = db.Column(db.Boolean, default=False)
+
+    request = db.relationship("BuyerRequest", back_populates="categories")
+    category = db.relationship("Category", back_populates="requests")
+
+
+class SellerCategory(BaseModel):
+    __tablename__ = "seller_categories"
+
+    seller_id = db.Column(db.Integer, db.ForeignKey("sellers.id"), primary_key=True)
+    category_id = db.Column(
+        db.Integer, db.ForeignKey("categories.id"), primary_key=True
+    )
+    is_primary = db.Column(db.Boolean, default=False)
+
+    seller = db.relationship("Seller", back_populates="categories")
+    category = db.relationship("Category", back_populates="sellers")
+
+
+class NicheCategory(BaseModel):
+    __tablename__ = "niche_categories"
+
+    niche_id = db.Column(db.String(12), db.ForeignKey("niches.id"), primary_key=True)
+    category_id = db.Column(
+        db.Integer, db.ForeignKey("categories.id"), primary_key=True
+    )
+    is_primary = db.Column(db.Boolean, default=False)
+
+    niche = db.relationship("Niche", back_populates="categories")
+    category = db.relationship("Category", back_populates="niches")
 
 
 class Tag(BaseModel):

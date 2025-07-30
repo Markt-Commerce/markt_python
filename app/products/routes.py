@@ -1,3 +1,5 @@
+import logging
+
 # package imports
 from flask_smorest import Blueprint, abort
 from flask.views import MethodView
@@ -26,6 +28,7 @@ from .schemas import (
     BulkProductResultSchema,
 )
 
+logger = logging.getLogger(__name__)
 
 bp = Blueprint(
     "products", __name__, description="Product operations", url_prefix="/products"
@@ -46,9 +49,7 @@ class ProductList(MethodView):
     @bp.response(201, ProductSchema)
     def post(self, product_data):
         """Create new product (for sellers)"""
-        return ProductService.create_product(
-            product_data, current_user.seller_account.id
-        )
+        return ProductService.create_product(product_data, current_user)
 
 
 @bp.route("/<product_id>")
@@ -170,6 +171,25 @@ class ShareProduct(MethodView):
         # TODO: Generate share links
         # TODO: Track shares
         # TODO: Reward system for shares
+
+
+@bp.route("/seller/my-products")
+class SellerProducts(MethodView):
+    @login_required
+    @seller_required
+    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.response(200, ProductSearchResultSchema)
+    def get(self, args):
+        """Get seller's own products"""
+        return ProductService.get_seller_products(
+            seller_id=current_user.seller_account.id,
+            page=args.get("page", 1),
+            per_page=args.get("per_page", 20),
+        )
+
+
+# Note: Product image management is now handled via the media module
+# Use /api/v1/media/products/{product_id}/images for image operations
 
 
 # -----------------------------------------------

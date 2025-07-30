@@ -22,11 +22,14 @@ from app.libs.errors import (
 )
 
 # app imports
-from .models import BuyerRequest, SellerOffer, RequestImage, RequestStatus
+from .models import BuyerRequest, SellerOffer, RequestStatus
 from app.users.models import User, Seller
 from app.products.models import Product
 from app.notifications.services import NotificationService
 from app.notifications.models import NotificationType
+from app.media.services import media_service
+from app.media.models import Media, RequestImage
+from app.categories.models import Category, RequestCategory
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +187,6 @@ class BuyerRequestService:
                 user_id=user_id,
                 title=data["title"],
                 description=data["description"],
-                category_id=data.get("category_id"),
                 budget=data.get("budget"),
                 request_metadata=data.get("metadata", {}),
                 expires_at=expires_at,
@@ -194,21 +196,49 @@ class BuyerRequestService:
             session.add(request)
             session.flush()
 
-            # Handle images if provided
-            if data.get("images"):
-                for i, image_data in enumerate(data["images"]):
-                    image = RequestImage(
+            # Handle category relationships
+            if "category_ids" in data and data["category_ids"]:
+                for idx, category_id in enumerate(data["category_ids"]):
+                    # Verify category exists
+                    category = session.query(Category).get(category_id)
+                    if not category:
+                        raise ValidationError(f"Category {category_id} not found")
+
+                    # Create request category relationship
+                    request_category = RequestCategory(
                         request_id=request.id,
-                        image_url=image_data["url"],
-                        is_primary=image_data.get(
-                            "is_primary", i == 0
-                        ),  # Use provided is_primary or default to first image
+                        category_id=category_id,
+                        is_primary=(idx == 0),  # First category is primary
                     )
-                    session.add(image)
+                    session.add(request_category)
+
+            # Handle media linking if provided
+            if "media_ids" in data and data["media_ids"]:
+                for idx, media_id in enumerate(data["media_ids"]):
+                    # Verify media exists and belongs to user
+                    media = session.query(Media).get(media_id)
+                    if not media:
+                        raise ValidationError(f"Media {media_id} not found")
+
+                    if media.user_id != user_id:
+                        raise ValidationError(
+                            f"Media {media_id} does not belong to you"
+                        )
+
+                    # Create request image relationship
+                    request_image = RequestImage(
+                        request_id=request.id,
+                        media_id=media_id,
+                        is_primary=(idx == 0),  # First image is primary
+                        sort_order=idx,
+                    )
+                    session.add(request_image)
 
             # Cache invalidation
             BuyerRequestService._invalidate_user_cache(user_id)
-            BuyerRequestService._invalidate_category_cache(data.get("category_id"))
+            if "category_ids" in data and data["category_ids"]:
+                for category_id in data["category_ids"]:
+                    BuyerRequestService._invalidate_category_cache(category_id)
 
             # Create notification for relevant sellers
             BuyerRequestService._notify_relevant_sellers(request)
@@ -226,7 +256,9 @@ class BuyerRequestService:
                 session.query(BuyerRequest)
                 .options(
                     joinedload(BuyerRequest.user),
-                    joinedload(BuyerRequest.category),
+                    joinedload(BuyerRequest.categories).joinedload(
+                        RequestCategory.category
+                    ),
                     joinedload(BuyerRequest.images),
                     joinedload(BuyerRequest.offers).joinedload(SellerOffer.seller),
                 )
@@ -824,6 +856,101 @@ class BuyerRequestService:
             )
 
             return sellers
+
+    @staticmethod
+    def add_request_image(
+        request_id: str,
+        file_stream,
+        filename: str,
+        user_id: str,
+        is_primary: bool = False,
+    ):
+        """Add image to buyer request"""
+        try:
+            from io import BytesIO
+            from app.media.models import RequestImage
+
+            # Ensure file_stream is BytesIO
+            if not isinstance(file_stream, BytesIO):
+                file_stream = BytesIO(file_stream.read())
+
+            with session_scope() as session:
+                # Verify request exists and user owns it
+                request = session.query(BuyerRequest).get(request_id)
+                if not request:
+                    raise NotFoundError("Buyer request not found")
+
+                if request.user_id != user_id:
+                    raise ForbiddenError("You can only add images to your own requests")
+
+                # 1. Upload media using updated media service (returns only media object)
+                media = media_service.upload_image(
+                    file_stream=file_stream,
+                    filename=filename,
+                    user_id=user_id,
+                    alt_text=f"Request image for {request_id}",
+                    caption="Buyer request image",
+                )
+
+                # 2. Create request image relationship
+                request_image = RequestImage(
+                    request_id=request_id, media_id=media.id, is_primary=is_primary
+                )
+
+                session.add(request_image)
+                session.flush()
+
+                return request_image
+
+        except Exception as e:
+            logger.error(f"Failed to add request image: {e}")
+            raise ValidationError(f"Failed to add request image: {str(e)}")
+
+    @staticmethod
+    def get_request_images(request_id: str):
+        """Get all images for a buyer request"""
+        with session_scope() as session:
+            from app.media.models import RequestImage
+
+            return session.query(RequestImage).filter_by(request_id=request_id).all()
+
+    @staticmethod
+    def delete_request_image(image_id: int, user_id: str):
+        """Delete a request image"""
+        try:
+            with session_scope() as session:
+                from app.media.models import RequestImage
+
+                request_image = session.query(RequestImage).get(image_id)
+                if not request_image:
+                    raise NotFoundError("Request image not found")
+
+                # Verify user owns the request
+                if request_image.request.user_id != user_id:
+                    raise ForbiddenError(
+                        "You can only delete images from your own requests"
+                    )
+
+                # Get the media object
+                media = request_image.media
+                if media:
+                    # Delete from S3 using media service
+                    success = media_service.delete_media(media)
+                    if not success:
+                        logger.warning(f"Failed to delete media {media.id} from S3")
+
+                    # Delete media object from database
+                    session.delete(media)
+
+                # Delete request image relationship
+                session.delete(request_image)
+                session.flush()
+
+                return {"success": True, "message": "Request image deleted"}
+
+        except Exception as e:
+            logger.error(f"Failed to delete request image: {e}")
+            raise ValidationError(f"Failed to delete request image: {str(e)}")
 
     # Private helper methods
     @staticmethod

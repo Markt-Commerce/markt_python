@@ -271,7 +271,7 @@ class PostList(MethodView):
     @bp.response(201, PostDetailSchema)
     def post(self, post_data):
         """Create new post (sellers only)"""
-        return PostService.create_post(current_user.seller_account.id, post_data)
+        return PostService.create_post(current_user, post_data)
 
 
 @bp.route("/posts/<post_id>")
@@ -565,3 +565,7 @@ class NicheFeed(MethodView):
         except Exception as e:
             logger.error(f"Niche feed error: {str(e)}")
             abort(500, message="Failed to get niche feed")
+
+
+# Note: Social post image management is now handled via the media module
+# Use /api/v1/media/social-posts/{post_id}/media for image operations

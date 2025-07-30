@@ -4,7 +4,8 @@ from app.libs.schemas import PaginationSchema
 from app.libs.errors import ValidationError
 
 from app.products.schemas import ProductSchema
-from app.users.schemas import UserSimpleSchema
+from app.users.schemas import UserSimpleSchema, SellerSimpleSchema
+from app.categories.schemas import CategorySchema
 
 from .models import (
     FollowType,
@@ -33,7 +34,7 @@ class NicheSchema(Schema):
     max_members = fields.Int(dump_only=True)
 
     # Metadata
-    category_id = fields.Int(allow_none=True)
+    categories = fields.List(fields.Nested("CategorySchema"), dump_only=True)
     tags = fields.List(fields.Str(), dump_only=True)
     rules = fields.List(fields.Str(), dump_only=True)
     settings = fields.Dict(dump_only=True)
@@ -67,7 +68,7 @@ class NicheCreateSchema(Schema):
     allow_seller_posts = fields.Bool(missing=True)
     require_approval = fields.Bool(missing=False)
     max_members = fields.Int(validate=validate.Range(min=1, max=100000), missing=10000)
-    category_id = fields.Int(allow_none=True)
+    category_ids = fields.List(fields.Int(), missing=[])
     tags = fields.List(fields.Str(), missing=[])
     rules = fields.List(fields.Str(), missing=[])
     settings = fields.Dict(missing={})
@@ -83,7 +84,7 @@ class NicheUpdateSchema(Schema):
     allow_seller_posts = fields.Bool()
     require_approval = fields.Bool()
     max_members = fields.Int(validate=validate.Range(min=1, max=100000))
-    category_id = fields.Int(allow_none=True)
+    category_ids = fields.List(fields.Int())
     tags = fields.List(fields.Str())
     rules = fields.List(fields.Str())
     settings = fields.Dict()
@@ -115,7 +116,7 @@ class NichePostCreateSchema(Schema):
     """Schema for creating posts in niches"""
 
     caption = fields.Str(required=False)
-    media = fields.List(fields.Nested("PostMediaSchema"), required=False)
+    social_media = fields.List(fields.Nested("SocialMediaPostSchema"), required=False)
     products = fields.List(fields.Nested("PostProductSchema"), required=False)
     status = fields.Str(
         required=False, validate=validate.OneOf(["draft", "active"]), default="draft"
@@ -149,7 +150,7 @@ class NicheSearchSchema(Schema):
     """Schema for searching niche communities"""
 
     search = fields.Str(allow_none=True)
-    category_id = fields.Int(allow_none=True)
+    category_ids = fields.List(fields.Int(), allow_none=True)
     visibility = fields.Enum(NicheVisibility, by_value=True, allow_none=True)
     page = fields.Int(validate=validate.Range(min=1), missing=1)
     per_page = fields.Int(validate=validate.Range(min=1, max=100), missing=20)
@@ -284,10 +285,8 @@ class CollectionSchema(Schema):
     user = fields.Nested("UserSimpleSchema", dump_only=True)
 
 
-class PostMediaSchema(Schema):
-    media_url = fields.Str(required=True)
-    media_type = fields.Str(validate=validate.OneOf(["image", "video"]))
-    sort_order = fields.Int()
+# Note: Media upload schemas are now in app.media.schemas
+# Use SocialMediaPostSchema from app.media.schemas for media operations
 
 
 class PostProductSchema(Schema):
@@ -296,7 +295,12 @@ class PostProductSchema(Schema):
 
 class PostCreateSchema(Schema):
     caption = fields.Str(required=False)
-    media = fields.List(fields.Nested(PostMediaSchema), required=False)
+    category_ids = fields.List(fields.Int(), required=False)
+    tags = fields.List(fields.Str(), required=False)
+    media_ids = fields.List(
+        fields.Int(), description="List of media IDs to link to post"
+    )
+    # Note: Media files can also be uploaded separately via media endpoints
     products = fields.List(fields.Nested(PostProductSchema), required=False)
     status = fields.Str(
         required=False, validate=validate.OneOf(["draft", "active"]), default="draft"
@@ -311,6 +315,9 @@ class PostSchema(Schema):
     like_count = fields.Int(dump_only=True)
     comment_count = fields.Int(dump_only=True)
     niche_context = fields.Dict(dump_only=True)
+    categories = fields.List(fields.Nested("CategorySchema"), dump_only=True)
+    social_media = fields.List(fields.Nested("SocialMediaPostSchema"), dump_only=True)
+    seller = fields.Nested("SellerSimpleSchema", dump_only=True)
 
 
 class SellerPostsSchema(Schema):
@@ -342,7 +349,7 @@ class PostStatusUpdateSchema(Schema):
 
 class PostUpdateSchema(Schema):
     caption = fields.Str(required=False)
-    media = fields.List(fields.Nested(PostMediaSchema), required=False)
+    social_media = fields.List(fields.Nested("SocialMediaPostSchema"), required=False)
     products = fields.List(fields.Nested(PostProductSchema), required=False)
 
 
@@ -356,7 +363,7 @@ class CommentUpdateSchema(Schema):
 
 
 class PostDetailSchema(PostSchema):
-    media = fields.List(fields.Nested(PostMediaSchema))
+    social_media = fields.List(fields.Nested("SocialMediaPostSchema"))
     products = fields.List(fields.Nested(PostProductSchema))
     user = fields.Nested("UserSimpleSchema")
     status = fields.Enum(PostStatus, by_value=True, dump_only=True)
@@ -423,3 +430,54 @@ class ProductReviewsSchema(Schema):
 class ReviewUpvoteSchema(Schema):
     success = fields.Bool()
     new_count = fields.Int()
+
+
+class NicheFeedInfoSchema(Schema):
+    """Schema for niche information in feed responses"""
+
+    id = fields.Str(dump_only=True)
+    name = fields.Str(dump_only=True)
+    slug = fields.Str(dump_only=True)
+    visibility = fields.Str(dump_only=True)
+    is_pinned = fields.Bool(dump_only=True)
+    is_featured = fields.Bool(dump_only=True)
+    niche_likes = fields.Int(dump_only=True)
+    niche_comments = fields.Int(dump_only=True)
+
+
+class FeedPostSchema(Schema):
+    """Schema for posts in feed responses with enhanced niche information"""
+
+    id = fields.Str(dump_only=True)
+    type = fields.Str(dump_only=True)
+    caption = fields.Str(dump_only=True)
+    seller = fields.Dict(dump_only=True)
+    media = fields.List(fields.Dict(), dump_only=True)
+    likes_count = fields.Int(dump_only=True)
+    comments_count = fields.Int(dump_only=True)
+    created_at = fields.Str(dump_only=True)
+    score = fields.Float(dump_only=True)
+    niche = fields.Nested(NicheFeedInfoSchema, dump_only=True, allow_none=True)
+
+
+class FeedProductSchema(Schema):
+    """Schema for products in feed responses"""
+
+    id = fields.Str(dump_only=True)
+    type = fields.Str(dump_only=True)
+    name = fields.Str(dump_only=True)
+    description = fields.Str(dump_only=True)
+    price = fields.Float(dump_only=True)
+    seller = fields.Dict(dump_only=True)
+    images = fields.List(fields.Dict(), dump_only=True)
+    rating = fields.Float(dump_only=True)
+    reviews_count = fields.Int(dump_only=True)
+    created_at = fields.Str(dump_only=True)
+    score = fields.Float(dump_only=True)
+
+
+class FeedResponseSchema(Schema):
+    """Schema for feed responses with mixed content types"""
+
+    items = fields.List(fields.Dict(), dump_only=True)  # Mixed post/product items
+    pagination = fields.Nested(PaginationSchema, dump_only=True)

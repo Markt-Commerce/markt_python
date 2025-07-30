@@ -29,11 +29,19 @@ from app.products.models import Product, ProductStatus
 from app.products.services import ProductService, ProductStatsService
 from app.orders.models import Order, OrderStatus, OrderItem
 from app.notifications.models import NotificationType
+from app.media.services import media_service
+from app.media.models import Media, SocialMediaPost
+from app.categories.models import (
+    ProductCategory,
+    PostCategory,
+    SellerCategory,
+    NicheCategory,
+    Category,
+)
 
 # app imports
 from .models import (
     Post,
-    PostMedia,
     PostProduct,
     Follow,
     PostLike,
@@ -98,7 +106,6 @@ class NicheService:
                 allow_seller_posts=data.get("allow_seller_posts", True),
                 require_approval=data.get("require_approval", False),
                 max_members=data.get("max_members", 10000),
-                category_id=data.get("category_id"),
                 tags=data.get("tags", []),
                 rules=data.get("rules", []),
                 settings=data.get("settings", {}),
@@ -106,6 +113,22 @@ class NicheService:
 
             session.add(niche)
             session.flush()
+
+            # Handle category relationships
+            if "category_ids" in data and data["category_ids"]:
+                for idx, category_id in enumerate(data["category_ids"]):
+                    # Verify category exists
+                    category = session.query(Category).get(category_id)
+                    if not category:
+                        raise ValidationError(f"Category {category_id} not found")
+
+                    # Create niche category relationship
+                    niche_category = NicheCategory(
+                        niche_id=niche.id,
+                        category_id=category_id,
+                        is_primary=(idx == 0),  # First category is primary
+                    )
+                    session.add(niche_category)
 
             # Add creator as owner
             membership = NicheMembership(
@@ -138,7 +161,7 @@ class NicheService:
             niche = (
                 session.query(Niche)
                 .options(
-                    joinedload(Niche.category),
+                    joinedload(Niche.categories).joinedload(NicheCategory.category),
                     joinedload(Niche.members).joinedload(NicheMembership.user),
                 )
                 .get(niche_id)
@@ -297,7 +320,9 @@ class NicheService:
                 session.query(NicheMembership)
                 .filter_by(user_id=user_id, is_active=True)
                 .options(
-                    joinedload(NicheMembership.niche).joinedload(Niche.category),
+                    joinedload(NicheMembership.niche)
+                    .joinedload(Niche.categories)
+                    .joinedload(NicheCategory.category),
                 )
                 .order_by(NicheMembership.last_activity.desc())
             )
@@ -352,8 +377,15 @@ class NicheService:
                     )
                 )
 
-            if args.get("category_id"):
-                base_query = base_query.filter(Niche.category_id == args["category_id"])
+            if args.get("category_ids"):
+                # Filter by multiple categories (OR logic)
+                category_filters = []
+                for category_id in args["category_ids"]:
+                    category_filters.append(
+                        Niche.categories.any(NicheCategory.category_id == category_id)
+                    )
+                if category_filters:
+                    base_query = base_query.filter(db.or_(*category_filters))
 
             # Order by relevance (member count, activity)
             base_query = base_query.order_by(
@@ -601,7 +633,7 @@ class NicheService:
                     joinedload(NichePost.post)
                     .joinedload(Post.seller)
                     .joinedload(Seller.user),
-                    joinedload(NichePost.post).joinedload(Post.media),
+                    joinedload(NichePost.post).joinedload(Post.social_media),
                     joinedload(NichePost.post)
                     .joinedload(Post.tagged_products)
                     .joinedload(PostProduct.product),
@@ -802,8 +834,24 @@ class NicheService:
             if data.get("max_members"):
                 niche.max_members = data["max_members"]
 
-            if data.get("category_id") is not None:
-                niche.category_id = data["category_id"]
+            if data.get("category_ids") is not None:
+                # Remove existing category relationships
+                session.query(NicheCategory).filter_by(niche_id=niche_id).delete()
+
+                # Add new category relationships
+                for idx, category_id in enumerate(data["category_ids"]):
+                    # Verify category exists
+                    category = session.query(Category).get(category_id)
+                    if not category:
+                        raise ValidationError(f"Category {category_id} not found")
+
+                    # Create niche category relationship
+                    niche_category = NicheCategory(
+                        niche_id=niche_id,
+                        category_id=category_id,
+                        is_primary=(idx == 0),  # First category is primary
+                    )
+                    session.add(niche_category)
 
             if data.get("tags") is not None:
                 niche.tags = data["tags"]
@@ -849,7 +897,8 @@ class NicheService:
 
 class PostService:
     @staticmethod
-    def create_post(seller_id, post_data):
+    def create_post(current_user, post_data):
+        seller_id = current_user.seller_account.id
         try:
             with session_scope() as session:
                 # Verify seller exists
@@ -861,21 +910,53 @@ class PostService:
                 status = PostStatus(post_data.get("status", "draft"))
 
                 post = Post(
-                    seller_id=seller_id, caption=post_data.get("caption"), status=status
+                    seller_id=seller_id,
+                    caption=post_data.get("caption"),
+                    status=status,
+                    tags=post_data.get("tags", []),
                 )
                 session.add(post)
                 session.flush()
 
-                # Add media if provided
-                if "media" in post_data:
-                    for media_data in post_data["media"]:
-                        media = PostMedia(
+                # Handle category relationships
+                if "category_ids" in post_data and post_data["category_ids"]:
+                    for idx, category_id in enumerate(post_data["category_ids"]):
+                        # Verify category exists
+                        category = session.query(Category).get(category_id)
+                        if not category:
+                            raise ValidationError(f"Category {category_id} not found")
+
+                        # Create post category relationship
+                        post_category = PostCategory(
                             post_id=post.id,
-                            media_url=media_data["media_url"],
-                            media_type=media_data["media_type"],
-                            sort_order=media_data.get("sort_order", 0),
+                            category_id=category_id,
+                            is_primary=(idx == 0),  # First category is primary
                         )
-                        session.add(media)
+                        session.add(post_category)
+
+                # Handle media linking if provided
+                if "media_ids" in post_data and post_data["media_ids"]:
+                    for idx, media_id in enumerate(post_data["media_ids"]):
+                        # Verify media exists and belongs to seller
+                        media = session.query(Media).get(media_id)
+                        if not media:
+                            raise ValidationError(f"Media {media_id} not found")
+
+                        if media.user_id != current_user.id:
+                            raise ValidationError(
+                                f"Media {media_id} does not belong to you"
+                            )
+
+                        # Create social media post relationship
+                        social_post = SocialMediaPost(
+                            post_id=post.id,
+                            media_id=media_id,
+                            sort_order=idx,
+                            platform=None,  # Will be set when posting to specific platforms
+                            post_type=None,  # Will be set when posting to specific platforms
+                            aspect_ratio=None,
+                        )
+                        session.add(social_post)
 
                 # Add tagged products if provided
                 if "products" in post_data:
@@ -911,7 +992,7 @@ class PostService:
                     session.query(Post)
                     .options(
                         joinedload(Post.seller).joinedload(Seller.user),
-                        joinedload(Post.media),
+                        joinedload(Post.social_media),
                         joinedload(Post.tagged_products).joinedload(
                             PostProduct.product
                         ),
@@ -935,7 +1016,7 @@ class PostService:
                     session.query(Post)
                     .options(
                         joinedload(Post.seller).joinedload(Seller.user),
-                        joinedload(Post.media),
+                        joinedload(Post.social_media),
                         joinedload(Post.tagged_products).joinedload(
                             PostProduct.product
                         ),
@@ -991,7 +1072,7 @@ class PostService:
                 session.query(Post)
                 .filter(Post.seller_id == seller_id, Post.status == PostStatus.ACTIVE)
                 .options(
-                    joinedload(Post.media),
+                    joinedload(Post.social_media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
                     # Add these to load the relationships needed for counting
                     joinedload(Post.likes),
@@ -1094,19 +1175,24 @@ class PostService:
                     post.caption = update_data["caption"]
 
                 # Handle media updates
-                if "media" in update_data:
-                    # Clear existing media
-                    session.query(PostMedia).filter_by(post_id=post_id).delete()
+                if "media_files" in update_data:
+                    # Clear existing social media posts
+                    from app.media.models import SocialMediaPost
+
+                    session.query(SocialMediaPost).filter_by(post_id=post_id).delete()
 
                     # Add new media
-                    for media_data in update_data["media"]:
-                        media = PostMedia(
-                            post_id=post.id,
-                            media_url=media_data["media_url"],
-                            media_type=media_data["media_type"],
-                            sort_order=media_data.get("sort_order", 0),
-                        )
-                        session.add(media)
+                    for media_data in update_data["media_files"]:
+                        if "media_id" in media_data:
+                            social_post = SocialMediaPost(
+                                post_id=post.id,
+                                media_id=media_data["media_id"],
+                                platform=media_data.get("platform"),
+                                post_type=media_data.get("post_type"),
+                                sort_order=media_data.get("sort_order", 0),
+                                optimized_for_platform=True,
+                            )
+                            session.add(social_post)
 
                 # Handle product updates
                 if "products" in update_data:
@@ -1182,7 +1268,7 @@ class PostService:
                 session.query(Post)
                 .filter(Post.seller_id == seller_id, Post.status == PostStatus.DRAFT)
                 .options(
-                    joinedload(Post.media),
+                    joinedload(Post.social_media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
                 )
             )
@@ -1206,7 +1292,7 @@ class PostService:
                 session.query(Post)
                 .filter(Post.seller_id == seller_id, Post.status == PostStatus.ARCHIVED)
                 .options(
-                    joinedload(Post.media),
+                    joinedload(Post.social_media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
                 )
             )
@@ -1336,7 +1422,7 @@ class PostService:
                 .filter(Post.status == PostStatus.ACTIVE)
                 .options(
                     joinedload(Post.seller).joinedload(Seller.user),
-                    joinedload(Post.media),
+                    joinedload(Post.social_media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
                     joinedload(Post.likes),
                     joinedload(Post.comments),
@@ -1522,6 +1608,141 @@ class PostService:
         except Exception as e:
             logger.error(f"Error checking if post exists: {e}")
             return False
+
+    @staticmethod
+    def add_post_media(
+        post_id: str,
+        file_stream,
+        filename: str,
+        user_id: str,
+        platform: str = None,
+        post_type: str = None,
+        aspect_ratio: str = None,
+    ):
+        """Add media to a social media post"""
+        try:
+            from io import BytesIO
+            from app.media.models import SocialMediaPost
+
+            # Ensure file_stream is BytesIO
+            if not isinstance(file_stream, BytesIO):
+                file_stream = BytesIO(file_stream.read())
+
+            with session_scope() as session:
+                # Verify post exists and user owns it
+                post = session.query(Post).get(post_id)
+                if not post:
+                    raise NotFoundError("Post not found")
+
+                if post.seller.user_id != user_id:
+                    raise ForbiddenError("You can only add media to your own posts")
+
+                # 1. Upload media using updated media service (returns only media object)
+                media = media_service.upload_image(
+                    file_stream=file_stream,
+                    filename=filename,
+                    user_id=user_id,
+                    alt_text=f"Post media for {post_id}",
+                    caption="Social media post image",
+                )
+
+                # 2. Create social media post relationship
+                social_post = SocialMediaPost(
+                    post_id=post_id,
+                    media_id=media.id,
+                    platform=platform,
+                    post_type=post_type,
+                    aspect_ratio=aspect_ratio,
+                    optimized_for_platform=True,
+                )
+
+                session.add(social_post)
+                session.flush()
+
+                return social_post
+
+        except Exception as e:
+            logger.error(f"Failed to add post media: {e}")
+            raise ValidationError(f"Failed to add post media: {str(e)}")
+
+    @staticmethod
+    def get_post_media(post_id: str):
+        """Get all media for a social media post"""
+        with session_scope() as session:
+            from app.media.models import SocialMediaPost
+
+            return (
+                session.query(SocialMediaPost)
+                .filter_by(post_id=post_id)
+                .order_by(SocialMediaPost.sort_order)
+                .all()
+            )
+
+    @staticmethod
+    def delete_post_media(media_id: int, user_id: str):
+        """Delete media from a social media post"""
+        try:
+            with session_scope() as session:
+                from app.media.models import SocialMediaPost
+
+                social_post = session.query(SocialMediaPost).get(media_id)
+                if not social_post:
+                    raise NotFoundError("Post media not found")
+
+                # Verify user owns the post
+                if social_post.post.seller.user_id != user_id:
+                    raise ForbiddenError(
+                        "You can only delete media from your own posts"
+                    )
+
+                # Get the media object
+                media = social_post.media
+                if media:
+                    # Delete from S3 using media service
+                    success = media_service.delete_media(media)
+                    if not success:
+                        logger.warning(f"Failed to delete media {media.id} from S3")
+
+                    # Delete media object from database
+                    session.delete(media)
+
+                # Delete social media post relationship
+                session.delete(social_post)
+                session.flush()
+
+                return {"success": True, "message": "Post media deleted"}
+
+        except Exception as e:
+            logger.error(f"Failed to delete post media: {e}")
+            raise ValidationError(f"Failed to delete post media: {str(e)}")
+
+    @staticmethod
+    def optimize_post_for_social_media(post_id: str, platform: str, post_type: str):
+        """Get optimized media URLs for social media platforms"""
+        with session_scope() as session:
+            from app.media.models import SocialMediaPost
+
+            social_posts = (
+                session.query(SocialMediaPost).filter_by(post_id=post_id).all()
+            )
+
+            optimized_media = []
+            for social_post in social_posts:
+                if social_post.media:
+                    result = media_service.optimize_for_social_media(
+                        media=social_post.media, platform=platform, post_type=post_type
+                    )
+                    optimized_media.append(
+                        {
+                            "media_id": social_post.media.id,
+                            "original_url": result.get("original"),
+                            "optimized_url": result.get("optimized"),
+                            "platform": platform,
+                            "post_type": post_type,
+                        }
+                    )
+
+            return optimized_media
 
 
 class ProductSocialService:
@@ -1845,7 +2066,9 @@ class FeedService:
             # Check cache first
             cached_feed = FeedService._get_cached_feed(user_id, feed_type)
             if cached_feed and not kwargs.get("force_refresh"):
-                return FeedService._paginate_feed(cached_feed, page, per_page)
+                # Hydrate cached items before pagination
+                hydrated_items = FeedService._hydrate_cached_items(cached_feed)
+                return FeedService._paginate_feed(hydrated_items, page, per_page)
 
             # Generate fresh feed
             feed_items = FeedService._generate_fresh_feed(user_id, feed_type, **kwargs)
@@ -1853,7 +2076,9 @@ class FeedService:
             # Cache the feed
             FeedService._cache_feed(user_id, feed_items, feed_type)
 
-            return FeedService._paginate_feed(feed_items, page, per_page)
+            # Hydrate and paginate fresh feed
+            hydrated_items = FeedService._hydrate_cached_items(feed_items)
+            return FeedService._paginate_feed(hydrated_items, page, per_page)
 
         except Exception as e:
             logger.error(f"Error getting feed for user {user_id}: {str(e)}")
@@ -1870,9 +2095,13 @@ class FeedService:
         try:
             cached = redis_client.get(cache_key)
             if cached:
-                return cached
+                import json
+
+                return json.loads(cached)
         except RedisError as e:
             logger.warning(f"Redis error getting cached feed: {str(e)}")
+        except Exception as e:
+            logger.warning(f"Error deserializing cached feed: {str(e)}")
 
         return None
 
@@ -1916,10 +2145,10 @@ class FeedService:
                         session.query(Post)
                         .options(
                             joinedload(Post.seller).joinedload(Seller.user),
-                            joinedload(Post.media),
+                            joinedload(Post.social_media),
                             joinedload(Post.likes),
                             joinedload(Post.comments),
-                            joinedload(Post.niche_post).joinedload(NichePost.niche),
+                            joinedload(Post.niche_posts).joinedload(NichePost.niche),
                         )
                         .filter(
                             Post.id.in_(post_ids),
@@ -1934,7 +2163,7 @@ class FeedService:
                         session.query(Product)
                         .options(
                             joinedload(Product.seller).joinedload(Seller.user),
-                            joinedload(Product.media),
+                            joinedload(Product.images),
                             joinedload(Product.reviews),
                         )
                         .filter(
@@ -1952,10 +2181,16 @@ class FeedService:
             hydrated_items = []
 
             for item in cached_items:
+                # Handle different item formats
                 if isinstance(item, dict):
                     item_id = item.get("id")
                     score = item.get("score", 0)
+                elif isinstance(item, str):
+                    # Handle string items (legacy format)
+                    item_id = item
+                    score = 0
                 else:
+                    # Handle bytes or other types
                     item_id = str(item)
                     score = 0
 
@@ -1973,7 +2208,7 @@ class FeedService:
                             {
                                 "id": post.id,
                                 "type": "post",
-                                "content": post.content,
+                                "caption": post.caption,
                                 "seller": {
                                     "id": post.seller.id,
                                     "shop_name": post.seller.shop_name,
@@ -1984,14 +2219,35 @@ class FeedService:
                                     },
                                 },
                                 "media": [
-                                    {"url": m.url, "type": m.type} for m in post.media
+                                    {
+                                        "url": m.media.get_url(),
+                                        "type": m.media.media_type.value,
+                                        "platform": m.platform,
+                                        "post_type": m.post_type,
+                                        "aspect_ratio": m.aspect_ratio,
+                                        "optimized_for_platform": m.optimized_for_platform,
+                                    }
+                                    for m in post.social_media
                                 ],
                                 "likes_count": len(post.likes),
                                 "comments_count": len(post.comments),
                                 "created_at": post.created_at.isoformat(),
                                 "score": score,
-                                "niche": post.niche_post.niche.name
-                                if post.niche_post
+                                "niche": {
+                                    "id": post.niche_posts[0].niche.id,
+                                    "name": post.niche_posts[0].niche.name,
+                                    "slug": post.niche_posts[0].niche.slug,
+                                    "visibility": post.niche_posts[
+                                        0
+                                    ].niche.visibility.value,
+                                    "is_pinned": post.niche_posts[0].is_pinned,
+                                    "is_featured": post.niche_posts[0].is_featured,
+                                    "niche_likes": post.niche_posts[0].niche_likes,
+                                    "niche_comments": post.niche_posts[
+                                        0
+                                    ].niche_comments,
+                                }
+                                if post.niche_posts
                                 else None,
                             }
                         )
@@ -2015,11 +2271,17 @@ class FeedService:
                                         "profile_picture": product.seller.user.profile_picture,
                                     },
                                 },
-                                "media": [
-                                    {"url": m.url, "type": m.type}
-                                    for m in product.media
+                                "images": [
+                                    {
+                                        "url": m.media.get_url(),
+                                        "type": m.media.media_type.value,
+                                        "sort_order": m.sort_order,
+                                        "is_featured": m.is_featured,
+                                        "alt_text": m.alt_text,
+                                    }
+                                    for m in product.images
                                 ],
-                                "rating": product.rating,
+                                "rating": product.average_rating,
                                 "reviews_count": len(product.reviews),
                                 "created_at": product.created_at.isoformat(),
                                 "score": score,
@@ -2047,6 +2309,10 @@ class FeedService:
                 followed_items = FeedService._get_followed_content(user_id)
                 feed_items.extend(followed_items)
 
+                # Get content from engaged sellers (NEW!)
+                engaged_items = FeedService._get_engaged_seller_content(user_id)
+                feed_items.extend(engaged_items)
+
                 # Get trending content based on user interests
                 trending_items = FeedService._get_trending_by_interests(
                     user_id, user_interests
@@ -2068,6 +2334,31 @@ class FeedService:
                 # Only followed content
                 followed_items = FeedService._get_followed_content(user_id)
                 feed_items.extend(followed_items)
+
+            elif feed_type == "discover":
+                # --- Discover Feed Implementation ---
+                # 1. Get trending content (platform-wide, not just user interests)
+                trending_items = FeedService._get_trending_content()
+                # 2. Get diverse content based on _get_discover_content (using broad preferences)
+                user_preferences = FeedService._get_user_preferences(user_id)
+                discover_items = FeedService._get_discover_content(
+                    user_id, user_preferences
+                )
+                # 3. Optionally, add more exploratory content (e.g., random/new sellers/products)
+                # For now, combine trending and discover, deduplicate by id
+                all_items = trending_items + discover_items
+                seen_ids = set()
+                unique_items = []
+                for item in all_items:
+                    if item["id"] not in seen_ids:
+                        unique_items.append(item)
+                        seen_ids.add(item["id"])
+                # 4. Apply lighter personalization (time decay, diversity/freshness)
+                scored_items = FeedService._apply_personalization_scoring(
+                    unique_items, user_id
+                )
+                final_items = FeedService._apply_diversity_and_freshness(scored_items)
+                return final_items
 
             elif feed_type.startswith("niche:"):
                 # Niche-specific content
@@ -2097,8 +2388,12 @@ class FeedService:
         try:
             cached = redis_client.get(cache_key)
             if cached:
-                return cached
+                import json
+
+                return json.loads(cached)
         except RedisError:
+            pass
+        except Exception:
             pass
 
         # Calculate user interests based on behavior
@@ -2106,8 +2401,12 @@ class FeedService:
 
         # Cache for 1 hour
         try:
-            redis_client.setex(cache_key, 3600, interests)
+            import json
+
+            redis_client.setex(cache_key, 3600, json.dumps(interests))
         except RedisError:
+            pass
+        except Exception:
             pass
 
         return interests
@@ -2118,8 +2417,9 @@ class FeedService:
         with session_scope() as session:
             # Get user's liked posts categories
             liked_categories = (
-                session.query(Post.category)
-                .join(PostLike)
+                session.query(PostCategory.category_id)
+                .join(Post, Post.id == PostCategory.post_id)
+                .join(PostLike, Post.id == PostLike.post_id)
                 .filter(PostLike.user_id == user_id)
                 .distinct()
                 .all()
@@ -2127,8 +2427,9 @@ class FeedService:
 
             # Get user's viewed products categories
             viewed_categories = (
-                session.query(Product.category_id)
-                .join(ProductView)
+                session.query(ProductCategory.category_id)
+                .join(Product, Product.id == ProductCategory.product_id)
+                .join(ProductView, Product.id == ProductView.product_id)
                 .filter(ProductView.user_id == user_id)
                 .distinct()
                 .all()
@@ -2136,8 +2437,9 @@ class FeedService:
 
             # Get user's followed sellers categories
             followed_categories = (
-                session.query(Seller.category)
-                .join(Follow)
+                session.query(SellerCategory.category_id)
+                .join(Seller, Seller.id == SellerCategory.seller_id)
+                .join(Follow, Seller.user_id == Follow.followee_id)
                 .filter(Follow.follower_id == user_id)
                 .distinct()
                 .all()
@@ -2146,14 +2448,17 @@ class FeedService:
             # Combine and weight interests
             interests = {}
 
-            for (category,) in liked_categories:
-                interests[category] = interests.get(category, 0) + 3
+            for (category_id,) in liked_categories:
+                if category_id:  # Only add if category_id is not None
+                    interests[category_id] = interests.get(category_id, 0) + 3
 
             for (category_id,) in viewed_categories:
-                interests[category_id] = interests.get(category_id, 0) + 2
+                if category_id:  # Only add if category_id is not None
+                    interests[category_id] = interests.get(category_id, 0) + 2
 
             for (category,) in followed_categories:
-                interests[category] = interests.get(category, 0) + 4
+                if category:  # Only add if category is not None
+                    interests[category] = interests.get(category, 0) + 4
 
             return interests
 
@@ -2165,8 +2470,12 @@ class FeedService:
         try:
             cached = redis_client.get(cache_key)
             if cached:
-                return cached
+                import json
+
+                return json.loads(cached)
         except RedisError:
+            pass
+        except Exception:
             pass
 
         # Calculate preferences based on user behavior
@@ -2174,8 +2483,12 @@ class FeedService:
 
         # Cache for 2 hours
         try:
-            redis_client.setex(cache_key, 7200, preferences)
+            import json
+
+            redis_client.setex(cache_key, 7200, json.dumps(preferences))
         except RedisError:
+            pass
+        except Exception:
             pass
 
         return preferences
@@ -2227,16 +2540,38 @@ class FeedService:
             # Calculate category preferences
             category_engagement = {}
             for like in recent_likes:
-                if like.post.category:
-                    category_engagement[like.post.category] = (
-                        category_engagement.get(like.post.category, 0) + 1
+                # Get post with categories loaded
+                post = (
+                    session.query(Post)
+                    .options(
+                        joinedload(Post.categories).joinedload(PostCategory.category)
                     )
+                    .get(like.post_id)
+                )
+                if post and post.categories:
+                    for post_category in post.categories:
+                        category_id = post_category.category_id
+                        category_engagement[category_id] = (
+                            category_engagement.get(category_id, 0) + 1
+                        )
 
             for view in recent_views:
-                if view.product.category_id:
-                    category_engagement[view.product.category_id] = (
-                        category_engagement.get(view.product.category_id, 0) + 1
+                # Get product with categories loaded
+                product = (
+                    session.query(Product)
+                    .options(
+                        joinedload(Product.categories).joinedload(
+                            ProductCategory.category
+                        )
                     )
+                    .get(view.product_id)
+                )
+                if product and product.categories:
+                    for product_category in product.categories:
+                        category_id = product_category.category_id
+                        category_engagement[category_id] = (
+                            category_engagement.get(category_id, 0) + 1
+                        )
 
             preferences["category_preferences"] = category_engagement
 
@@ -2264,6 +2599,9 @@ class FeedService:
             # Get recent posts from followed sellers
             posts = (
                 session.query(Post)
+                .options(
+                    joinedload(Post.niche_posts).joinedload(NichePost.niche),
+                )
                 .filter(
                     Post.seller_id.in_(followed_seller_ids),
                     Post.status == PostStatus.ACTIVE,
@@ -2272,6 +2610,9 @@ class FeedService:
                 .limit(50)
                 .all()
             )
+
+            # Filter posts based on niche visibility
+            posts = FeedService._filter_posts_by_niche_visibility(posts, user_id)
 
             # Get recent products from followed sellers
             products = (
@@ -2339,16 +2680,26 @@ class FeedService:
 
             # Check if post category matches user interests
             with session_scope() as session:
-                post = session.query(Post).filter(Post.id == post_id).first()
-                if post and post.category in interests:
-                    filtered_items.append(
-                        {
-                            "id": post_id,
-                            "type": "post",
-                            "score": score,
-                            "created_at": post.created_at,
-                        }
+                post = (
+                    session.query(Post)
+                    .options(
+                        joinedload(Post.categories).joinedload(PostCategory.category)
                     )
+                    .filter(Post.id == post_id)
+                    .first()
+                )
+                if post and post.categories:
+                    # Check if any of the post's categories match user interests
+                    post_category_ids = [pc.category_id for pc in post.categories]
+                    if any(cat_id in interests for cat_id in post_category_ids):
+                        filtered_items.append(
+                            {
+                                "id": post_id,
+                                "type": "post",
+                                "score": score,
+                                "created_at": post.created_at,
+                            }
+                        )
 
         # Process trending products
         for product_id, score in trending_products:
@@ -2358,62 +2709,80 @@ class FeedService:
             # Check if product category matches user interests
             with session_scope() as session:
                 product = (
-                    session.query(Product).filter(Product.id == product_id).first()
-                )
-                if product and product.category_id in interests:
-                    filtered_items.append(
-                        {
-                            "id": product_id,
-                            "type": "product",
-                            "score": score,
-                            "created_at": product.created_at,
-                        }
+                    session.query(Product)
+                    .options(
+                        joinedload(Product.categories).joinedload(
+                            ProductCategory.category
+                        )
                     )
+                    .filter(Product.id == product_id)
+                    .first()
+                )
+                if product and product.categories:
+                    # Check if any of the product's categories match user interests
+                    product_category_ids = [pc.category_id for pc in product.categories]
+                    if any(cat_id in interests for cat_id in product_category_ids):
+                        filtered_items.append(
+                            {
+                                "id": product_id,
+                                "type": "product",
+                                "score": score,
+                                "created_at": product.created_at,
+                            }
+                        )
 
         return filtered_items
 
     @staticmethod
     def _get_discover_content(user_id, preferences):
-        """Get discovery content based on user preferences"""
+        """Get discovery content based on user preferences. All returned items must be dicts with 'id', 'type', 'score', and 'created_at'."""
         with session_scope() as session:
-            # Get content that matches user preferences
             discover_items = []
 
             # Get posts from categories user might like
+            posts = []
             if preferences.get("category_preferences"):
                 top_categories = sorted(
                     preferences["category_preferences"].items(),
                     key=lambda x: x[1],
                     reverse=True,
                 )[:5]
-
                 category_ids = [cat[0] for cat in top_categories]
-
                 posts = (
                     session.query(Post)
+                    .join(PostCategory)
+                    .options(
+                        joinedload(Post.niche_posts).joinedload(NichePost.niche),
+                    )
                     .filter(
-                        Post.category.in_(category_ids),
+                        PostCategory.category_id.in_(category_ids),
                         Post.status == PostStatus.ACTIVE,
                     )
                     .order_by(Post.created_at.desc())
                     .limit(20)
                     .all()
                 )
+                posts = FeedService._filter_posts_by_niche_visibility(posts, user_id)
 
-                for post in posts:
-                    score = FeedService._calculate_post_score(post, user_id)
-                    discover_items.append(
-                        {
-                            "id": post.id,
-                            "type": "post",
-                            "score": score,
-                            "created_at": post.created_at,
-                        }
-                    )
+            for post in posts:
+                score = (
+                    FeedService._calculate_post_score(post, user_id)
+                    if hasattr(FeedService, "_calculate_post_score")
+                    else 1
+                )
+                discover_items.append(
+                    {
+                        "id": post.id,
+                        "type": "post",
+                        "score": score,
+                        "created_at": post.created_at
+                        if hasattr(post, "created_at")
+                        else datetime.utcnow(),
+                    }
+                )
 
             # Get products in user's price range
             price_range = preferences.get("price_range", {"min": 0, "max": 1000})
-
             products = (
                 session.query(Product)
                 .filter(
@@ -2424,15 +2793,20 @@ class FeedService:
                 .limit(20)
                 .all()
             )
-
             for product in products:
-                score = FeedService._calculate_product_score(product, user_id)
+                score = (
+                    FeedService._calculate_product_score(product, user_id)
+                    if hasattr(FeedService, "_calculate_product_score")
+                    else 1
+                )
                 discover_items.append(
                     {
                         "id": product.id,
                         "type": "product",
                         "score": score,
-                        "created_at": product.created_at,
+                        "created_at": product.created_at
+                        if hasattr(product, "created_at")
+                        else datetime.utcnow(),
                     }
                 )
 
@@ -2440,61 +2814,51 @@ class FeedService:
 
     @staticmethod
     def _apply_personalization_scoring(items, user_id):
-        """Apply personalized scoring to feed items"""
+        """Apply personalized scoring to feed items. Handles missing 'created_at' gracefully."""
         for item in items:
-            if item["type"] == "post":
-                # Enhance post score with personalization
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "post":
                 with session_scope() as session:
                     post = session.query(Post).filter(Post.id == item["id"]).first()
                     if post:
-                        # Check if from followed seller
                         is_followed = FeedService._is_from_followed_seller(
                             post, user_id
                         )
                         if is_followed:
                             item["score"] *= 1.5
-
-                        # Check if matches user interests
                         matches_interests = FeedService._matches_user_interests(
                             post, user_id
                         )
                         if matches_interests:
                             item["score"] *= 1.3
-
-                        # Time decay
-                        time_decay = FeedService._calculate_time_decay(
-                            item["created_at"]
+                        created_at = item.get("created_at") or getattr(
+                            post, "created_at", datetime.utcnow()
                         )
+                        time_decay = FeedService._calculate_time_decay(created_at)
                         item["score"] *= time_decay
-
-            elif item["type"] == "product":
-                # Enhance product score with personalization
+            elif item.get("type") == "product":
                 with session_scope() as session:
                     product = (
                         session.query(Product).filter(Product.id == item["id"]).first()
                     )
                     if product:
-                        # Check if matches user preferences
                         matches_preferences = FeedService._matches_user_preferences(
                             product, user_id
                         )
                         if matches_preferences:
                             item["score"] *= 1.4
-
-                        # Time decay
-                        time_decay = FeedService._calculate_time_decay(
-                            item["created_at"]
+                        created_at = item.get("created_at") or getattr(
+                            product, "created_at", datetime.utcnow()
                         )
+                        time_decay = FeedService._calculate_time_decay(created_at)
                         item["score"] *= time_decay
-
         return items
 
     @staticmethod
     def _calculate_time_decay(created_at):
         """Calculate time decay factor for content freshness"""
         if isinstance(created_at, str):
-            from datetime import datetime
-
             created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
 
         age_hours = (datetime.utcnow() - created_at).total_seconds() / 3600
@@ -2574,6 +2938,10 @@ class FeedService:
                     }
                 )
 
+            # If no trending content, get recent content from database
+            if not feed_items:
+                feed_items = FeedService._get_recent_content_fallback()
+
             # Hydrate and paginate
             hydrated_items = FeedService._hydrate_cached_items(feed_items)
             return FeedService._paginate_feed(hydrated_items, page, per_page)
@@ -2586,6 +2954,67 @@ class FeedService:
             }
 
     @staticmethod
+    def _get_recent_content_fallback():
+        """Get recent content from database as fallback"""
+        try:
+            with session_scope() as session:
+                # Get recent posts
+                recent_posts = (
+                    session.query(Post)
+                    .options(
+                        joinedload(Post.niche_posts).joinedload(NichePost.niche),
+                    )
+                    .filter(Post.status == PostStatus.ACTIVE)
+                    .order_by(Post.created_at.desc())
+                    .limit(20)
+                    .all()
+                )
+
+                # Filter posts based on niche visibility (for anonymous users, only public niches)
+                recent_posts = FeedService._filter_posts_by_niche_visibility(
+                    recent_posts, None
+                )
+
+                # Get recent products
+                recent_products = (
+                    session.query(Product)
+                    .filter(Product.status == Product.Status.ACTIVE)
+                    .order_by(Product.created_at.desc())
+                    .limit(20)
+                    .all()
+                )
+
+                feed_items = []
+
+                # Add posts
+                for post in recent_posts:
+                    feed_items.append(
+                        {
+                            "id": post.id,
+                            "type": "post",
+                            "score": 10,  # Default score
+                            "created_at": post.created_at,
+                        }
+                    )
+
+                # Add products
+                for product in recent_products:
+                    feed_items.append(
+                        {
+                            "id": product.id,
+                            "type": "product",
+                            "score": 10,  # Default score
+                            "created_at": product.created_at,
+                        }
+                    )
+
+                return feed_items
+
+        except Exception as e:
+            logger.error(f"Recent content fallback failed: {str(e)}")
+            return []
+
+    @staticmethod
     def _cache_feed(user_id, feed_items, feed_type="personalized"):
         """Cache feed with user-specific key and metadata"""
         cache_key = FeedService.CACHE_KEYS["user_feed"].format(
@@ -2593,8 +3022,30 @@ class FeedService:
         )
 
         try:
-            # Cache feed items
-            redis_client.setex(cache_key, 1800, feed_items)  # 30 minutes
+            # Convert feed items to JSON-serializable format
+            serializable_items = []
+            for item in feed_items:
+                # Debug logging for problematic items
+                if not isinstance(item, dict):
+                    logger.warning(
+                        f"Non-dict item in feed_items: {type(item)} - {item}"
+                    )
+                    continue
+
+                serializable_item = {
+                    "id": item.get("id"),
+                    "type": item.get("type"),
+                    "score": item.get("score", 0),
+                    "created_at": item.get("created_at").isoformat()
+                    if item.get("created_at")
+                    else None,
+                }
+                serializable_items.append(serializable_item)
+
+            # Cache feed items as JSON string
+            import json
+
+            redis_client.setex(cache_key, 1800, json.dumps(serializable_items))
 
             # Cache metadata
             metadata_key = FeedService.CACHE_KEYS["feed_metadata"].format(
@@ -2606,10 +3057,17 @@ class FeedService:
                 "item_count": len(feed_items),
                 "cache_duration": 1800,
             }
-            redis_client.setex(metadata_key, 1800, metadata)
+            redis_client.setex(metadata_key, 1800, json.dumps(metadata))
 
         except RedisError as e:
             logger.warning(f"Failed to cache feed for user {user_id}: {str(e)}")
+        except Exception as e:
+            logger.warning(f"Failed to serialize feed for user {user_id}: {str(e)}")
+            logger.warning(f"Feed items type: {type(feed_items)}")
+            if isinstance(feed_items, list):
+                logger.warning(f"Feed items length: {len(feed_items)}")
+                for i, item in enumerate(feed_items[:3]):  # Log first 3 items
+                    logger.warning(f"Item {i} type: {type(item)}, value: {item}")
 
     @staticmethod
     def _paginate_feed(feed_items, page, per_page):
@@ -2664,7 +3122,12 @@ class FeedService:
     def _matches_user_interests(post, user_id):
         """Check if post matches user interests"""
         user_interests = FeedService._get_user_interests(user_id)
-        return post.category in user_interests if post.category else False
+        if not post.categories:
+            return False
+
+        # Check if any of the post's categories match user interests
+        post_category_ids = [pc.category_id for pc in post.categories]
+        return any(cat_id in user_interests for cat_id in post_category_ids)
 
     @staticmethod
     def _matches_user_preferences(product, user_id):
@@ -2678,8 +3141,10 @@ class FeedService:
 
         # Check category preferences
         category_preferences = user_preferences.get("category_preferences", {})
-        if product.category_id in category_preferences:
-            return True
+        if product.categories:
+            product_category_ids = [pc.category_id for pc in product.categories]
+            if any(cat_id in category_preferences for cat_id in product_category_ids):
+                return True
 
         return False
 
@@ -2836,9 +3301,9 @@ class FeedService:
         score += math.log1p(len(product.reviews)) * 1.5
 
         # 3. Rating quality
-        if product.rating and product.rating >= 4:
+        if product.average_rating and product.average_rating >= 4:
             score += 10
-        elif product.rating and product.rating >= 3:
+        elif product.average_rating and product.average_rating >= 3:
             score += 5
 
         # 4. Seller reputation
@@ -2850,6 +3315,123 @@ class FeedService:
             score *= 1.5
 
         return score
+
+    @staticmethod
+    def _get_engaged_seller_content(user_id):
+        """Get content from sellers the user has previously engaged with (liked posts)"""
+        with session_scope() as session:
+            # Get sellers whose posts the user has liked
+            engaged_seller_ids = (
+                session.query(Post.seller_id)
+                .join(PostLike, Post.id == PostLike.post_id)
+                .filter(PostLike.user_id == user_id)
+                .distinct()
+                .all()
+            )
+
+            engaged_seller_ids = [seller_id[0] for seller_id in engaged_seller_ids]
+
+            if not engaged_seller_ids:
+                return []
+
+            # Get recent posts from engaged sellers
+            posts = (
+                session.query(Post)
+                .options(
+                    joinedload(Post.niche_posts).joinedload(NichePost.niche),
+                )
+                .filter(
+                    Post.seller_id.in_(engaged_seller_ids),
+                    Post.status == PostStatus.ACTIVE,
+                )
+                .order_by(Post.created_at.desc())
+                .limit(30)
+                .all()
+            )
+
+            # Filter posts based on niche visibility
+            posts = FeedService._filter_posts_by_niche_visibility(posts, user_id)
+
+            # Get recent products from engaged sellers
+            products = (
+                session.query(Product)
+                .filter(
+                    Product.seller_id.in_(engaged_seller_ids),
+                    Product.status == Product.Status.ACTIVE,
+                )
+                .order_by(Product.created_at.desc())
+                .limit(30)
+                .all()
+            )
+
+            # Score and format items with higher weight for engagement
+            feed_items = []
+
+            for post in posts:
+                score = FeedService._calculate_post_score(post, user_id)
+                # Boost score for posts from engaged sellers
+                score *= 1.3
+                feed_items.append(
+                    {
+                        "id": post.id,
+                        "type": "post",
+                        "score": score,
+                        "created_at": post.created_at,
+                    }
+                )
+
+            for product in products:
+                score = FeedService._calculate_product_score(product, user_id)
+                # Boost score for products from engaged sellers
+                score *= 1.2
+                feed_items.append(
+                    {
+                        "id": product.id,
+                        "type": "product",
+                        "score": score,
+                        "created_at": product.created_at,
+                    }
+                )
+
+            return feed_items
+
+    @staticmethod
+    def _can_user_see_niche_post(post, user_id):
+        """Check if user can see a niche post based on visibility and membership"""
+        if not post.niche_posts:
+            return True  # Not a niche post, always visible
+
+        niche_post = post.niche_posts[0]  # Assuming one niche per post
+        niche = niche_post.niche
+
+        # Public niches are always visible
+        if niche.visibility == NicheVisibility.PUBLIC:
+            return True
+
+        # Private and restricted niches require membership
+        if not user_id:
+            return False
+
+        with session_scope() as session:
+            membership = (
+                session.query(NicheMembership)
+                .filter(
+                    NicheMembership.niche_id == niche.id,
+                    NicheMembership.user_id == user_id,
+                    NicheMembership.is_active == True,
+                )
+                .first()
+            )
+            return membership is not None
+
+    @staticmethod
+    def _filter_posts_by_niche_visibility(posts, user_id):
+        """Filter posts based on niche visibility and user membership"""
+        filtered_posts = []
+        for post in posts:
+            if FeedService._can_user_see_niche_post(post, user_id):
+                filtered_posts.append(post)
+        return filtered_posts
 
 
 class TrendingService:
@@ -2872,7 +3454,7 @@ class TrendingService:
                         .filter(Post.id.in_(post_ids))
                         .options(
                             joinedload(Post.seller).joinedload(Seller.user),
-                            joinedload(Post.media),
+                            joinedload(Post.social_media),
                             joinedload(Post.tagged_products).joinedload(
                                 PostProduct.product
                             ),

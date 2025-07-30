@@ -2,7 +2,6 @@
 from flask_smorest import Blueprint, abort
 from flask.views import MethodView
 from flask_login import login_required, current_user
-from flask import request
 
 # project imports
 from app.libs.decorators import buyer_required, seller_required
@@ -10,7 +9,7 @@ from app.libs.schemas import PaginationQueryArgs
 from app.libs.errors import APIError
 
 # app imports
-from .services import BuyerRequestService, OfferStatus
+from .services import BuyerRequestService
 from .models import RequestStatus
 from .schemas import (
     BuyerRequestSchema,
@@ -198,3 +197,7 @@ class OfferWithdraw(MethodView):
             )
         except APIError as e:
             abort(e.status_code, message=e.message)
+
+
+# Note: Request image management is now handled via the media module
+# Use /api/v1/media/requests/{request_id}/images for image operations

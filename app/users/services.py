@@ -15,6 +15,10 @@ from app.libs.pagination import Paginator
 
 from app.products.models import Product
 from app.socials.models import Post, PostStatus, Follow
+from app.media.services import media_service
+from app.media.models import Media, MediaVariantType, MediaVariant
+from app.categories.models import Category, SellerCategory
+from app.libs.errors import ValidationError
 
 # app imports
 from .models import User, Buyer, Seller, UserAddress, SellerVerificationStatus
@@ -64,9 +68,28 @@ class AuthService:
                     user_id=user.id,
                     shop_name=data["seller_data"]["shop_name"],
                     description=data["seller_data"]["description"],
-                    category=data["seller_data"]["category"],
+                    policies=data["seller_data"].get("policies", {}),
                 )
                 session.add(seller)
+                session.flush()  # Get the seller ID
+
+                # Handle category relationships
+                if "category_ids" in data["seller_data"]:
+                    for idx, category_id in enumerate(
+                        data["seller_data"]["category_ids"]
+                    ):
+                        # Verify category exists
+                        category = session.query(Category).get(category_id)
+                        if not category:
+                            raise ValidationError(f"Category {category_id} not found")
+
+                        # Create seller category relationship
+                        seller_category = SellerCategory(
+                            seller_id=seller.id,
+                            category_id=category_id,
+                            is_primary=(idx == 0),  # First category is primary
+                        )
+                        session.add(seller_category)
 
             return user
 
@@ -194,10 +217,28 @@ class UserService:
                 seller.shop_name = data["shop_name"]
             if "description" in data:
                 seller.description = data["description"]
-            if "category" in data:
-                seller.category = data["category"]
             if "policies" in data:
                 seller.policies = data["policies"]
+
+            # Handle category updates
+            if "category_ids" in data:
+                # Remove existing category relationships
+                session.query(SellerCategory).filter_by(seller_id=seller.id).delete()
+
+                # Add new category relationships
+                for idx, category_id in enumerate(data["category_ids"]):
+                    # Verify category exists
+                    category = session.query(Category).get(category_id)
+                    if not category:
+                        raise ValidationError(f"Category {category_id} not found")
+
+                    # Create seller category relationship
+                    seller_category = SellerCategory(
+                        seller_id=seller.id,
+                        category_id=category_id,
+                        is_primary=(idx == 0),  # First category is primary
+                    )
+                    session.add(seller_category)
 
             session.commit()
             return seller
@@ -239,9 +280,17 @@ class UserService:
             if not (user.is_buyer and user.is_seller):
                 raise AuthError("User doesn't have both account types")
 
+            previous_role = user.current_role
             user.current_role = "seller" if user.current_role == "buyer" else "buyer"
             session.commit()
-            return user
+
+            return {
+                "success": True,
+                "previous_role": previous_role,
+                "current_role": user.current_role,
+                "message": f"Successfully switched from {previous_role} to {user.current_role}",
+                "user": user,
+            }
 
     @staticmethod
     def check_username_availability(username):
@@ -274,6 +323,74 @@ class UserService:
         except Exception as e:
             logger.error(f"Error checking if user exists: {e}")
             return False
+
+    @staticmethod
+    def upload_profile_picture(user_id: str, file_stream, filename: str):
+        """Upload and set user profile picture (idempotent: deletes old one)"""
+        try:
+            from io import BytesIO
+            from app.media.models import MediaVariantType, Media
+            from app.media.services import media_service
+            from urllib.parse import urlparse
+
+            # Ensure file_stream is BytesIO
+            if not isinstance(file_stream, BytesIO):
+                file_stream = BytesIO(file_stream.read())
+
+            # 1. Delete old profile picture if it exists
+            with session_scope() as session:
+                user = session.query(User).get(user_id)
+                if not user:
+                    raise AuthError("User not found")
+
+                if user.profile_picture:
+                    # Extract storage_key from the URL
+                    old_url = user.profile_picture
+                    parsed = urlparse(old_url)
+                    storage_key = parsed.path.lstrip("/")
+                    old_media = (
+                        session.query(Media).filter_by(storage_key=storage_key).first()
+                    )
+                    if old_media:
+                        # Delete from S3
+                        media_service.delete_media(old_media)
+                        # Delete variants from DB
+                        session.query(MediaVariant).filter_by(
+                            media_id=old_media.id
+                        ).delete()
+                        # Delete media from DB
+                        session.delete(old_media)
+                        session.commit()
+                        user.profile_picture = None
+                        session.commit()
+
+            # 2. Upload media using updated media service (returns only media object)
+            media = media_service.upload_image(
+                file_stream=file_stream,
+                filename=filename,
+                user_id=user_id,
+                alt_text=f"Profile picture for user {user_id}",
+                caption="Profile picture",
+                is_profile_picture=True,
+            )
+
+            # 3. Update user profile picture with original URL (thumbnail will be set async)
+            with session_scope() as session:
+                user = session.query(User).get(user_id)
+                if not user:
+                    raise AuthError("User not found")
+                user.profile_picture = media.get_url()  # Original URL for now
+                session.commit()
+
+            return {
+                "success": True,
+                "media": media,
+                "profile_picture_url": user.profile_picture,
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to upload profile picture: {e}")
+            raise AuthError(f"Failed to upload profile picture: {str(e)}")
 
 
 class AccountService:
@@ -313,9 +430,26 @@ class AccountService:
                 user_id=user.id,
                 shop_name=data["shop_name"],
                 description=data["description"],
-                category=data["category"],
                 policies=data.get("policies", {}),
             )
+            session.add(seller)
+            session.flush()  # Get the seller ID
+
+            # Handle category relationships
+            if "category_ids" in data:
+                for idx, category_id in enumerate(data["category_ids"]):
+                    # Verify category exists
+                    category = session.query(Category).get(category_id)
+                    if not category:
+                        raise ValidationError(f"Category {category_id} not found")
+
+                    # Create seller category relationship
+                    seller_category = SellerCategory(
+                        seller_id=seller.id,
+                        category_id=category_id,
+                        is_primary=(idx == 0),  # First category is primary
+                    )
+                    session.add(seller_category)
 
             if data.get("university"):
                 # Handle university verification logic
@@ -481,7 +615,14 @@ class ShopService:
                         "shop_name": shop.shop_name,
                         "shop_slug": shop.shop_slug,
                         "description": shop.description,
-                        "category": shop.category,
+                        "categories": [
+                            {
+                                "id": sc.category.id,
+                                "name": sc.category.name,
+                                "slug": sc.category.slug,
+                            }
+                            for sc in shop.categories
+                        ],
                         "verification_status": shop.verification_status.value,
                         "is_active": shop.is_active,
                         "total_rating": shop.total_rating,
@@ -565,7 +706,14 @@ class ShopService:
                     "shop_name": shop.shop_name,
                     "shop_slug": shop.shop_slug,
                     "description": shop.description,
-                    "category": shop.category,
+                    "categories": [
+                        {
+                            "id": sc.category.id,
+                            "name": sc.category.name,
+                            "slug": sc.category.slug,
+                        }
+                        for sc in shop.categories
+                    ],
                     "verification_status": shop.verification_status.value,
                     "is_active": shop.is_active,
                     "total_rating": shop.total_rating,
@@ -595,7 +743,7 @@ class ShopService:
                             "caption": post.caption,
                             "media": [
                                 {"url": m.media_url, "type": m.media_type}
-                                for m in post.media
+                                for m in post.social_media
                             ],
                             "likes_count": len(post.likes),
                             "comments_count": len(post.comments),
@@ -644,7 +792,14 @@ class ShopService:
                         "shop_name": shop.shop_name,
                         "shop_slug": shop.shop_slug,
                         "description": shop.description,
-                        "category": shop.category,
+                        "categories": [
+                            {
+                                "id": sc.category.id,
+                                "name": sc.category.name,
+                                "slug": sc.category.slug,
+                            }
+                            for sc in shop.categories
+                        ],
                         "total_rating": shop.total_rating,
                         "total_raters": shop.total_raters,
                         "average_rating": shop.total_rating / shop.total_raters
@@ -669,13 +824,13 @@ class ShopService:
         try:
             with session_scope() as session:
                 categories = (
-                    session.query(Seller.category)
-                    .filter(Seller.category.isnot(None))
-                    .distinct()
-                    .all()
+                    session.query(Category).join(SellerCategory).distinct().all()
                 )
 
-                return [category[0] for category in categories if category[0]]
+                return [
+                    {"id": cat.id, "name": cat.name, "slug": cat.slug}
+                    for cat in categories
+                ]
 
         except Exception as e:
             logger.error(f"Failed to get shop categories: {str(e)}")
