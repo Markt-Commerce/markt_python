@@ -254,6 +254,11 @@ class MediaDetail(MethodView):
     def get(self, media_id):
         """Get media by ID"""
         media = Media.query.get_or_404(media_id)
+
+        # Check if media is soft-deleted
+        if media.is_deleted:
+            abort(404, message="Media not found")
+
         return media
 
 
@@ -263,6 +268,11 @@ class MediaUrls(MethodView):
     def get(self, media_id):
         """Get all URLs for a media object"""
         media = Media.query.get_or_404(media_id)
+
+        # Check if media is soft-deleted
+        if media.is_deleted:
+            abort(404, message="Media not found")
+
         include_variants = (
             request.args.get("include_variants", "true").lower() == "true"
         )
@@ -277,7 +287,7 @@ class MediaStatus(MethodView):
         try:
             with session_scope() as session:
                 media = session.query(Media).get(media_id)
-                if not media:
+                if not media or media.is_deleted:
                     abort(404, message="Media not found")
 
                 # Get variants if processing is completed
@@ -326,6 +336,10 @@ class SocialMediaOptimization(MethodView):
         """Get optimized URLs for social media platforms"""
         media = Media.query.get_or_404(media_id)
 
+        # Check if media is soft-deleted
+        if media.is_deleted:
+            abort(404, message="Media not found")
+
         result = media_service.optimize_for_social_media(
             media=media, platform=args["platform"], post_type=args["post_type"]
         )
@@ -350,6 +364,10 @@ class BackgroundRemoval(MethodView):
         """Remove background from image (placeholder)"""
         media = Media.query.get_or_404(media_id)
 
+        # Check if media is soft-deleted
+        if media.is_deleted:
+            abort(404, message="Media not found")
+
         if media.media_type != MediaType.IMAGE:
             abort(400, message="Background removal only supported for images")
 
@@ -369,21 +387,25 @@ class MediaDelete(MethodView):
     @bp.alt_response(403, description="Not authorized to delete this media")
     @bp.alt_response(404, description="Media not found")
     def delete(self, media_id):
-        """Delete media and all its variants"""
+        """Soft delete media and all its variants"""
         media = Media.query.get_or_404(media_id)
 
         # Check ownership
         if media.user_id != current_user.id and not current_user.is_admin:
             abort(403, message="Not authorized to delete this media")
 
+        # Check if already deleted
+        if media.is_deleted:
+            abort(400, message="Media is already deleted")
+
         try:
-            # Delete from S3
-            success = media_service.delete_media(media)
+            # Soft delete media
+            success = media_service.delete_media(media, hard_delete=False)
 
             if success:
-                # Delete from database using session_scope
+                # Commit the soft delete
                 with session_scope() as session:
-                    session.delete(media)
+                    session.merge(media)
                     session.commit()
 
                 return {
@@ -394,7 +416,7 @@ class MediaDelete(MethodView):
                     else 1,
                 }
             else:
-                abort(500, message="Failed to delete media from storage")
+                abort(500, message="Failed to delete media")
 
         except Exception as e:
             logger.error(f"Error deleting media {media_id}: {e}")
@@ -407,7 +429,9 @@ class MediaList(MethodView):
     @bp.response(200, MediaListSchema)
     def get(self, args):
         """List media with filtering and pagination"""
-        query = Media.query
+        query = Media.query.filter(
+            Media.deleted_at.is_(None)
+        )  # Exclude soft-deleted media
 
         # Apply filters
         if args.get("media_type"):
@@ -571,33 +595,9 @@ class ProductImageDetail(MethodView):
             if product_image.product_id != product_id:
                 abort(404, message="Product image not found")
 
-            # Get the media object
-            media = product_image.media
-            if media:
-                # Check ownership
-                if media.user_id != current_user.id and not current_user.is_admin:
-                    abort(403, message="Not authorized to delete this media")
-
-                try:
-                    # Delete from S3
-                    success = media_service.delete_media(media)
-
-                    if success:
-                        # Now delete the product image relationship
-                        ProductImageService.delete_product_image(
-                            image_id, current_user.id
-                        )
-                        return {"success": True, "message": "Product image deleted"}
-                    else:
-                        abort(500, message="Failed to delete media from storage")
-
-                except Exception as e:
-                    logger.error(f"Error deleting media {media.id}: {e}")
-                    abort(500, message="Failed to delete media")
-            else:
-                # No media associated, just delete the relationship
-                ProductImageService.delete_product_image(image_id, current_user.id)
-                return {"success": True, "message": "Product image deleted"}
+            # Delete the product image (service handles media deletion)
+            ProductImageService.delete_product_image(image_id, current_user.id)
+            return {"success": True, "message": "Product image deleted"}
 
         except Exception as e:
             logger.error(f"Error deleting product image: {e}")
@@ -686,32 +686,8 @@ class SocialMediaPostDetail(MethodView):
             if social_post.post_id != post_id:
                 abort(404, message="Social media post not found")
 
-            # Get the media object
-            media = social_post.media
-            if media:
-                # Check ownership
-                if media.user_id != current_user.id and not current_user.is_admin:
-                    abort(403, message="Not authorized to delete this media")
-
-                try:
-                    # Delete from S3
-                    success = media_service.delete_media(media)
-
-                    if success:
-                        # Now delete the social media post relationship
-                        result = PostService.delete_post_media(
-                            media_id, current_user.id
-                        )
-                        return result
-                    else:
-                        abort(500, message="Failed to delete media from storage")
-
-                except Exception as e:
-                    logger.error(f"Error deleting media {media.id}: {e}")
-                    abort(500, message="Failed to delete media")
-            else:
-                # No media associated, just delete the relationship
-                result = PostService.delete_post_media(media_id, current_user.id)
+            # Delete the social media post (service handles media deletion)
+            result = PostService.delete_post_media(media_id, current_user.id)
             return result
 
         except Exception as e:
@@ -797,34 +773,8 @@ class RequestImageDetail(MethodView):
             if request_image.request_id != request_id:
                 abort(404, message="Request image not found")
 
-            # Get the media object
-            media = request_image.media
-            if media:
-                # Check ownership
-                if media.user_id != current_user.id and not current_user.is_admin:
-                    abort(403, message="Not authorized to delete this media")
-
-                try:
-                    # Delete from S3
-                    success = media_service.delete_media(media)
-
-                    if success:
-                        # Now delete the request image relationship
-                        result = BuyerRequestService.delete_request_image(
-                            image_id, current_user.id
-                        )
-                        return result
-                    else:
-                        abort(500, message="Failed to delete media from storage")
-
-                except Exception as e:
-                    logger.error(f"Error deleting media {media.id}: {e}")
-                    abort(500, message="Failed to delete media")
-            else:
-                # No media associated, just delete the relationship
-                result = BuyerRequestService.delete_request_image(
-                    image_id, current_user.id
-                )
+            # Delete the request image (service handles media deletion)
+            result = BuyerRequestService.delete_request_image(image_id, current_user.id)
             return result
 
         except Exception as e:

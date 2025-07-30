@@ -708,24 +708,30 @@ class MediaService:
         if ext not in self.video_limits["allowed_formats"]:
             raise MediaUploadError(f"Unsupported video format: {ext}")
 
-    def delete_media(self, media: Media) -> bool:
+    def delete_media(self, media: Media, hard_delete: bool = False) -> bool:
         """
-        Delete media and all its variants from S3 and database
+        Delete media and all its variants. Supports both soft and hard delete.
 
         Args:
             media: Media object to delete
+            hard_delete: If True, permanently delete from S3 and database.
+                        If False, perform soft delete (mark as deleted).
 
         Returns:
             True if successful
         """
         try:
-            # Delete original
-            self.s3.delete_file(str(self.bucket), media.storage_key)
+            if hard_delete:
+                # Hard delete - remove from S3 and database
+                self.s3.delete_file(str(self.bucket), media.storage_key)
 
-            # Delete variants
-            if hasattr(media, "variants") and media.variants:
-                for variant in media.variants:
-                    self.s3.delete_file(str(self.bucket), variant.storage_key)
+                # Delete variants from S3
+                if hasattr(media, "variants") and media.variants:
+                    for variant in media.variants:
+                        self.s3.delete_file(str(self.bucket), variant.storage_key)
+            else:
+                # Soft delete - mark as deleted but keep files
+                media.soft_delete()
 
             return True
 

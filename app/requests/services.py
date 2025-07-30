@@ -912,7 +912,21 @@ class BuyerRequestService:
         with session_scope() as session:
             from app.media.models import RequestImage
 
-            return session.query(RequestImage).filter_by(request_id=request_id).all()
+            # Get request images and filter out those with soft-deleted media
+            request_images = (
+                session.query(RequestImage)
+                .filter_by(request_id=request_id)
+                .order_by(RequestImage.sort_order)
+                .all()
+            )
+
+            # Filter out images with soft-deleted media
+            active_images = []
+            for image in request_images:
+                if image.media and not image.media.is_deleted:
+                    active_images.append(image)
+
+            return active_images
 
     @staticmethod
     def delete_request_image(image_id: int, user_id: str):
@@ -934,13 +948,13 @@ class BuyerRequestService:
                 # Get the media object
                 media = request_image.media
                 if media:
-                    # Delete from S3 using media service
-                    success = media_service.delete_media(media)
+                    # Soft delete media using media service
+                    success = media_service.delete_media(media, hard_delete=False)
                     if not success:
-                        logger.warning(f"Failed to delete media {media.id} from S3")
+                        logger.warning(f"Failed to soft delete media {media.id}")
 
-                    # Delete media object from database
-                    session.delete(media)
+                    # Update the media object in the session
+                    session.merge(media)
 
                 # Delete request image relationship
                 session.delete(request_image)

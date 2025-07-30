@@ -590,3 +590,88 @@ def update_media_analytics(self):
     except Exception as e:
         logger.error(f"Media analytics update failed: {str(e)}")
         raise MediaProcessingError(f"Media analytics update failed: {str(e)}")
+
+
+@celery_app.task(bind=True, queue="media")
+def cleanup_soft_deleted_media(self, retention_days: int = 30):
+    """
+    Clean up soft-deleted media after retention period.
+
+    This task permanently deletes media that has been soft-deleted for longer
+    than the specified retention period. It keeps the lightest weight variant
+    (usually thumbnail) for potential recovery.
+
+    Args:
+        retention_days: Number of days to keep soft-deleted media before permanent deletion
+    """
+    try:
+        with session_scope() as session:
+            # Find media that was soft-deleted before the cutoff time
+            cutoff_time = datetime.utcnow() - timedelta(days=retention_days)
+
+            soft_deleted_media = (
+                session.query(Media)
+                .filter(
+                    Media.deleted_at.isnot(None),
+                    Media.deleted_at < cutoff_time,
+                )
+                .all()
+            )
+
+            cleaned_count = 0
+            for media in soft_deleted_media:
+                try:
+                    logger.info(
+                        f"Permanently deleting soft-deleted media {media.id} "
+                        f"(deleted on {media.deleted_at})"
+                    )
+
+                    # Keep the lightest weight variant (usually thumbnail)
+                    variants_to_keep = []
+                    if hasattr(media, "variants") and media.variants:
+                        # Sort variants by file size and keep the smallest
+                        sorted_variants = sorted(
+                            media.variants, key=lambda v: v.file_size or 0
+                        )
+                        if sorted_variants:
+                            variants_to_keep = [
+                                sorted_variants[0]
+                            ]  # Keep smallest variant
+
+                            # Delete other variants from S3
+                            for variant in sorted_variants[1:]:
+                                media_service = MediaService()
+                                media_service.s3.delete_file(
+                                    str(media_service.bucket), variant.storage_key
+                                )
+                                session.delete(variant)
+
+                    # Delete original from S3
+                    media_service = MediaService()
+                    media_service.s3.delete_file(
+                        str(media_service.bucket), media.storage_key
+                    )
+
+                    # Delete media record from database
+                    session.delete(media)
+                    cleaned_count += 1
+
+                except Exception as e:
+                    logger.error(
+                        f"Failed to cleanup soft-deleted media {media.id}: {str(e)}"
+                    )
+                    continue
+
+            session.flush()
+
+            logger.info(f"Cleaned up {cleaned_count} soft-deleted media objects")
+
+            return {
+                "cleaned_count": cleaned_count,
+                "retention_days": retention_days,
+                "status": "soft_delete_cleanup_completed",
+            }
+
+    except Exception as e:
+        logger.error(f"Soft-deleted media cleanup failed: {str(e)}")
+        raise MediaProcessingError(f"Soft-deleted media cleanup failed: {str(e)}")

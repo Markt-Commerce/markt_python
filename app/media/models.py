@@ -43,6 +43,9 @@ class Media(BaseModel):
     is_public = db.Column(db.Boolean, default=True)
     user_id = db.Column(db.String(12), db.ForeignKey("users.id"))
 
+    # Soft delete field
+    deleted_at = db.Column(db.DateTime, nullable=True)
+
     # Additional metadata
     original_filename = db.Column(db.String(255))
     processing_status = db.Column(
@@ -60,6 +63,33 @@ class Media(BaseModel):
         "MediaVariant", back_populates="media", cascade="all, delete-orphan"
     )
     user = db.relationship("User", back_populates="media_uploads")
+
+    @property
+    def is_deleted(self):
+        """Check if media is soft deleted"""
+        return self.deleted_at is not None
+
+    def soft_delete(self):
+        """Soft delete the media by setting deleted_at timestamp"""
+        from datetime import datetime
+
+        self.deleted_at = datetime.utcnow()
+
+    def restore(self):
+        """Restore soft deleted media by clearing deleted_at"""
+        self.deleted_at = None
+
+    @classmethod
+    def filter_active_media(cls, media_list):
+        """Filter out soft-deleted media from a list of media objects"""
+        if not media_list:
+            return []
+        return [media for media in media_list if not media.is_deleted]
+
+    @classmethod
+    def get_active_media(cls, media_list):
+        """Get only active (non-deleted) media from a list"""
+        return cls.filter_active_media(media_list)
 
     def get_url(self, variant_type=MediaVariantType.ORIGINAL):
         """Get URL for specific variant or original"""
