@@ -118,8 +118,25 @@ class PasswordResetSchema(Schema):
 
 class PasswordResetConfirmSchema(Schema):
     email = fields.Email(required=True)
-    code = fields.Str(required=True)
-    new_password = fields.Str(required=True)
+    code = fields.Str(required=True, validate=validate.Length(equal=6))
+    new_password = fields.Str(
+        required=True,
+        validate=[
+            validate.Length(
+                min=8, error="Password must be at least 8 characters long."
+            ),
+            validate.Regexp(
+                r"(?=.*\d)(?=.*[a-z])(?=.*[A-Z])",
+                error="Password must contain at least one digit, one lowercase letter, and one uppercase letter.",
+            ),
+        ],
+    )
+
+
+class PasswordResetResponseSchema(Schema):
+    """Schema for password reset responses"""
+
+    message = fields.Str(required=True)
 
 
 class EmailVerificationSendSchema(Schema):
