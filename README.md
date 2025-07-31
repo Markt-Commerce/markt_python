@@ -25,42 +25,6 @@
 - Real-time chat and notifications
 - Comprehensive API documentation
 
-## 🗺️ Project Architecture (not complete)
-
-```
-app/
-├── libs/              # Shared utilities and base classes
-├── users/             # Auth, profiles, accounts
-├── products/          # Inventory, categories, variants
-├── orders/            # Checkout, payments, transactions
-├── socials/           # Posts, reviews, niches
-├── requests/          # Buyer requests system
-├── notifications/     # Real-time alerts
-├── media/             # File uploads handling
-└── chat/              # Messaging system
-```
-
-## 🚧 Current Development Focus (July 2025)
-
-### Phase 1 Priority Features
-1. **Core Systems Audit**
-   - Review users, orders, products, cart, socials, libs modules
-   - Identify missing implementations
-   - Optimize existing queries for production
-
-2. **Buyer Request System**
-   - CRUD operations with dual-role validation
-   - Seller offer management (with notifications)
-   - Request status lifecycle hooks
-
-3. **Notifications System**
-   - User preference feature
-
-4. **Niche Communities**
-   - Membership management
-   - Role-based access control
-   - Moderation tools skeleton
-
 ## 🛠️ Development Setup
 
 ### Prerequisites
