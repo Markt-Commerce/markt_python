@@ -57,6 +57,7 @@ from .models import (
     NicheStatus,
     NicheVisibility,
     NicheMembershipRole,
+    PostCommentReaction,
 )
 from .constants import POST_STATUS_TRANSITIONS
 
@@ -3432,6 +3433,132 @@ class FeedService:
             if FeedService._can_user_see_niche_post(post, user_id):
                 filtered_posts.append(post)
         return filtered_posts
+
+
+class ReactionService:
+    """Service for managing reactions on comments"""
+
+    @staticmethod
+    def add_comment_reaction(user_id: str, comment_id: int, reaction_type: str):
+        """Add or update a reaction on a comment"""
+        with session_scope() as session:
+            # Check if comment exists
+            comment = session.query(PostComment).get(comment_id)
+            if not comment:
+                raise NotFoundError("Comment not found")
+
+            # Check if user already has this reaction
+            existing_reaction = (
+                session.query(PostCommentReaction)
+                .filter_by(
+                    comment_id=comment_id, user_id=user_id, reaction_type=reaction_type
+                )
+                .first()
+            )
+
+            if existing_reaction:
+                # User already has this reaction, return existing
+                return existing_reaction
+
+            # Create new reaction
+            reaction = PostCommentReaction(
+                comment_id=comment_id, user_id=user_id, reaction_type=reaction_type
+            )
+            session.add(reaction)
+            session.commit()
+
+            # Emit real-time websocket event
+            try:
+                from flask_socketio import emit
+
+                emit(
+                    "comment_reaction_added",
+                    {
+                        "comment_id": comment_id,
+                        "user_id": user_id,
+                        "reaction_type": reaction_type,
+                        "timestamp": datetime.utcnow().isoformat(),
+                    },
+                    room=f"comment_{comment_id}",
+                )
+            except Exception as e:
+                logger.warning(f"Failed to emit comment_reaction_added event: {e}")
+
+            return reaction
+
+    @staticmethod
+    def remove_comment_reaction(user_id: str, comment_id: int, reaction_type: str):
+        """Remove a reaction from a comment"""
+        with session_scope() as session:
+            reaction = (
+                session.query(PostCommentReaction)
+                .filter_by(
+                    comment_id=comment_id, user_id=user_id, reaction_type=reaction_type
+                )
+                .first()
+            )
+
+            if not reaction:
+                raise NotFoundError("Reaction not found")
+
+            session.delete(reaction)
+            session.commit()
+
+            # Emit real-time websocket event
+            try:
+                from flask_socketio import emit
+
+                emit(
+                    "comment_reaction_removed",
+                    {
+                        "comment_id": comment_id,
+                        "user_id": user_id,
+                        "reaction_type": reaction_type,
+                        "timestamp": datetime.utcnow().isoformat(),
+                    },
+                    room=f"comment_{comment_id}",
+                )
+            except Exception as e:
+                logger.warning(f"Failed to emit comment_reaction_removed event: {e}")
+
+            return True
+
+    @staticmethod
+    def get_comment_reactions(comment_id: int, user_id: str = None):
+        """Get all reactions for a comment with counts and user's reactions"""
+        with session_scope() as session:
+            # Get all reactions for the comment
+            reactions = (
+                session.query(PostCommentReaction)
+                .filter_by(comment_id=comment_id)
+                .all()
+            )
+
+            # Group by reaction type and count
+            reaction_counts = {}
+            user_reactions = set()
+
+            for reaction in reactions:
+                reaction_type = reaction.reaction_type.value
+                reaction_counts[reaction_type] = (
+                    reaction_counts.get(reaction_type, 0) + 1
+                )
+
+                if user_id and reaction.user_id == user_id:
+                    user_reactions.add(reaction_type)
+
+            # Format response
+            result = []
+            for reaction_type, count in reaction_counts.items():
+                result.append(
+                    {
+                        "reaction_type": reaction_type,
+                        "count": count,
+                        "has_reacted": reaction_type in user_reactions,
+                    }
+                )
+
+            return result
 
 
 class TrendingService:

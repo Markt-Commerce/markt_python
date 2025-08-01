@@ -394,9 +394,7 @@ class ChatNamespace(Namespace):
 
     # ==================== UTILITY ====================
     def on_ping(self, data):
-        """Keep connection alive with rate limiting"""
-        from main.sockets import SocketManager
-
+        """Handle ping for connection health check"""
         try:
             if not current_user.is_authenticated:
                 return emit("error", {"message": "Unauthorized"})
@@ -405,10 +403,123 @@ class ChatNamespace(Namespace):
             if not self._check_rate_limit("ping", current_user.id):
                 return emit("error", {"message": "Rate limit exceeded"})
 
-            # Refresh online status
-            SocketManager.mark_user_online(current_user.id, "chat")
-            emit("pong", {"timestamp": datetime.utcnow().isoformat()})
+            emit(
+                "pong",
+                {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "user_id": current_user.id,
+                },
+            )
 
         except Exception as e:
             logger.error(f"Ping error: {e}")
             emit("error", {"message": "Ping failed"})
+
+    # ==================== MESSAGE REACTIONS ====================
+    def on_message_reaction_added(self, data):
+        """Handle real-time chat message reaction updates"""
+        try:
+            if not current_user.is_authenticated:
+                return emit("error", {"message": "Unauthorized"})
+
+            # Data validation
+            is_valid, error_msg = self._validate_data(
+                data, ["message_id", "reaction_type"]
+            )
+            if not is_valid:
+                return emit("error", {"message": error_msg})
+
+            message_id = data.get("message_id")
+            reaction_type = data.get("reaction_type")
+
+            # Emit reaction event to room
+            emit(
+                "message_reaction_added",
+                {
+                    "message_id": message_id,
+                    "user_id": current_user.id,
+                    "username": current_user.username,
+                    "reaction_type": reaction_type,
+                    "timestamp": datetime.utcnow().isoformat(),
+                },
+                room=f"message_{message_id}",
+            )
+
+            # Update Redis cache
+            redis_client.hincrby(f"message:{message_id}:reactions", reaction_type, 1)
+
+        except Exception as e:
+            logger.error(f"Message reaction error: {e}")
+            emit("error", {"message": "Reaction failed"})
+
+    def on_message_reaction_removed(self, data):
+        """Handle real-time chat message reaction removal"""
+        try:
+            if not current_user.is_authenticated:
+                return emit("error", {"message": "Unauthorized"})
+
+            # Data validation
+            is_valid, error_msg = self._validate_data(
+                data, ["message_id", "reaction_type"]
+            )
+            if not is_valid:
+                return emit("error", {"message": error_msg})
+
+            message_id = data.get("message_id")
+            reaction_type = data.get("reaction_type")
+
+            # Emit reaction removal event
+            emit(
+                "message_reaction_removed",
+                {
+                    "message_id": message_id,
+                    "user_id": current_user.id,
+                    "username": current_user.username,
+                    "reaction_type": reaction_type,
+                    "timestamp": datetime.utcnow().isoformat(),
+                },
+                room=f"message_{message_id}",
+            )
+
+            # Update Redis cache
+            redis_client.hincrby(f"message:{message_id}:reactions", reaction_type, -1)
+
+        except Exception as e:
+            logger.error(f"Message reaction removal error: {e}")
+            emit("error", {"message": "Reaction removal failed"})
+
+    def on_join_message(self, message_id):
+        """Join room for message reaction updates"""
+        try:
+            if not current_user.is_authenticated:
+                return emit("error", {"message": "Unauthorized"})
+
+            if not message_id:
+                return emit("error", {"message": "Message ID required"})
+
+            join_room(f"message_{message_id}")
+
+            # Get real-time reaction stats
+            reactions = redis_client.hgetall(f"message:{message_id}:reactions")
+            reaction_stats = {k.decode(): int(v) for k, v in reactions.items()}
+
+            emit(
+                "message_reaction_stats",
+                {
+                    "message_id": message_id,
+                    "reactions": reaction_stats,
+                    "timestamp": datetime.utcnow().isoformat(),
+                },
+            )
+
+        except Exception as e:
+            logger.error(f"Join message error: {e}")
+            emit("error", {"message": "Failed to join message"})
+
+    def on_leave_message(self, message_id):
+        """Leave message room"""
+        try:
+            if current_user.is_authenticated and message_id:
+                leave_room(f"message_{message_id}")
+        except Exception as e:
+            logger.error(f"Leave message error: {e}")
