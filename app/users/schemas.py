@@ -26,6 +26,7 @@ class UserSchema(Schema):
     profile_picture_url = fields.Method("get_profile_picture_url", dump_only=True)
     is_buyer = fields.Bool(dump_only=True)
     is_seller = fields.Bool(dump_only=True)
+    email_verified = fields.Bool(dump_only=True)
     current_role = fields.Str(dump_only=True)
     created_at = fields.DateTime(dump_only=True)
     updated_at = fields.DateTime(dump_only=True)
@@ -117,8 +118,34 @@ class PasswordResetSchema(Schema):
 
 class PasswordResetConfirmSchema(Schema):
     email = fields.Email(required=True)
-    code = fields.Str(required=True)
-    new_password = fields.Str(required=True)
+    code = fields.Str(required=True, validate=validate.Length(equal=6))
+    new_password = fields.Str(
+        required=True,
+        validate=[
+            validate.Length(
+                min=8, error="Password must be at least 8 characters long."
+            ),
+            validate.Regexp(
+                r"(?=.*\d)(?=.*[a-z])(?=.*[A-Z])",
+                error="Password must contain at least one digit, one lowercase letter, and one uppercase letter.",
+            ),
+        ],
+    )
+
+
+class PasswordResetResponseSchema(Schema):
+    """Schema for password reset responses"""
+
+    message = fields.Str(required=True)
+
+
+class EmailVerificationSendSchema(Schema):
+    email = fields.Email(required=True)
+
+
+class EmailVerificationSchema(Schema):
+    email = fields.Email(required=True)
+    verification_code = fields.Str(required=True, validate=validate.Length(equal=6))
 
 
 class UserPaginationQueryArgs(Schema):

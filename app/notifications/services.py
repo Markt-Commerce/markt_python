@@ -11,6 +11,7 @@ from external.redis import redis_client
 from app.libs.session import session_scope
 from app.libs.pagination import Paginator
 from app.libs.errors import NotFoundError
+from app.libs.email_service import email_service
 
 # app imports
 from .models import Notification, NotificationType

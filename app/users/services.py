@@ -12,6 +12,7 @@ from external.database import db
 from app.libs.session import session_scope
 from app.libs.errors import AuthError, NotFoundError, APIError
 from app.libs.pagination import Paginator
+from app.libs.email_service import email_service
 
 from app.products.models import Product
 from app.socials.models import Post, PostStatus, Follow
@@ -91,6 +92,18 @@ class AuthService:
                         )
                         session.add(seller_category)
 
+            # Return user first, then send email verification outside transaction
+            session.commit()
+
+            # Send email verification outside the transaction to avoid rollback
+            try:
+                AuthService.send_email_verification(user.email)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to send verification email to {user.email}: {str(e)}"
+                )
+                # Don't fail registration if email fails
+
             return user
 
     @staticmethod
@@ -144,16 +157,64 @@ class AuthService:
             else:
                 raise AuthError("Invalid account type")
 
+            # Check email verification for new accounts
+            if not user.email_verified:
+                # Send verification email if not already sent
+                try:
+                    AuthService.send_email_verification(user.email)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to send verification email to {user.email}: {str(e)}"
+                    )
+
+                raise AuthError(
+                    "Please verify your email address before logging in. Check your email for verification code."
+                )
+
             # Update current_role
             user.current_role = account_type
             return user
 
     @staticmethod
     def initiate_password_reset(email):
-        code = str(random.randint(100000, 999999))
-        redis_client.store_recovery_code(email, code)
-        # In production: Send email with code
-        return code  # For testing only
+        """Initiate password reset process by sending reset code via email"""
+        with session_scope() as session:
+            user = session.query(User).filter(User.email == email).first()
+            if not user:
+                # Don't reveal if email exists or not for security
+                logger.info(f"Password reset requested for non-existent email: {email}")
+                return True
+
+            # Generate reset code
+            reset_code = str(random.randint(100000, 999999))
+
+            # Store reset code in Redis (10 minutes expiration)
+            redis_client.store_recovery_code(email, reset_code, expires_in=600)
+
+            # Send password reset email
+            try:
+                success = email_service.send_password_reset_email(
+                    email=user.email,
+                    reset_code=reset_code,
+                    username=user.username,
+                )
+
+                if not success:
+                    # Clean up Redis if email fails
+                    redis_client.delete_recovery_code(user.email)
+                    logger.error(f"Failed to send password reset email to {user.email}")
+                    raise AuthError("Failed to send password reset email")
+
+                logger.info(f"Password reset email sent successfully to {user.email}")
+                return True
+
+            except Exception as e:
+                # Clean up Redis if email fails
+                redis_client.delete_recovery_code(user.email)
+                logger.error(
+                    f"Error sending password reset email to {user.email}: {str(e)}"
+                )
+                raise AuthError("Failed to send password reset email")
 
     @staticmethod
     def confirm_password_reset(email, code, new_password):
@@ -168,6 +229,67 @@ class AuthService:
             user.set_password(new_password)
 
             redis_client.delete_recovery_code(email)
+            return True
+
+    @staticmethod
+    def generate_verification_code():
+        """Generate a 6-digit verification code"""
+        return str(random.randint(100000, 999999))
+
+    @staticmethod
+    def send_email_verification(email: str):
+        """Send email verification code to user by email address"""
+        with session_scope() as session:
+            user = session.query(User).filter(User.email == email).first()
+            if not user:
+                raise AuthError("User not found")
+
+            if user.email_verified:
+                raise AuthError("Email already verified")
+
+            # Generate verification code
+            verification_code = AuthService.generate_verification_code()
+
+            # Store verification code in Redis (10 minutes expiration)
+            redis_client.store_verification_code(
+                user.email, verification_code, expires_in=600
+            )
+
+            # Send verification email
+            success = email_service.send_verification_email(
+                email=user.email,
+                verification_code=verification_code,
+                username=user.username,
+            )
+
+            if not success:
+                # Clean up Redis if email fails
+                redis_client.delete_verification_code(user.email)
+                raise AuthError("Failed to send verification email")
+
+            return True
+
+    @staticmethod
+    def verify_email(email: str, verification_code: str):
+        """Verify user email with code"""
+        with session_scope() as session:
+            user = session.query(User).filter(User.email == email).first()
+            if not user:
+                raise AuthError("User not found")
+
+            if user.email_verified:
+                raise AuthError("Email already verified")
+
+            # Verify code from Redis
+            if not redis_client.verify_verification_code(user.email, verification_code):
+                raise AuthError("Invalid or expired verification code")
+
+            # Mark email as verified
+            user.email_verified = True
+
+            # Clean up verification code from Redis
+            redis_client.delete_verification_code(user.email)
+
             return True
 
 
