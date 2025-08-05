@@ -53,7 +53,21 @@ class BuyerRequestSchema(Schema):
 
     # Nested relationships
     user = fields.Nested("UserSchema", dump_only=True)
-    categories = fields.Nested("CategorySchema", many=True, dump_only=True)
+    categories = fields.Method("get_categories", dump_only=True)
+
+    def get_categories(self, obj):
+        """Extract category data from RequestCategory objects"""
+        if hasattr(obj, "categories") and obj.categories:
+            from app.categories.schemas import CategorySchema
+
+            category_schema = CategorySchema()
+            return [
+                category_schema.dump(request_category.category)
+                for request_category in obj.categories
+                if request_category.category
+            ]
+        return []
+
     images = fields.Nested("RequestImageSchema", many=True, dump_only=True)
     offers = fields.Nested(SellerOfferSchema, many=True, dump_only=True)
     media_ids = fields.List(fields.Int(), dump_only=True)
