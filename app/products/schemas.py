@@ -31,9 +31,24 @@ class ProductCreateSchema(Schema):
     )
 
 
-class ProductUpdateSchema(ProductCreateSchema):
-    class Meta:
-        partial = True
+class ProductUpdateSchema(Schema):
+    name = fields.Str(validate=validate.Length(min=2, max=100))
+    description = fields.Str()
+    price = fields.Float(validate=validate.Range(min=0.01))
+    compare_at_price = fields.Float(validate=validate.Range(min=0.01))
+    cost_per_item = fields.Float(validate=validate.Range(min=0.01))
+    stock = fields.Int(validate=validate.Range(min=0))
+    sku = fields.Str()
+    barcode = fields.Str()
+    weight = fields.Float()
+    status = fields.Enum(ProductStatus, by_value=True)
+    variants = fields.List(fields.Nested(ProductVariantSchema))
+    category_ids = fields.List(fields.Int())
+    tag_ids = fields.List(fields.Int())
+    product_metadata = fields.Dict()
+    media_ids = fields.List(
+        fields.Int(), description="List of media IDs to link to product"
+    )
 
 
 class ProductSchema(ProductCreateSchema):

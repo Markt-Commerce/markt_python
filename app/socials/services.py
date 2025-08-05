@@ -1271,6 +1271,7 @@ class PostService:
                 .options(
                     joinedload(Post.social_media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
+                    joinedload(Post.categories).joinedload(PostCategory.category),
                 )
             )
             paginator = Paginator(base_query, page=page, per_page=per_page)
@@ -1295,6 +1296,7 @@ class PostService:
                 .options(
                     joinedload(Post.social_media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
+                    joinedload(Post.categories).joinedload(PostCategory.category),
                 )
             )
             paginator = Paginator(base_query, page=page, per_page=per_page)

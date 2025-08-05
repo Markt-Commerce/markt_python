@@ -16,7 +16,7 @@ from external.redis import redis_client
 
 from app.libs.session import session_scope
 from app.libs.pagination import Paginator
-from app.categories.models import ProductCategory, ProductTag
+from app.categories.models import ProductCategory, ProductTag, Category
 from app.libs.errors import (
     NotFoundError,
     ValidationError,
@@ -213,6 +213,22 @@ class ProductService:
                         )
                         session.add(product_image)
 
+                # Handle category relationships if provided
+                if "category_ids" in product_data and product_data["category_ids"]:
+                    for idx, category_id in enumerate(product_data["category_ids"]):
+                        # Verify category exists
+                        category = session.query(Category).get(category_id)
+                        if not category:
+                            raise ValidationError(f"Category {category_id} not found")
+
+                        # Create product category relationship
+                        product_category = ProductCategory(
+                            product_id=product.id,
+                            category_id=category_id,
+                            is_primary=(idx == 0),  # First category is primary
+                        )
+                        session.add(product_category)
+
                 return product
         except SQLAlchemyError as e:
             logger.error(f"Database error creating product: {str(e)}")
@@ -262,6 +278,31 @@ class ProductService:
                             options=variant_data["options"],
                         )
                         session.add(variant)
+
+                # Handle category updates if provided
+                if "category_ids" in update_data:
+                    # Remove existing category relationships
+                    session.query(ProductCategory).filter_by(
+                        product_id=product_id
+                    ).delete()
+
+                    # Add new category relationships
+                    if update_data["category_ids"]:
+                        for idx, category_id in enumerate(update_data["category_ids"]):
+                            # Verify category exists
+                            category = session.query(Category).get(category_id)
+                            if not category:
+                                raise ValidationError(
+                                    f"Category {category_id} not found"
+                                )
+
+                            # Create product category relationship
+                            product_category = ProductCategory(
+                                product_id=product.id,
+                                category_id=category_id,
+                                is_primary=(idx == 0),  # First category is primary
+                            )
+                            session.add(product_category)
 
                 product.updated_at = datetime.utcnow()
                 return product
@@ -340,6 +381,30 @@ class ProductService:
                                     options=variant_data["options"],
                                 )
                                 session.add(variant)
+
+                        # Handle category relationships if provided
+                        if (
+                            "category_ids" in product_data
+                            and product_data["category_ids"]
+                        ):
+                            for idx, category_id in enumerate(
+                                product_data["category_ids"]
+                            ):
+                                # Verify category exists
+                                category = session.query(Category).get(category_id)
+                                if not category:
+                                    raise ValidationError(
+                                        f"Category {category_id} not found",
+                                        errors={"index": idx},
+                                    )
+
+                                # Create product category relationship
+                                product_category = ProductCategory(
+                                    product_id=product.id,
+                                    category_id=category_id,
+                                    is_primary=(idx == 0),  # First category is primary
+                                )
+                                session.add(product_category)
 
                         results["success"].append(
                             {
