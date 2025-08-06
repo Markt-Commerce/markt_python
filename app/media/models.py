@@ -93,17 +93,17 @@ class Media(BaseModel):
 
     def get_url(self, variant_type=MediaVariantType.ORIGINAL):
         """Get URL for specific variant or original"""
+        from app.libs.aws.s3 import s3_service
+
         if variant_type == MediaVariantType.ORIGINAL:
-            return (
-                f"https://{settings.AWS_S3_BUCKET}.s3.amazonaws.com/{self.storage_key}"
-            )
+            return s3_service._generate_url(settings.AWS_S3_BUCKET, self.storage_key)
 
         # Find specific variant
         variant = next(
             (v for v in self.variants if v.variant_type == variant_type), None
         )
         if variant:
-            return f"https://{settings.AWS_S3_BUCKET}.s3.amazonaws.com/{variant.storage_key}"
+            return s3_service._generate_url(settings.AWS_S3_BUCKET, variant.storage_key)
 
         # Fallback to original
         return None
@@ -140,7 +140,9 @@ class MediaVariant(BaseModel):
 
     def get_url(self):
         """Get URL for this variant"""
-        return f"https://{settings.AWS_S3_BUCKET}.s3.amazonaws.com/{self.storage_key}"
+        from app.libs.aws.s3 import s3_service
+
+        return s3_service._generate_url(settings.AWS_S3_BUCKET, self.storage_key)
 
 
 class ProductImage(BaseModel):
