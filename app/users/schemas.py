@@ -247,7 +247,7 @@ class SellerSimpleSchema(Schema):
     id = fields.Int(dump_only=True)
     shop_name = fields.Str(dump_only=True)
     shop_slug = fields.Str(dump_only=True)
-    verification_status = fields.Str(dump_only=True)
+    verification_status = fields.Str(dump_only=True, by_value=True)
     average_rating = fields.Float(dump_only=True)
     total_products = fields.Int(dump_only=True)
     profile_picture_url = fields.Method("get_profile_picture_url", dump_only=True)
