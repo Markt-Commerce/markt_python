@@ -50,8 +50,10 @@ class OrderItem(BaseModel, StatusMixin):
 
     class Status(Enum):
         PENDING = "pending"
+        PROCESSING = "processing"
         SHIPPED = "shipped"
         DELIVERED = "delivered"
+        CANCELLED = "cancelled"
 
     id = db.Column(db.Integer, primary_key=True)
     order_id = db.Column(db.String(12), db.ForeignKey("orders.id"))

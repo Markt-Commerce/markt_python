@@ -79,5 +79,9 @@ class TrackingSchema(Schema):
     pass
 
 
+class OrderItemStatusUpdateSchema(Schema):
+    status = fields.Enum(OrderItem.Status, by_value=True, required=True)
+
+
 class ReviewSchema(Schema):
     pass

@@ -190,9 +190,15 @@ class SellerOrderService:
                 raise ValueError("Order item not found")
 
             valid_transitions = {
-                "pending": ["processing", "cancelled"],
-                "processing": ["shipped", "cancelled"],
-                "shipped": ["delivered"],
+                OrderItem.Status.PENDING: [
+                    OrderItem.Status.PROCESSING,
+                    OrderItem.Status.CANCELLED,
+                ],
+                OrderItem.Status.PROCESSING: [
+                    OrderItem.Status.SHIPPED,
+                    OrderItem.Status.CANCELLED,
+                ],
+                OrderItem.Status.SHIPPED: [OrderItem.Status.DELIVERED],
                 # Other status transitions...
             }
 
@@ -205,9 +211,9 @@ class SellerOrderService:
             item.status = status
 
             # If all items are delivered, mark order as completed
-            if status == "delivered":
+            if status == OrderItem.Status.DELIVERED:
                 order = session.query(Order).get(item.order_id)
-                if all(i.status == "delivered" for i in order.items):
+                if all(i.status == OrderItem.Status.DELIVERED for i in order.items):
                     order.status = OrderStatus.DELIVERED
 
             return item
@@ -220,7 +226,7 @@ class SellerOrderService:
                 .filter_by(seller_id=seller_id)
                 .count(),
                 "pending_orders": session.query(OrderItem)
-                .filter_by(seller_id=seller_id, status="pending")
+                .filter_by(seller_id=seller_id, status=OrderItem.Status.PENDING)
                 .count(),
                 "monthly_earnings": session.query(
                     db.func.sum(OrderItem.price * OrderItem.quantity)
