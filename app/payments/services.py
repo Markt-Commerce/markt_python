@@ -160,8 +160,34 @@ class PaymentService:
                 # Send notifications
                 PaymentService._send_payment_notifications(payment, result["status"])
 
-                # Emit real-time update
-                PaymentService._emit_payment_update(payment)
+                # Queue async real-time event (non-blocking)
+                try:
+                    from app.realtime.event_manager import EventManager
+
+                    EventManager.emit_to_order(
+                        payment.order_id,
+                        "payment_confirmed",
+                        {
+                            "payment_id": payment.id,
+                            "order_id": payment.order_id,
+                            "user_id": payment.order.buyer.user_id
+                            if payment.order and payment.order.buyer
+                            else None,
+                            "amount": payment.amount,
+                            "status": payment.status.value,
+                            "transaction_id": payment.transaction_id,
+                            "metadata": {
+                                "method": payment.method.value
+                                if payment.method
+                                else None,
+                                "order_number": payment.order.order_number
+                                if payment.order
+                                else None,
+                            },
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to queue payment_confirmed event: {e}")
 
                 return payment
 
@@ -446,8 +472,34 @@ class PaymentService:
                     payment, PaymentStatus.COMPLETED
                 )
 
-                # Emit real-time update
-                PaymentService._emit_payment_update(payment)
+                # Queue async real-time event (non-blocking)
+                try:
+                    from app.realtime.event_manager import EventManager
+
+                    EventManager.emit_to_order(
+                        payment.order_id,
+                        "payment_confirmed",
+                        {
+                            "payment_id": payment.id,
+                            "order_id": payment.order_id,
+                            "user_id": payment.order.buyer.user_id
+                            if payment.order and payment.order.buyer
+                            else None,
+                            "amount": payment.amount,
+                            "status": payment.status.value,
+                            "transaction_id": payment.transaction_id,
+                            "metadata": {
+                                "method": payment.method.value
+                                if payment.method
+                                else None,
+                                "order_number": payment.order.order_number
+                                if payment.order
+                                else None,
+                            },
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to queue payment_confirmed event: {e}")
 
                 return True
 

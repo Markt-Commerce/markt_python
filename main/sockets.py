@@ -165,6 +165,7 @@ def emit_to_user(user_id: str, event: str, data: dict, namespace: str = None):
     """Centralized method to emit events to specific user with offline queuing"""
     try:
         from main.extensions import socketio
+        from external.redis import redis_client
         import json
 
         room = f"user_{user_id}"

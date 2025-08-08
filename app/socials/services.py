@@ -1119,8 +1119,10 @@ class PostService:
                 redis_client.zincrby(f"post:{post_id}:likes", 1, user_id)
                 redis_client.zincrby(f"user:{user_id}:liked_posts", 1, post_id)
 
-                # Get post owner
+                # Get post owner and user info for notifications
                 post = session.query(Post).get(post_id)
+                user = session.query(User).get(user_id)
+
                 if post.seller.user_id != user_id:  # Don't notify for self-likes
                     from app.notifications.services import NotificationService
 
@@ -1131,6 +1133,23 @@ class PostService:
                         reference_type="post",
                         reference_id=post_id,
                     )
+
+                # Queue async real-time event (non-blocking)
+                try:
+                    from app.realtime.event_manager import EventManager
+
+                    EventManager.emit_to_post(
+                        post_id,
+                        "post_liked",
+                        {
+                            "post_id": post_id,
+                            "user_id": user_id,
+                            "username": user.username if user else "Unknown",
+                            "like_count": redis_client.zcard(f"post:{post_id}:likes"),
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to queue post_liked event: {e}")
 
                 return like
         except SQLAlchemyError as e:
@@ -1152,6 +1171,27 @@ class PostService:
                     session.delete(like)
                     redis_client.zincrby(f"post:{post_id}:likes", -1, user_id)
                     redis_client.zincrby(f"user:{user_id}:liked_posts", -1, post_id)
+
+                    # Queue async real-time event (non-blocking)
+                    try:
+                        from app.realtime.event_manager import EventManager
+
+                        user = session.query(User).get(user_id)
+                        EventManager.emit_to_post(
+                            post_id,
+                            "post_unliked",
+                            {
+                                "post_id": post_id,
+                                "user_id": user_id,
+                                "username": user.username if user else "Unknown",
+                                "like_count": redis_client.zcard(
+                                    f"post:{post_id}:likes"
+                                ),
+                            },
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to queue post_unliked event: {e}")
+
         except SQLAlchemyError as e:
             logger.error(f"Error unliking post: {str(e)}")
             raise ConflictError("Failed to unlike post")
@@ -1512,45 +1552,28 @@ class PostService:
 
     @staticmethod
     def toggle_like(user_id, post_id):
-        """Toggle like on post"""
-        with session_scope() as session:
-            # Check if like already exists
-            existing_like = (
-                session.query(PostLike)
-                .filter_by(user_id=user_id, post_id=post_id)
-                .first()
-            )
-
-            if existing_like:
-                # Unlike
-                session.delete(existing_like)
-                redis_client.zincrby(f"post:{post_id}:likes", -1, user_id)
-                redis_client.zrem(f"user:{user_id}:liked_posts", post_id)
-                return {"liked": False, "message": "Post unliked"}
-            else:
-                # Like
-                like = PostLike(user_id=user_id, post_id=post_id)
-                session.add(like)
-                redis_client.zincrby(f"post:{post_id}:likes", 1, user_id)
-                redis_client.zadd(
-                    f"user:{user_id}:liked_posts",
-                    {post_id: int(datetime.utcnow().timestamp())},
+        """Toggle like on post using existing like_post/unlike_post services"""
+        try:
+            with session_scope() as session:
+                # Check if like already exists
+                existing_like = (
+                    session.query(PostLike)
+                    .filter_by(user_id=user_id, post_id=post_id)
+                    .first()
                 )
 
-                # Notify post owner
-                post = session.query(Post).get(post_id)
-                if post.seller.user_id != user_id:
-                    from app.notifications.services import NotificationService
+                if existing_like:
+                    # Unlike using existing service
+                    PostService.unlike_post(user_id, post_id)
+                    return {"liked": False, "message": "Post unliked"}
+                else:
+                    # Like using existing service
+                    PostService.like_post(user_id, post_id)
+                    return {"liked": True, "message": "Post liked"}
 
-                    NotificationService.create_notification(
-                        user_id=post.seller.user_id,
-                        notification_type=NotificationType.POST_LIKE,
-                        reference_type="post",
-                        reference_id=post_id,
-                        metadata_={"actor_id": user_id},
-                    )
-
-                return {"liked": True, "message": "Post liked"}
+        except Exception as e:
+            logger.error(f"Error toggling like: {str(e)}")
+            raise ConflictError("Failed to toggle like")
 
     @staticmethod
     def get_comment(comment_id):
@@ -1820,15 +1843,31 @@ class ProductSocialService:
                     },
                 )
 
-                # Trigger socket event
-                # from main.extensions import socketio
-                # socketio.emit('review_added', {
-                #     'product_id': product_id,
-                #     'review_count': int(redis_client.hget(redis_key, "review_count")),
-                #     'avg_rating': float(redis_client.hget(redis_key, "avg_rating") or 0),
-                #     'user_id': user_id,
-                #     'rating': data.get('rating')
-                # }, room=f"product_{product_id}")
+                # Queue async real-time event (non-blocking)
+                try:
+                    from app.realtime.event_manager import EventManager
+
+                    user = session.query(User).get(user_id)
+                    EventManager.emit_to_product(
+                        product_id,
+                        "review_added",
+                        {
+                            "product_id": product_id,
+                            "review_id": review.id,
+                            "user_id": user_id,
+                            "username": user.username if user else "Unknown",
+                            "rating": data.get("rating"),
+                            "review_count": int(
+                                redis_client.hget(redis_key, "review_count")
+                            ),
+                            "avg_rating": float(
+                                redis_client.hget(redis_key, "avg_rating") or 0
+                            ),
+                            "is_verified": data.get("is_verified", False),
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to queue review_added event: {e}")
 
                 return review
         except Exception as e:
@@ -1873,14 +1912,25 @@ class ProductSocialService:
                         metadata_={},  # No metadata needed for upvote template
                     )
 
-                # Trigger socket event
-                # from main.extensions import socketio
-                # socketio.emit('review_upvoted', {
-                #     'review_id': review_id,
-                #     'user_id': user_id,
-                #     'upvotes': review.upvotes,
-                #     'product_id': review.product_id
-                # }, room=f"product_{review.product_id}")
+                # Queue async real-time event (non-blocking)
+                try:
+                    from app.realtime.event_manager import EventManager
+
+                    user = session.query(User).get(user_id)
+                    EventManager.emit_to_product(
+                        review.product_id,
+                        "review_upvoted",
+                        {
+                            "review_id": review_id,
+                            "product_id": review.product_id,
+                            "user_id": user_id,
+                            "username": user.username if user else "Unknown",
+                            "upvotes": review.upvotes,
+                            "review_author_id": review.user_id,
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to queue review_upvoted event: {e}")
 
                 return review
         except SQLAlchemyError as e:
@@ -3467,22 +3517,23 @@ class ReactionService:
             session.add(reaction)
             session.commit()
 
-            # Emit real-time websocket event
+            # Queue async real-time event (non-blocking)
             try:
-                from flask_socketio import emit
+                from app.realtime.event_manager import EventManager
 
-                emit(
+                user = session.query(User).get(user_id)
+                EventManager.emit_to_comment(
+                    comment_id,
                     "comment_reaction_added",
                     {
                         "comment_id": comment_id,
                         "user_id": user_id,
+                        "username": user.username if user else "Unknown",
                         "reaction_type": reaction_type,
-                        "timestamp": datetime.utcnow().isoformat(),
                     },
-                    room=f"comment_{comment_id}",
                 )
             except Exception as e:
-                logger.warning(f"Failed to emit comment_reaction_added event: {e}")
+                logger.warning(f"Failed to queue comment_reaction_added event: {e}")
 
             return reaction
 
@@ -3504,22 +3555,25 @@ class ReactionService:
             session.delete(reaction)
             session.commit()
 
-            # Emit real-time websocket event
+            # Queue async real-time event (non-blocking)
             try:
-                from flask_socketio import emit
+                from app.realtime.event_manager import EventManager
+                from app.users.models import User
 
-                emit(
+                user = session.query(User).get(user_id)
+                EventManager.emit_to_comment(
+                    comment_id,
                     "comment_reaction_removed",
                     {
                         "comment_id": comment_id,
                         "user_id": user_id,
+                        "username": user.username if user else "Unknown",
                         "reaction_type": reaction_type,
                         "timestamp": datetime.utcnow().isoformat(),
                     },
-                    room=f"comment_{comment_id}",
                 )
             except Exception as e:
-                logger.warning(f"Failed to emit comment_reaction_removed event: {e}")
+                logger.warning(f"Failed to queue comment_reaction_removed event: {e}")
 
             return True
 

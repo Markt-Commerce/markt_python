@@ -593,6 +593,23 @@ class BuyerRequestService:
             # Cache invalidation
             BuyerRequestService._invalidate_request_cache(request_id)
 
+            # Queue async real-time event (non-blocking)
+            try:
+                from app.realtime.event_manager import EventManager
+
+                EventManager.emit_to_request(
+                    request_id,
+                    "request_upvoted",
+                    {
+                        "request_id": request_id,
+                        "user_id": user_id,
+                        "username": user.username if user else "Unknown",
+                        "upvote_count": request.upvotes,
+                    },
+                )
+            except Exception as e:
+                logger.warning(f"Failed to queue request_upvoted event: {e}")
+
             return {"upvotes": request.upvotes}
 
     @staticmethod
