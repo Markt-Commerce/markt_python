@@ -210,7 +210,7 @@ class NichePosts(MethodView):
     def post(self, post_data, niche_id):
         """Create a post in a specific niche"""
         try:
-            return NicheService.create_niche_post(niche_id, current_user.id, post_data)
+            return NicheService.create_niche_post(niche_id, current_user, post_data)
         except APIError as e:
             abort(e.status_code, message=e.message)
 

@@ -110,4 +110,17 @@ def create_flask_app():
     with the Flask CLI (expects a Flask instance), this wrapper returns only the Flask app
     to enable proper integration with tools like Flask-Migrate.
     """
-    return create_app()[0]
+    app = create_app()[0]
+
+    # Register custom CLI commands
+    from app.categories.management.commands.populate_categories import (
+        populate_categories,
+    )
+    from app.categories.management.commands.list_categories import list_categories
+    from app.categories.management.commands.clear_categories import clear_categories
+
+    app.cli.add_command(populate_categories)
+    app.cli.add_command(list_categories)
+    app.cli.add_command(clear_categories)
+
+    return app

@@ -125,6 +125,14 @@ class MediaSchema(Schema):
             else None
         )
 
+    def filter_media_objects(self, media_list):
+        """Filter out soft-deleted media from a list"""
+        from .models import Media
+
+        if not media_list:
+            return []
+        return Media.filter_active_media(media_list)
+
 
 class MediaUploadSchema(Schema):
     """Schema for media upload requests"""
@@ -214,6 +222,15 @@ class ProductImageSchema(Schema):
     alt_text = fields.Str(validate=validate.Length(max=255))
     media = fields.Nested(MediaSchema, dump_only=True)
 
+    def get_filtered_media(self, obj):
+        """Get media object, filtering out soft-deleted media"""
+        if hasattr(obj, "media") and obj.media:
+            from .models import Media
+
+            if not obj.media.is_deleted:
+                return obj.media
+        return None
+
 
 class SocialMediaPostSchema(Schema):
     """Schema for social media posts"""
@@ -232,6 +249,15 @@ class SocialMediaPostSchema(Schema):
     optimized_for_platform = fields.Bool(default=True)
     media = fields.Nested(MediaSchema, dump_only=True)
 
+    def get_filtered_media(self, obj):
+        """Get media object, filtering out soft-deleted media"""
+        if hasattr(obj, "media") and obj.media:
+            from .models import Media
+
+            if not obj.media.is_deleted:
+                return obj.media
+        return None
+
 
 class RequestImageSchema(Schema):
     """Schema for buyer request images"""
@@ -241,6 +267,15 @@ class RequestImageSchema(Schema):
     media_id = fields.Int(required=True)
     is_primary = fields.Bool(default=False)
     media = fields.Nested(MediaSchema, dump_only=True)
+
+    def get_filtered_media(self, obj):
+        """Get media object, filtering out soft-deleted media"""
+        if hasattr(obj, "media") and obj.media:
+            from .models import Media
+
+            if not obj.media.is_deleted:
+                return obj.media
+        return None
 
 
 class MediaDeleteSchema(Schema):

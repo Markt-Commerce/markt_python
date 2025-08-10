@@ -19,6 +19,7 @@ from .schemas import (
     OrderPaginationSchema,
     SellerOrderResponseSchema,
     BuyerOrderSchema,
+    OrderItemStatusUpdateSchema,
 )
 
 bp = Blueprint("orders", __name__, description="Order operations", url_prefix="/orders")
@@ -95,8 +96,9 @@ class SellerOrderStats(MethodView):
 class SellerOrderItem(MethodView):
     @login_required
     @seller_required
+    @bp.arguments(OrderItemStatusUpdateSchema)
     @bp.response(200, OrderItemSchema)
-    def patch(self, order_item_id, status_data):
+    def patch(self, status_data, order_item_id):
         """Update order item status"""
         if not current_user.seller_account and not current_user.is_seller:
             abort(403, message="Only sellers can access this endpoint")

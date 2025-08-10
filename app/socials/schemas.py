@@ -35,7 +35,21 @@ class NicheSchema(Schema):
     max_members = fields.Int(dump_only=True)
 
     # Metadata
-    categories = fields.List(fields.Nested("CategorySchema"), dump_only=True)
+    categories = fields.Method("get_categories", dump_only=True)
+
+    def get_categories(self, obj):
+        """Extract category data from NicheCategory objects"""
+        if hasattr(obj, "categories") and obj.categories:
+            from app.categories.schemas import CategorySchema
+
+            category_schema = CategorySchema()
+            return [
+                category_schema.dump(niche_category.category)
+                for niche_category in obj.categories
+                if niche_category.category
+            ]
+        return []
+
     tags = fields.List(fields.Str(), dump_only=True)
     rules = fields.List(fields.Str(), dump_only=True)
     settings = fields.Dict(dump_only=True)
@@ -49,7 +63,7 @@ class NicheSchema(Schema):
     updated_at = fields.DateTime(dump_only=True)
 
     # Relationships
-    category = fields.Nested("CategorySchema", dump_only=True)
+    # category = fields.Nested("CategorySchema", dump_only=True)  # Removed - not used
 
 
 class NicheSearchResultSchema(Schema):
@@ -316,7 +330,21 @@ class PostSchema(Schema):
     like_count = fields.Int(dump_only=True)
     comment_count = fields.Int(dump_only=True)
     niche_context = fields.Dict(dump_only=True)
-    categories = fields.List(fields.Nested("CategorySchema"), dump_only=True)
+    categories = fields.Method("get_categories", dump_only=True)
+
+    def get_categories(self, obj):
+        """Extract category data from PostCategory objects"""
+        if hasattr(obj, "categories") and obj.categories:
+            from app.categories.schemas import CategorySchema
+
+            category_schema = CategorySchema()
+            return [
+                category_schema.dump(post_category.category)
+                for post_category in obj.categories
+                if post_category.category
+            ]
+        return []
+
     social_media = fields.List(fields.Nested("SocialMediaPostSchema"), dump_only=True)
     seller = fields.Nested("SellerSimpleSchema", dump_only=True)
 

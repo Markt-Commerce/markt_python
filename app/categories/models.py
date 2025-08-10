@@ -4,6 +4,13 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 
 class Category(BaseModel):
+    """
+    Centralized category system for organizing content across different entities.
+    
+    This model provides a flexible, hierarchical categorization system that can be
+    reused across products, posts, requests, sellers, and niches. Categories support
+    parent-child relationships and metadata storage for extensibility.
+    """
     __tablename__ = "categories"
 
     id = db.Column(db.Integer, primary_key=True)
@@ -29,6 +36,9 @@ class Category(BaseModel):
 
 
 class ProductCategory(BaseModel):
+    """
+    Junction table linking products to categories with primary category designation.
+    """
     __tablename__ = "product_categories"
 
     product_id = db.Column(
@@ -44,6 +54,9 @@ class ProductCategory(BaseModel):
 
 
 class PostCategory(BaseModel):
+    """
+    Junction table linking social media posts to categories with primary category designation.
+    """
     __tablename__ = "post_categories"
 
     post_id = db.Column(db.String(12), db.ForeignKey("posts.id"), primary_key=True)
@@ -57,6 +70,9 @@ class PostCategory(BaseModel):
 
 
 class RequestCategory(BaseModel):
+    """
+    Junction table linking buyer requests to categories with primary category designation.
+    """
     __tablename__ = "request_categories"
 
     request_id = db.Column(
@@ -72,6 +88,9 @@ class RequestCategory(BaseModel):
 
 
 class SellerCategory(BaseModel):
+    """
+    Junction table linking sellers to categories with primary category designation.
+    """
     __tablename__ = "seller_categories"
 
     seller_id = db.Column(db.Integer, db.ForeignKey("sellers.id"), primary_key=True)
@@ -85,6 +104,9 @@ class SellerCategory(BaseModel):
 
 
 class NicheCategory(BaseModel):
+    """
+    Junction table linking niches to categories with primary category designation.
+    """
     __tablename__ = "niche_categories"
 
     niche_id = db.Column(db.String(12), db.ForeignKey("niches.id"), primary_key=True)
@@ -98,6 +120,9 @@ class NicheCategory(BaseModel):
 
 
 class Tag(BaseModel):
+    """
+    Flexible tagging system for products with slug-based routing support.
+    """
     __tablename__ = "tags"
 
     id = db.Column(db.Integer, primary_key=True)
@@ -109,6 +134,9 @@ class Tag(BaseModel):
 
 
 class ProductTag(BaseModel):
+    """
+    Junction table linking products to tags for flexible categorization.
+    """
     __tablename__ = "product_tags"
 
     product_id = db.Column(

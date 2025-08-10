@@ -43,6 +43,9 @@ class Media(BaseModel):
     is_public = db.Column(db.Boolean, default=True)
     user_id = db.Column(db.String(12), db.ForeignKey("users.id"))
 
+    # Soft delete field
+    deleted_at = db.Column(db.DateTime, nullable=True)
+
     # Additional metadata
     original_filename = db.Column(db.String(255))
     processing_status = db.Column(
@@ -61,19 +64,46 @@ class Media(BaseModel):
     )
     user = db.relationship("User", back_populates="media_uploads")
 
+    @property
+    def is_deleted(self):
+        """Check if media is soft deleted"""
+        return self.deleted_at is not None
+
+    def soft_delete(self):
+        """Soft delete the media by setting deleted_at timestamp"""
+        from datetime import datetime
+
+        self.deleted_at = datetime.utcnow()
+
+    def restore(self):
+        """Restore soft deleted media by clearing deleted_at"""
+        self.deleted_at = None
+
+    @classmethod
+    def filter_active_media(cls, media_list):
+        """Filter out soft-deleted media from a list of media objects"""
+        if not media_list:
+            return []
+        return [media for media in media_list if not media.is_deleted]
+
+    @classmethod
+    def get_active_media(cls, media_list):
+        """Get only active (non-deleted) media from a list"""
+        return cls.filter_active_media(media_list)
+
     def get_url(self, variant_type=MediaVariantType.ORIGINAL):
         """Get URL for specific variant or original"""
+        from app.libs.aws.s3 import s3_service
+
         if variant_type == MediaVariantType.ORIGINAL:
-            return (
-                f"https://{settings.AWS_S3_BUCKET}.s3.amazonaws.com/{self.storage_key}"
-            )
+            return s3_service._generate_url(settings.AWS_S3_BUCKET, self.storage_key)
 
         # Find specific variant
         variant = next(
             (v for v in self.variants if v.variant_type == variant_type), None
         )
         if variant:
-            return f"https://{settings.AWS_S3_BUCKET}.s3.amazonaws.com/{variant.storage_key}"
+            return s3_service._generate_url(settings.AWS_S3_BUCKET, variant.storage_key)
 
         # Fallback to original
         return None
@@ -110,7 +140,9 @@ class MediaVariant(BaseModel):
 
     def get_url(self):
         """Get URL for this variant"""
-        return f"https://{settings.AWS_S3_BUCKET}.s3.amazonaws.com/{self.storage_key}"
+        from app.libs.aws.s3 import s3_service
+
+        return s3_service._generate_url(settings.AWS_S3_BUCKET, self.storage_key)
 
 
 class ProductImage(BaseModel):

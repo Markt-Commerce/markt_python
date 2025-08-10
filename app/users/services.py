@@ -302,7 +302,9 @@ class UserService:
                 .options(
                     joinedload(User.address),
                     joinedload(User.buyer_account),
-                    joinedload(User.seller_account),
+                    joinedload(User.seller_account)
+                    .joinedload(Seller.categories)
+                    .joinedload(SellerCategory.category),
                 )
                 .get(user_id)
             )

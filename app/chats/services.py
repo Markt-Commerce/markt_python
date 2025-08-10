@@ -143,9 +143,11 @@ class ChatService:
                             "id": room.product.id,
                             "name": room.product.name,
                             "price": float(room.product.price),
-                            "image": room.product.media[0].url
-                            if room.product.media
-                            else None,
+                            "image": (
+                                room.product.images[0].media.get_url()
+                                if room.product.images and room.product.images[0].media
+                                else None
+                            ),
                         }
                         if room.product
                         else None,
@@ -348,9 +350,11 @@ class ChatService:
                         "id": room.product.id,
                         "name": room.product.name,
                         "price": float(room.product.price),
-                        "image": room.product.media[0].url
-                        if room.product.media
-                        else None,
+                        "image": (
+                            room.product.images[0].media.get_url()
+                            if room.product.images and room.product.images[0].media
+                            else None
+                        ),
                     }
                     if room.product
                     else None,

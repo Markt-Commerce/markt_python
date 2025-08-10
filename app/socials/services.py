@@ -534,9 +534,10 @@ class NicheService:
 
     @staticmethod
     def create_niche_post(
-        niche_id: str, user_id: str, post_data: Dict[str, Any]
+        niche_id: str, current_user: User, post_data: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Create a post in a specific niche/community"""
+        user_id = current_user.id
         with session_scope() as session:
             # Check if user can post in this niche
             permission_check = NicheService.can_user_post_in_niche(niche_id, user_id)
@@ -554,7 +555,7 @@ class NicheService:
                 if not seller:
                     raise ValidationError("Seller account not found")
 
-                post = PostService.create_post(seller.id, post_data)
+                post = PostService.create_post(current_user, post_data)
             else:
                 # For buyers, we need to handle this differently since posts are seller-based
                 # For now, we'll create a special buyer post or use a different approach
@@ -1311,6 +1312,7 @@ class PostService:
                 .options(
                     joinedload(Post.social_media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
+                    joinedload(Post.categories).joinedload(PostCategory.category),
                 )
             )
             paginator = Paginator(base_query, page=page, per_page=per_page)
@@ -1335,6 +1337,7 @@ class PostService:
                 .options(
                     joinedload(Post.social_media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
+                    joinedload(Post.categories).joinedload(PostCategory.category),
                 )
             )
             paginator = Paginator(base_query, page=page, per_page=per_page)
@@ -1695,12 +1698,21 @@ class PostService:
         with session_scope() as session:
             from app.media.models import SocialMediaPost
 
-            return (
+            # Get social media posts and filter out those with soft-deleted media
+            social_posts = (
                 session.query(SocialMediaPost)
                 .filter_by(post_id=post_id)
                 .order_by(SocialMediaPost.sort_order)
                 .all()
             )
+
+            # Filter out posts with soft-deleted media
+            active_posts = []
+            for post in social_posts:
+                if post.media and not post.media.is_deleted:
+                    active_posts.append(post)
+
+            return active_posts
 
     @staticmethod
     def delete_post_media(media_id: int, user_id: str):
@@ -1722,13 +1734,13 @@ class PostService:
                 # Get the media object
                 media = social_post.media
                 if media:
-                    # Delete from S3 using media service
-                    success = media_service.delete_media(media)
+                    # Soft delete media using media service
+                    success = media_service.delete_media(media, hard_delete=False)
                     if not success:
-                        logger.warning(f"Failed to delete media {media.id} from S3")
+                        logger.warning(f"Failed to soft delete media {media.id}")
 
-                    # Delete media object from database
-                    session.delete(media)
+                    # Update the media object in the session
+                    session.merge(media)
 
                 # Delete social media post relationship
                 session.delete(social_post)

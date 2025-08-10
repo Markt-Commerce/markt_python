@@ -192,8 +192,22 @@ class SellerProfileSchema(Schema):
     total_raters = fields.Int(dump_only=True)
     joined_date = fields.DateTime(dump_only=True)
     is_active = fields.Bool(dump_only=True)
-    categories = fields.List(fields.Nested("CategorySchema"), dump_only=True)
+    categories = fields.Method("get_categories", dump_only=True)
     policies = fields.Dict(dump_only=True)
+
+    def get_categories(self, obj):
+        """Extract category data from SellerCategory objects"""
+        if hasattr(obj, "categories") and obj.categories:
+            # Create a CategorySchema instance to serialize the categories
+            from app.categories.schemas import CategorySchema
+
+            category_schema = CategorySchema()
+            return [
+                category_schema.dump(seller_category.category)
+                for seller_category in obj.categories
+                if seller_category.category
+            ]
+        return []
 
 
 class UsernameCheckSchema(Schema):
@@ -252,7 +266,9 @@ class SellerSimpleSchema(Schema):
     id = fields.Int(dump_only=True)
     shop_name = fields.Str(dump_only=True)
     shop_slug = fields.Str(dump_only=True)
-    verification_status = fields.Str(dump_only=True)
+    verification_status = fields.Enum(
+        SellerVerificationStatus, by_value=True, dump_only=True
+    )
     average_rating = fields.Float(dump_only=True)
     total_products = fields.Int(dump_only=True)
     profile_picture_url = fields.Method("get_profile_picture_url", dump_only=True)
