@@ -20,6 +20,7 @@ from .schemas import (
     UserLoginSchema,
     PasswordResetSchema,
     PasswordResetConfirmSchema,
+    PasswordResetResponseSchema,
     EmailVerificationSendSchema,
     EmailVerificationSchema,
     UserPaginationSchema,
@@ -71,7 +72,7 @@ class UserLogin(MethodView):
             user = AuthService.login_user(
                 credentials["email"],
                 credentials["password"],
-                credentials["account_type"],
+                credentials.get("account_type"),  # Use .get() to handle optional field
             )
             login_user(user)
             return user
@@ -195,10 +196,19 @@ class SwitchRole(MethodView):
 @bp.route("/password-reset")
 class PasswordReset(MethodView):
     @bp.arguments(PasswordResetSchema)
-    @bp.response(202)
+    @bp.response(202, PasswordResetResponseSchema)
     def post(self, data):
-        code = AuthService.initiate_password_reset(data["email"])
-        return {"message": f"Reset code sent (DEV ONLY: {code})"}
+        """Initiate password reset process"""
+        try:
+            AuthService.initiate_password_reset(data["email"])
+            return {
+                "message": "If the email exists, a password reset code has been sent"
+            }
+        except AuthError as e:
+            abort(e.status_code, message=e.message)
+        except Exception as e:
+            logger.error(f"Password reset error: {str(e)}")
+            abort(500, message="Failed to process password reset request")
 
 
 @bp.route("/check-username")
@@ -215,18 +225,25 @@ class UsernameCheck(MethodView):
 @bp.route("/password-reset/confirm")
 class PasswordResetConfirm(MethodView):
     @bp.arguments(PasswordResetConfirmSchema)
-    @bp.response(204)
+    @bp.response(200, PasswordResetResponseSchema)
     def post(self, data):
-        AuthService.confirm_password_reset(
-            data["email"], data["code"], data["new_password"]
-        )
-        return None
+        """Confirm password reset with code and new password"""
+        try:
+            AuthService.confirm_password_reset(
+                data["email"], data["code"], data["new_password"]
+            )
+            return {"message": "Password reset successfully"}
+        except AuthError as e:
+            abort(e.status_code, message=e.message)
+        except Exception as e:
+            logger.error(f"Password reset confirmation error: {str(e)}")
+            abort(500, message="Failed to reset password")
 
 
 @bp.route("/email-verification/send")
 class SendEmailVerification(MethodView):
     @bp.arguments(EmailVerificationSendSchema)
-    @bp.response(202)
+    @bp.response(202, PasswordResetResponseSchema)
     def post(self, data):
         """Send email verification code"""
         try:
@@ -241,7 +258,7 @@ class SendEmailVerification(MethodView):
 @bp.route("/email-verification/verify")
 class VerifyEmail(MethodView):
     @bp.arguments(EmailVerificationSchema)
-    @bp.response(200)
+    @bp.response(200, PasswordResetResponseSchema)
     def post(self, data):
         """Verify email with code"""
         try:

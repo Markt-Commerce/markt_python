@@ -107,7 +107,7 @@ class AuthService:
             return user
 
     @staticmethod
-    def login_user(email, password, account_type):
+    def login_user(email, password, account_type=None):
         with session_scope() as session:
             user = session.query(User).filter(User.email == email).first()
             if not user or not user.check_password(password):
@@ -117,6 +117,22 @@ class AuthService:
             if not user.is_active:
                 raise AuthError("Account is deactivated")
 
+            # Intelligent login: if account_type not provided, use current_role or default
+            if account_type is None:
+                # Use current_role if set, otherwise determine based on available accounts
+                if hasattr(user, "_current_role") and user._current_role:
+                    account_type = user._current_role
+                elif user.is_buyer and user.is_seller:
+                    # If user has both accounts, default to buyer
+                    account_type = "buyer"
+                elif user.is_buyer:
+                    account_type = "buyer"
+                elif user.is_seller:
+                    account_type = "seller"
+                else:
+                    raise AuthError("No valid account type found")
+
+            # Validate the account type
             if account_type == "buyer":
                 if not user.is_buyer:
                     raise AuthError("Buyer account not found")
@@ -155,15 +171,50 @@ class AuthService:
                     "Please verify your email address before logging in. Check your email for verification code."
                 )
 
+            # Update current_role
             user.current_role = account_type
             return user
 
     @staticmethod
     def initiate_password_reset(email):
-        code = str(random.randint(100000, 999999))
-        redis_client.store_recovery_code(email, code)
-        # In production: Send email with code
-        return code  # For testing only
+        """Initiate password reset process by sending reset code via email"""
+        with session_scope() as session:
+            user = session.query(User).filter(User.email == email).first()
+            if not user:
+                # Don't reveal if email exists or not for security
+                logger.info(f"Password reset requested for non-existent email: {email}")
+                return True
+
+            # Generate reset code
+            reset_code = str(random.randint(100000, 999999))
+
+            # Store reset code in Redis (10 minutes expiration)
+            redis_client.store_recovery_code(email, reset_code, expires_in=600)
+
+            # Send password reset email
+            try:
+                success = email_service.send_password_reset_email(
+                    email=user.email,
+                    reset_code=reset_code,
+                    username=user.username,
+                )
+
+                if not success:
+                    # Clean up Redis if email fails
+                    redis_client.delete_recovery_code(user.email)
+                    logger.error(f"Failed to send password reset email to {user.email}")
+                    raise AuthError("Failed to send password reset email")
+
+                logger.info(f"Password reset email sent successfully to {user.email}")
+                return True
+
+            except Exception as e:
+                # Clean up Redis if email fails
+                redis_client.delete_recovery_code(user.email)
+                logger.error(
+                    f"Error sending password reset email to {user.email}: {str(e)}"
+                )
+                raise AuthError("Failed to send password reset email")
 
     @staticmethod
     def confirm_password_reset(email, code, new_password):

@@ -139,7 +139,31 @@ class OrderService:
             order = session.query(Order).get(order_id)
             if not order:
                 raise NotFoundError("Order not found")
+
+            old_status = order.status
             order.status = new_status
+
+            # Queue async real-time event (non-blocking)
+            try:
+                from app.realtime.event_manager import EventManager
+
+                EventManager.emit_to_order(
+                    order_id,
+                    "order_status_changed",
+                    {
+                        "order_id": order_id,
+                        "user_id": order.buyer.user_id if order.buyer else None,
+                        "status": new_status.value,
+                        "old_status": old_status.value if old_status else None,
+                        "metadata": {
+                            "order_number": order.order_number,
+                            "total": order.total,
+                        },
+                    },
+                )
+            except Exception as e:
+                logger.warning(f"Failed to queue order_status_changed event: {e}")
+
             return order
 
     # TODO: Add order history tracking

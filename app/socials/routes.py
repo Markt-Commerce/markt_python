@@ -45,6 +45,10 @@ from .schemas import (
     NichePostListSchema,
     NichePostApprovalSchema,
     NichePostSchema,
+    # Reaction schemas
+    ReactionCreateSchema,
+    ReactionSummarySchema,
+    PostCommentReactionSchema,
 )
 from .services import (
     PostService,
@@ -52,6 +56,7 @@ from .services import (
     FeedService,
     TrendingService,
     NicheService,
+    ReactionService,
 )
 
 
@@ -569,3 +574,46 @@ class NicheFeed(MethodView):
 
 # Note: Social post image management is now handled via the media module
 # Use /api/v1/media/social-posts/{post_id}/media for image operations
+
+
+# Reaction Routes
+# -----------------------------------------------
+
+
+@bp.route("/comments/<comment_id>/reactions")
+class CommentReactions(MethodView):
+    @bp.response(200, ReactionSummarySchema(many=True))
+    def get(self, comment_id):
+        """Get all reactions for a comment"""
+        try:
+            user_id = current_user.id if current_user.is_authenticated else None
+            return ReactionService.get_comment_reactions(comment_id, user_id)
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+    @login_required
+    @bp.arguments(ReactionCreateSchema)
+    @bp.response(201, PostCommentReactionSchema)
+    def post(self, reaction_data, comment_id):
+        """Add a reaction to a comment"""
+        try:
+            return ReactionService.add_comment_reaction(
+                current_user.id, comment_id, reaction_data["reaction_type"]
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/comments/<comment_id>/reactions/<reaction_type>")
+class CommentReactionDetail(MethodView):
+    @login_required
+    @bp.response(204)
+    def delete(self, comment_id, reaction_type):
+        """Remove a reaction from a comment"""
+        try:
+            ReactionService.remove_comment_reaction(
+                current_user.id, comment_id, reaction_type
+            )
+            return "", 204
+        except APIError as e:
+            abort(e.status_code, message=e.message)

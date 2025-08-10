@@ -1,6 +1,7 @@
 from external.database import db
-from app.libs.models import BaseModel
+from app.libs.models import BaseModel, ReactionMixin, BaseReaction
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.declarative import declared_attr
 
 
 class ChatRoom(BaseModel):
@@ -31,7 +32,7 @@ class ChatRoom(BaseModel):
     )
 
 
-class ChatMessage(BaseModel):
+class ChatMessage(BaseModel, ReactionMixin):
     __tablename__ = "chat_messages"
 
     id = db.Column(db.Integer, primary_key=True)
@@ -63,3 +64,26 @@ class ChatOffer(BaseModel):
 
     message = db.relationship("ChatMessage", foreign_keys=[message_id])
     product = db.relationship("Product")
+
+
+# Reaction Model for Chat Messages
+class ChatMessageReaction(BaseReaction):
+    __tablename__ = "chat_message_reactions"
+
+    message_id = db.Column(
+        db.Integer, db.ForeignKey("chat_messages.id"), nullable=False
+    )
+
+    # Relationships
+    @declared_attr
+    def content(cls):
+        return db.relationship("ChatMessage", back_populates="reactions")
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            "message_id", "user_id", "reaction_type", name="uq_chat_message_reaction"
+        ),
+        db.Index("idx_chat_message_reaction_message", "message_id"),
+        db.Index("idx_chat_message_reaction_user", "user_id"),
+        db.Index("idx_chat_message_reaction_type", "reaction_type"),
+    )

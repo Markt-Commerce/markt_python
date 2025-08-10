@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timedelta
 from flask_socketio import emit, disconnect
 from app.socials.sockets import SocialNamespace
 from app.notifications.sockets import NotificationNamespace
@@ -41,6 +42,58 @@ class SocketManager:
 
         return list(redis_client.smembers("online_users"))
 
+    @staticmethod
+    def deliver_offline_messages(user_id: str):
+        """Deliver queued offline messages to user when they connect"""
+        try:
+            from external.redis import redis_client
+            from main.extensions import socketio
+            import json
+
+            # Get all offline messages for user
+            offline_messages = redis_client.lrange(f"offline:{user_id}", 0, -1)
+
+            if not offline_messages:
+                return
+
+            delivered_count = 0
+            for message_data in offline_messages:
+                try:
+                    message = json.loads(message_data)
+
+                    # Check if message has expired
+                    expires_at = datetime.fromisoformat(message["expires_at"])
+                    if datetime.utcnow() > expires_at:
+                        continue
+
+                    # Deliver message
+                    room = f"user_{user_id}"
+                    if message.get("namespace"):
+                        socketio.emit(
+                            message["event"],
+                            message["data"],
+                            room=room,
+                            namespace=message["namespace"],
+                        )
+                    else:
+                        socketio.emit(message["event"], message["data"], room=room)
+
+                    delivered_count += 1
+
+                except Exception as e:
+                    logger.error(f"Failed to deliver offline message: {e}")
+                    continue
+
+            # Clear delivered messages
+            if delivered_count > 0:
+                redis_client.delete(f"offline:{user_id}")
+                logger.info(
+                    f"Delivered {delivered_count} offline messages to user {user_id}"
+                )
+
+        except Exception as e:
+            logger.error(f"Failed to deliver offline messages to user {user_id}: {e}")
+
 
 def register_socket_namespaces(socketio):
     """Register socket namespaces with enhanced architecture
@@ -64,7 +117,7 @@ def register_socket_namespaces(socketio):
         socketio.on_namespace(SocialNamespace("/social"))
         socketio.on_namespace(NotificationNamespace("/notification"))
         socketio.on_namespace(OrderNamespace("/orders"))
-        # socketio.on_namespace(ChatNamespace("/chat"))
+        socketio.on_namespace(ChatNamespace("/chat"))
 
         # Add global error handler for socket connections
         @socketio.on_error()
@@ -109,19 +162,40 @@ def register_socket_namespaces(socketio):
 
 
 def emit_to_user(user_id: str, event: str, data: dict, namespace: str = None):
-    """Centralized method to emit events to specific user"""
+    """Centralized method to emit events to specific user with offline queuing"""
     try:
         from main.extensions import socketio
+        from external.redis import redis_client
+        import json
 
         room = f"user_{user_id}"
 
-        if namespace:
-            socketio.emit(event, data, room=room, namespace=namespace)
-        else:
-            socketio.emit(event, data, room=room)
+        # Check if user is online
+        if not SocketManager.is_user_online(user_id):
+            # Queue message for offline user
+            offline_message = {
+                "event": event,
+                "data": data,
+                "namespace": namespace,
+                "timestamp": datetime.utcnow().isoformat(),
+                "expires_at": (datetime.utcnow() + timedelta(hours=24)).isoformat(),
+            }
 
-        logger.debug(f"Emitted {event} to user {user_id}")
-        return True
+            redis_client.lpush(f"offline:{user_id}", json.dumps(offline_message))
+            redis_client.expire(f"offline:{user_id}", 86400)  # 24 hours
+
+            logger.info(f"Queued offline message {event} for user {user_id}")
+            return True
+        else:
+            # Send immediately to online user
+            if namespace:
+                socketio.emit(event, data, room=room, namespace=namespace)
+            else:
+                socketio.emit(event, data, room=room)
+
+            logger.debug(f"Emitted {event} to user {user_id}")
+            return True
+
     except Exception as e:
         logger.error(f"Failed to emit {event} to user {user_id}: {e}")
         return False
