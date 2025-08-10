@@ -83,7 +83,9 @@ class BuyerRequestService:
                 "user_id": request.user_id,
                 "title": request.title,
                 "description": request.description,
-                "category_id": request.category_id,
+                "category_ids": [
+                    rc.category_id for rc in getattr(request, "categories", [])
+                ],
                 "budget": float(request.budget) if request.budget else None,
                 "request_metadata": request.request_metadata or {},
                 "status": request.status.value if request.status else None,
@@ -125,7 +127,9 @@ class BuyerRequestService:
                         "user_id": item.user_id,
                         "title": item.title,
                         "description": item.description,
-                        "category_id": item.category_id,
+                        "category_ids": [
+                            rc.category_id for rc in getattr(item, "categories", [])
+                        ],
                         "budget": float(item.budget) if item.budget else None,
                         "status": item.status.value if item.status else None,
                         "views": item.views,
@@ -493,7 +497,9 @@ class BuyerRequestService:
                 session.query(BuyerRequest)
                 .filter(BuyerRequest.user_id == user_id)
                 .options(
-                    joinedload(BuyerRequest.category),
+                    joinedload(BuyerRequest.categories).joinedload(
+                        RequestCategory.category
+                    ),
                     joinedload(BuyerRequest.images),
                     joinedload(BuyerRequest.offers),
                 )
@@ -534,9 +540,10 @@ class BuyerRequestService:
                     )
                 )
 
-            if args.get("category_id"):
-                base_query = base_query.filter(
-                    BuyerRequest.category_id == args["category_id"]
+            if args.get("category_ids"):
+                # Filter requests that have ANY of the provided category IDs
+                base_query = base_query.join(BuyerRequest.categories).filter(
+                    RequestCategory.category_id.in_(args["category_ids"])  # type: ignore
                 )
 
             if args.get("min_budget"):
@@ -635,8 +642,18 @@ class BuyerRequestService:
                 request.title = data["title"]
             if data.get("description"):
                 request.description = data["description"]
-            if data.get("category_id"):
-                request.category_id = data["category_id"]
+            if data.get("category_ids") is not None:
+                # Remove existing category links
+                session.query(RequestCategory).filter_by(request_id=request.id).delete()
+                # Add provided categories in order; first one is primary
+                for idx, category_id in enumerate(data["category_ids"] or []):
+                    session.add(
+                        RequestCategory(
+                            request_id=request.id,
+                            category_id=category_id,
+                            is_primary=(idx == 0),
+                        )
+                    )
             if data.get("budget"):
                 request.budget = data["budget"]
             if data.get("metadata"):
@@ -667,7 +684,9 @@ class BuyerRequestService:
             # Cache invalidation
             BuyerRequestService._invalidate_request_cache(request_id)
             BuyerRequestService._invalidate_user_cache(user_id)
-            BuyerRequestService._invalidate_category_cache(request.category_id)
+            # Invalidate caches for all request categories
+            for rc in getattr(request, "categories", []) or []:
+                BuyerRequestService._invalidate_category_cache(rc.category_id)
 
             return request
 
@@ -700,7 +719,9 @@ class BuyerRequestService:
             # Cache invalidation
             BuyerRequestService._invalidate_request_cache(request_id)
             BuyerRequestService._invalidate_user_cache(user_id)
-            BuyerRequestService._invalidate_category_cache(request.category_id)
+            # Invalidate caches for all request categories
+            for rc in getattr(request, "categories", []) or []:
+                BuyerRequestService._invalidate_category_cache(rc.category_id)
 
             return True
 
@@ -853,9 +874,11 @@ class BuyerRequestService:
             # Get sellers in the same category
             base_query = session.query(Seller).filter(Seller.is_verified == True)
 
-            if request.category_id:
+            # If request has primary category, filter sellers by that category
+            primary_rc = next((rc for rc in request.categories if rc.is_primary), None)
+            if primary_rc:
                 base_query = base_query.filter(
-                    Seller.category_id == request.category_id
+                    Seller.category_id == primary_rc.category_id
                 )
 
             # Filter by budget range if specified

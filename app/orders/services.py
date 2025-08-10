@@ -1,5 +1,5 @@
 # python imports
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -257,8 +257,7 @@ class SellerOrderService:
                 )
                 .filter(
                     OrderItem.seller_id == seller_id,
-                    OrderItem.created_at
-                    >= db.func.date_sub(db.func.now(), db.text("INTERVAL 1 MONTH")),
+                    OrderItem.created_at >= (datetime.utcnow() - timedelta(days=30)),
                 )
                 .scalar()
                 or 0,
