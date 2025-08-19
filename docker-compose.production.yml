@@ -1,0 +1,181 @@
+version: "3.8"
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: markt-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: markt_db
+      POSTGRES_USER: markt
+      POSTGRES_PASSWORD: markt123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - markt-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U markt -d markt_db"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis Cache & Queue
+  redis:
+    image: redis:7-alpine
+    container_name: markt-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf
+    command: redis-server /usr/local/etc/redis/redis.conf
+    networks:
+      - markt-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis Stack (Optional - for RedisInsight)
+  redis-stack:
+    image: redis/redis-stack:latest
+    container_name: markt-redis-stack
+    restart: unless-stopped
+    ports:
+      - "8001:80"
+    volumes:
+      - redis-data:/data
+    networks:
+      - markt-network
+    profiles:
+      - monitoring
+
+  # Application
+  markt-app:
+    build:
+      context: .
+      dockerfile: Dockerfile.production
+    container_name: markt-app
+    restart: unless-stopped
+    environment:
+      - ENV=production
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=markt
+      - DB_PASSWORD=markt123
+      - DB_NAME=markt_db
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - SECRET_KEY=${SECRET_KEY}
+      - PAYSTACK_SECRET_KEY=${PAYSTACK_SECRET_KEY}
+      - PAYSTACK_PUBLIC_KEY=${PAYSTACK_PUBLIC_KEY}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - markt-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Celery Worker
+  markt-celery:
+    build:
+      context: .
+      dockerfile: Dockerfile.production
+    container_name: markt-celery
+    restart: unless-stopped
+    environment:
+      - ENV=production
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=markt
+      - DB_PASSWORD=markt123
+      - DB_NAME=markt_db
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - SECRET_KEY=${SECRET_KEY}
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - markt-network
+    command: celery -A main.workers worker -l INFO -Q social,notifications
+
+  # Celery Beat
+  markt-celerybeat:
+    build:
+      context: .
+      dockerfile: Dockerfile.production
+    container_name: markt-celerybeat
+    restart: unless-stopped
+    environment:
+      - ENV=production
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=markt
+      - DB_PASSWORD=markt123
+      - DB_NAME=markt_db
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - SECRET_KEY=${SECRET_KEY}
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - markt-network
+    command: celery -A main.workers beat -l INFO
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: markt-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./docker/nginx/conf.d:/etc/nginx/conf.d
+      - ./logs/nginx:/var/log/nginx
+      - ./uploads:/var/www/uploads
+    depends_on:
+      - markt-app
+    networks:
+      - markt-network
+
+networks:
+  markt-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local 

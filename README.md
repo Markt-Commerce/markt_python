@@ -1,99 +1,160 @@
-# Markt E-Commerce Project
+# Markt Python Backend
 
-## Project Overview
 
-The Markt E-Commerce Project is a revolutionary e-commerce application that bridges the gap between local sellers and buyers, providing a seamless and natural online shopping experience. Our mission is to enable local sellers to expand their reach, increase sales, and connect with buyers in innovative ways while allowing buyers to enjoy the market-like shopping experience from the comfort of their homes.
+<img
+  src="https://avatars.githubusercontent.com/u/188402477?s=200&v=4"
+  alt="Markt Logo"
+  style="width: 100%; max-width: 800px; height: 150px; object-fit: cover; border-radius: 8px;"
+/>
 
-### Key Functionalities
+*Empowering Student (but not exclusive) Entrepreneurs with Social Commerce*
 
-1. **Proximity-Based Product Presentation:** Products are intelligently presented to buyers based on the proximity of the seller to the buyer's location and the availability of the product. This ensures that products are showcased to buyers from nearby sellers with reputable ratings and feedback, facilitating quick and efficient product delivery.
+## 🚀 Tech Stack
 
-2. **Seller-Buyer Interactions:** We recreate the natural interactions that occur in a physical marketplace. Buyers can easily communicate with sellers, negotiate product prices, and switch between related sellers effortlessly.
+### Core Technologies
+- **Framework**: Flask 2.3
+- **API**: Flask-Smorest (REST API + OpenAPI/Swagger)
+- **Database**: PostgreSQL with SQLAlchemy ORM
+- **Auth**: Flask-Login with session management
+- **Realtime**: Flask-SocketIO
+- **Caching**: Redis
 
-3. **Advanced Product Search:** Our platform offers advanced product search capabilities, allowing buyers to easily find products they are looking for. Buyers can use the search bar to discover products, or they can inquire about products even when they don't know the exact product name.
+### Key Features
+- Social commerce platform for student entrepreneurs (but not exclusive)
+- Hybrid e-commerce with social media features
+- Real-time chat and notifications
+- Comprehensive API documentation
 
-4. **Chat Functionality:** Our chat feature enables real-time communication between buyers and sellers, enhancing the shopping experience and fostering trust and transparency.
+## 🛠️ Development Setup
 
-## Project Structure
+### Prerequisites
+- Python 3.9+
+- PostgreSQL 13+
+- Redis 6+
+- Git
 
-The project structure follows best practices for Flask-based applications, organized into logical components:
+### Installation
 
-- **app:** Contains the main application logic and configuration files.
-- **templates:** Stores HTML templates for rendering views.
-- **static:** Holds static assets like CSS, JavaScript, and images.
-- **tests:** Includes unit and integration tests for ensuring code quality.
-- **migrations:** Manages database schema changes using SQLAlchemy-Migrate.
-- **config:** Stores configuration files for different environments (development, production, testing).
-- **venv:** Virtual environment for isolating project dependencies.
+```bash
+# Clone repository
+git clone https://github.com/Markt-Commerce/markt_python.git
+cd markt_python
 
-## Technologies Used
+# Create and activate virtual environment
+python3 -m venv .venv
+source .venv/bin/activate  # Linux/Mac
+# .venv\Scripts\activate  # Windows
 
-Our project utilizes industry-standard technologies and libraries to ensure a robust and scalable solution:
+# Copy configuration template
+cp settings.ini.example settings.ini
 
-- **Flask:** A micro web framework for building web applications.
-- **SQLAlchemy ORM:** Provides database management capabilities and object-relational mapping.
-- **Flask-SocketIO:** Implements WebSocket functionality for real-time chat.
-- **Flask-Smorest:** Simplifies the creation of RESTful APIs with automatic documentation.
-- **Other Flask Dependencies:** We leverage various Flask extensions to enhance functionality and maintainability.
+# Install dependencies
+pip install -r requirements/dev-requirements.txt
 
-## Getting Started
+```
 
-To set up the development environment and run the Flask application locally, follow these steps:
+### Configuration
+Edit `settings.ini` with your local configuration:
+```ini
+[Database]
+DB_HOST=localhost
+DB_PORT=5432
+DB_USER=markt
+DB_PASSWORD=markt123
+DB_NAME=markt_db
 
-1. Clone the repository:
-   ```
-   git clone https://github.com/amethystcoder/markt_python.git
-   cd markt_python
-   ```
+[Redis]
+REDIS_HOST=localhost
+REDIS_PORT=6379
 
-2. Create and activate a virtual environment (recommended):
-   ```
-   python -m venv venv
-   source venv/bin/activate
-   ```
+[App]
+SECRET_KEY=your-secret-key-here
+DEBUG=True
+```
 
-3. Install project dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
+## 🌟 Redis Management
 
-4. Configure your database connection in `config.py`.
+Start/stop Redis container:
+```bash
+# Start Redis
+cd external
+docker-compose -f docker-compose.redis.yml up -d
 
-5. Run the application:
-   ```
-   flask run
-   ```
+# Stop Redis
+docker-compose -f docker-compose.redis.yml down
 
-6. Access the application in your web browser at `http://localhost:5000`.
+# View logs
+docker-compose -f docker-compose.redis.yml logs -f
+```
 
-## API Documentation
+## 🏃 Running the Application
 
-You can access the API documentation to explore available endpoints and their usage.
+```bash
+# Start development server
+python -m main.run
 
-- **Swagger UI:** The API documentation is available through Swagger UI. To access it, follow these steps:
+# Production (using Gunicorn)
+gunicorn -w 4 -b 127.0.0.1:8000 "main.setup:create_app()"
+```
 
-  1. Start the application as described in the [Getting Started](#getting-started) section.
+Access API docs at: `http://localhost:8000/swagger-ui`
 
-  2. Open your web browser and navigate to `http://localhost:5000/swagger-ui`.
+## 📦 Database Migrations
 
-The API documentation provides details about available endpoints, request and response schemas, and allows you to interact with the API.
+```bash
+# Set flask app
+export FLASK_APP=main.setup:create_flask_app
 
-**Note:** This documentation is auto-generated using Flask-Smorest and provides a comprehensive view of the API's capabilities.
+# Initialize migrations (first time only)
+flask db init
 
-## Contribution
+# Create new migration
+flask db migrate -m "your migration message"
 
-Contributions to the project are welcome! If you would like to contribute code, please follow these steps:
+# Apply migrations
+flask db upgrade
 
-1. Fork the repository.
+# Rollback migration
+flask db downgrade
+```
 
-2. Clone your forked repository to your local machine.
+## ✨ Development Practices
 
-3. Create a new branch for your feature or bug fix.
+### Code Style
 
-4. Make your changes, commit, and push to your forked repository.
+> [!IMPORTANT]
+> Use `pre-commit run` command before committing your changes.
+> Use `cz commit` command to commit your changes.
 
-5. Create a pull request to the main repository with a clear description of your changes.
+### Commit Messages
+We use Conventional Commits with Commitizen:
+```bash
+# Interactive commit
+cz commit
 
-## License
+# Or follow the pattern:
+<type>[optional scope]: <description>
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+# Example:
+feat(auth): add JWT authentication support
+```
+
+### Pull Requests
+See our [Pull Request Guidelines](PULL_REQUEST_TEMPLATE.md) for details on:
+- Required checklist items
+- Code review standards
+- Testing requirements
+- Documentation updates
+
+## 🤝 Contributing
+
+We welcome contributions! Please:
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`cz commit`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## 📜 License
+
+MIT License - See [LICENSE](LICENSE) for details.
