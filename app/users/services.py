@@ -10,7 +10,7 @@ from sqlalchemy import func
 from external.redis import redis_client
 from external.database import db
 from app.libs.session import session_scope
-from app.libs.errors import AuthError, NotFoundError, APIError
+from app.libs.errors import AuthError, NotFoundError, APIError, UnverifiedEmailError
 from app.libs.pagination import Paginator
 from app.libs.email_service import email_service
 
@@ -167,12 +167,21 @@ class AuthService:
                         f"Failed to send verification email to {user.email}: {str(e)}"
                     )
 
-                raise AuthError(
-                    "Please verify your email address before logging in. Check your email for verification code."
+                raise UnverifiedEmailError(
+                    "Please verify your email address before logging in. Check your email for verification code.",
+                    payload={"email": user.email},
                 )
 
-            # Update current_role
+            # Update current_role and last login timestamp
             user.current_role = account_type
+            try:
+                # Update last login time for session management on frontend
+                from datetime import datetime
+
+                user.last_login_at = datetime.utcnow()
+                session.commit()
+            except Exception as e:
+                logger.warning(f"Failed to update last_login_at for {user.id}: {e}")
             return user
 
     @staticmethod

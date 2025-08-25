@@ -25,6 +25,8 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
 
     # Email verification
     email_verified = db.Column(db.Boolean, default=False)
+    # Last login timestamp for session management
+    last_login_at = db.Column(db.DateTime)
 
     # Relationships
     address = db.relationship("UserAddress", uselist=False, back_populates="user")
