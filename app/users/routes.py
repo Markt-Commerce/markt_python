@@ -8,7 +8,7 @@ from flask_login import login_user, logout_user, login_required, current_user
 from sqlalchemy import or_
 
 # project imports
-from app.libs.errors import AuthError, NotFoundError
+from app.libs.errors import AuthError, NotFoundError, UnverifiedEmailError
 from app.libs.pagination import Paginator
 from app.libs.schemas import PaginationQueryArgs
 from app.media.schemas import MediaSchema
@@ -76,6 +76,9 @@ class UserLogin(MethodView):
             )
             login_user(user)
             return user
+        except UnverifiedEmailError as e:
+            # Return structured payload that frontend can detect easily
+            abort(e.status_code, **e.to_dict())
         except AuthError as e:
             abort(e.status_code, message=e.message)
 

@@ -30,6 +30,7 @@ class UserSchema(Schema):
     current_role = fields.Str(dump_only=True)
     created_at = fields.DateTime(dump_only=True)
     updated_at = fields.DateTime(dump_only=True)
+    last_login_at = fields.DateTime(dump_only=True)
 
     def get_profile_picture_url(self, obj):
         """Get profile picture URL with fallback to default"""
