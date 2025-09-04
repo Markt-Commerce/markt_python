@@ -50,7 +50,10 @@ socialSocket.emit('join_product', { product_id: 'product_456' });
 ordersSocket.emit('join_order', { order_id: 'order_789' });
 
 // Join chat room (chat namespace)
-chatSocket.emit('join_chat', { room_id: 'chat_123' });
+chatSocket.emit('join_room', { room_id: 123 });
+
+// Leave chat room (chat namespace)
+chatSocket.emit('leave_room', { room_id: 123 });
 ```
 
 ## Event Categories
@@ -232,22 +235,30 @@ chatSocket.emit('join_chat', { room_id: 'chat_123' });
 
 ### Messages
 
-#### `new_message`
-**Triggered when:** A new chat message is sent
+#### `message` (primary)
+**Triggered when:** A new chat message is sent via the chat namespace handler
 **Room:** `chat_{room_id}`
 **Namespace:** `/chat`
 **Data:**
 ```javascript
 {
-  "message_id": "msg_123",
-  "room_id": "chat_456",
-  "sender_id": "user_789",
-  "sender_name": "John Doe",
+  "id": 456,
   "content": "Hello! Is this still available?",
-  "message_type": "text",
-  "timestamp": "2024-01-15T10:30:00Z"
+  "message_type": "text", // text | image | product | offer
+  "message_data": { "product_id": "PRD_789" } | null,
+  "sender_id": "USR_123456",
+  "sender_username": "john_doe",
+  "is_read": false,
+  "created_at": "2025-07-14T16:30:00Z"
 }
 ```
+
+#### `new_message` (from centralized pipeline)
+**Triggered when:** A chat message is emitted by the centralized realtime pipeline
+**Room:** `chat_{room_id}`
+**Namespace:** `/chat`
+**Note:** Some features use the centralized `EventManager` which emits `new_message`.
+Listen for both `message` and `new_message` to be safe.
 
 ### Typing Indicators
 
@@ -258,11 +269,48 @@ chatSocket.emit('join_chat', { room_id: 'chat_123' });
 **Data:**
 ```javascript
 {
-  "user_id": "user_123",
+  "room_id": 123,
+  "user_id": "USR_123456",
   "username": "john_doe",
-  "is_typing": true,
-  "timestamp": "2024-01-15T10:30:00Z"
+  "action": "start" | "stop",
+  "timestamp": "2025-07-14T16:30:00Z"
 }
+```
+
+### Sending a product in chat (WebSocket)
+
+```javascript
+// Send a standard text message with an attached product
+chatSocket.emit('message', {
+  room_id: 123,
+  message: 'Check this product',
+  product_id: 'PRD_789' // Optional
+});
+
+// Listen for server confirmation and broadcast
+chatSocket.on('message_sent', (data) => {
+  // { message_id, timestamp }
+});
+chatSocket.on('message', (msg) => {
+  // msg.message_data may contain { product_id }
+});
+// If centralized pipeline is used in some flows
+chatSocket.on('new_message', (msg) => { /* same shape */ });
+```
+
+### Sending an offer in chat (WebSocket)
+
+```javascript
+chatSocket.emit('send_offer', {
+  room_id: 123,
+  product_id: 'PRD_789',
+  offer_amount: 25.00,
+  message: 'I can offer $25 for this product'
+});
+
+chatSocket.on('offer_sent', (data) => { /* offer payload */ });
+chatSocket.on('offer_confirmed', (data) => { /* confirmation */ });
+chatSocket.on('offer_response', (data) => { /* accept/reject */ });
 ```
 
 ## Client-Side Implementation
@@ -309,13 +357,17 @@ ordersSocket.on('payment_confirmed', (data) => {
 });
 
 // Chat events (use chatSocket)
-chatSocket.on('new_message', (data) => {
-  addMessageToChat(data.room_id, data);
+// Listen to both to cover direct and centralized emissions
+chatSocket.on('message', (data) => {
+  addMessageToChat(activeRoomId, data);
   playNotificationSound();
+});
+chatSocket.on('new_message', (data) => {
+  addMessageToChat(activeRoomId, data);
 });
 
 chatSocket.on('typing_update', (data) => {
-  updateTypingIndicator(data.room_id, data.user_id, data.is_typing);
+  updateTypingIndicator(data.room_id, data.user_id, data.action === 'start');
 });
 ```
 
