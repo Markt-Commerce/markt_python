@@ -26,7 +26,14 @@ from app.orders.models import OrderItem
 
 # app imports
 from .models import User, Buyer, Seller, UserAddress, SellerVerificationStatus
-from .constants import RESERVED_USERNAMES
+from .constants import (
+    RESERVED_USERNAMES,
+    PROFILE_SETUP_HREF,
+    ADD_FIRST_PRODUCT_HREF,
+    VERIFY_EMAIL_HREF,
+    VIEW_ORDERS_HREF,
+    CREATE_POST_HREF,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1156,7 +1163,7 @@ class SellerStartCardsService:
                 "key": "profile_setup",
                 "title": "Complete Your Profile",
                 "description": "Add your shop name, description, and profile picture to build trust with customers.",
-                "cta": {"label": "Complete Profile", "href": "/seller/profile/edit"},
+                "cta": {"label": "Complete Profile", "href": PROFILE_SETUP_HREF},
                 "completed": profile_setup_completed,
                 "progress": {
                     "current": sum(
@@ -1173,7 +1180,7 @@ class SellerStartCardsService:
                 "key": "add_first_product",
                 "title": "Add Your First Product",
                 "description": "Start selling by adding your first product to your shop.",
-                "cta": {"label": "Add Product", "href": "/seller/products/new"},
+                "cta": {"label": "Add Product", "href": ADD_FIRST_PRODUCT_HREF},
                 "completed": add_first_product_completed,
                 "progress": {"current": product_count, "target": 1},
             },
@@ -1181,14 +1188,14 @@ class SellerStartCardsService:
                 "key": "verify_email",
                 "title": "Verify Your Email",
                 "description": "Verify your email address to secure your account and receive important updates.",
-                "cta": {"label": "Verify Email", "href": "/verify-email"},
+                "cta": {"label": "Verify Email", "href": VERIFY_EMAIL_HREF},
                 "completed": verify_email_completed,
             },
             {
                 "key": "fulfill_pending_orders",
                 "title": "Fulfill Pending Orders",
                 "description": f"You have {pending_orders_count} pending orders waiting to be processed.",
-                "cta": {"label": "View Orders", "href": "/seller/orders"},
+                "cta": {"label": "View Orders", "href": VIEW_ORDERS_HREF},
                 "completed": fulfill_pending_orders_completed,
                 "progress": {"current": pending_orders_count, "target": 0},
             },
@@ -1196,7 +1203,7 @@ class SellerStartCardsService:
                 "key": "publish_first_post",
                 "title": "Engage Your Audience",
                 "description": "Publish your first social post to connect with customers and showcase your products.",
-                "cta": {"label": "Create Post", "href": "/socials/posts/new"},
+                "cta": {"label": "Create Post", "href": CREATE_POST_HREF},
                 "completed": publish_first_post_completed,
                 "progress": {"current": post_count, "target": 1},
             },
