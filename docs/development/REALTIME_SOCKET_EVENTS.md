@@ -4,16 +4,62 @@ This document provides comprehensive information about all real-time socket even
 
 ## Table of Contents
 
-1. [Connection Setup](#connection-setup)
-2. [Event Categories](#event-categories)
-3. [Social Events](#social-events)
-4. [Product Events](#product-events)
-5. [Order Events](#order-events)
-6. [Chat Events](#chat-events)
-7. [Notification Events](#notification-events)
-8. [Client-Side Implementation](#client-side-implementation)
-9. [Error Handling](#error-handling)
-10. [Performance Considerations](#performance-considerations)
+1. [Authentication Requirements](#authentication-requirements) 
+2. [Connection Setup](#connection-setup)
+3. [Event Categories](#event-categories)
+4. [Social Events](#social-events)
+5. [Product Events](#product-events)
+6. [Order Events](#order-events)
+7. [Chat Events](#chat-events)
+8. [Notification Events](#notification-events)
+9. [Client-Side Implementation](#client-side-implementation)
+10. [Error Handling](#error-handling)
+11. [Performance Considerations](#performance-considerations)
+
+## Authentication Requirements
+
+> ⚠️ **BREAKING CHANGE**: All SocketIO events now require explicit `user_id` parameter
+> 
+> **Migration from session-based to user_id-based authentication implemented for security/consistency.**
+
+### New Required Authentication Pattern
+
+**ALL Socket.IO events must now include `user_id` in their data payload:**
+
+```javascript
+// ✅ REQUIRED: Include user_id in every socket event
+chatSocket.emit('join_room', { 
+    room_id: 123, 
+    user_id: 'USR_123456'
+});
+
+// ✅ REQUIRED: Include user_id for all actions
+chatSocket.emit('ping', { 
+    user_id: 'USR_123456'
+});
+
+socialSocket.emit('join_post', { 
+    post_id: 'post_123', 
+    user_id: 'USR_123456'
+});
+
+ordersSocket.emit('join_order', { 
+    order_id: 'order_789', 
+    user_id: 'USR_123456'
+});
+
+notificationsSocket.emit('mark_as_read', { 
+    notification_ids: [1, 2, 3], 
+    user_id: 'USR_123456'
+});
+```
+
+### Benefits:
+- ✅ **Solves cross-domain session problems** between HTTP/WebSocket authentication
+- ✅ **Simplifies scaling** - no complex session replication 
+- ✅ **Modern real-world standard** followed by Discord/WhatsApp/Slack APIs
+- ✅ **Enhanced security** - per-event authentication 
+- ✅ **Meets user presence** edge cases in mobile/web apps
 
 ## Connection Setup
 
@@ -40,20 +86,35 @@ const socket = io('http://your-api-domain.com', {
 ### Room Joining
 
 ```javascript
-// Join post-specific room (social namespace)
-socialSocket.emit('join_post', { post_id: 'post_123' });
+// ✅ Join post-specific room (social namespace)
+socialSocket.emit('join_post', { 
+    post_id: 'post_123', 
+    user_id: 'USR_123456'  // REQUIRED
+});
 
-// Join product-specific room (social namespace)
-socialSocket.emit('join_product', { product_id: 'product_456' });
+// ✅ Join product-specific room (social namespace)
+socialSocket.emit('join_product', { 
+    product_id: 'product_456', 
+    user_id: 'USR_123456'  // REQUIRED
+});
 
-// Join order-specific room (orders namespace)
-ordersSocket.emit('join_order', { order_id: 'order_789' });
+// ✅ Join order-specific room (orders namespace)
+ordersSocket.emit('join_order', { 
+    order_id: 'order_789', 
+    user_id: 'USR_123456'  // REQUIRED
+});
 
-// Join chat room (chat namespace)
-chatSocket.emit('join_room', { room_id: 123 });
+// ✅ Join chat room (chat namespace)
+chatSocket.emit('join_room', { 
+    room_id: 123, 
+    user_id: 'USR_123456'  // REQUIRED
+});
 
-// Leave chat room (chat namespace)
-chatSocket.emit('leave_room', { room_id: 123 });
+// ✅ Leave chat room (chat namespace)
+chatSocket.emit('leave_room', { 
+    room_id: 123, 
+    user_id: 'USR_123456'  // REQUIRED
+});
 ```
 
 ## Event Categories
@@ -280,11 +341,12 @@ Listen for both `message` and `new_message` to be safe.
 ### Sending a product in chat (WebSocket)
 
 ```javascript
-// Send a standard text message with an attached product
+// ✅ Send a standard text message with an attached product
 chatSocket.emit('message', {
   room_id: 123,
   message: 'Check this product',
-  product_id: 'PRD_789' // Optional
+  product_id: 'PRD_789', // Optional
+  user_id: 'USR_123456'  // REQUIRED - Now needed for all events
 });
 
 // Listen for server confirmation and broadcast
@@ -305,7 +367,8 @@ chatSocket.emit('send_offer', {
   room_id: 123,
   product_id: 'PRD_789',
   offer_amount: 25.00,
-  message: 'I can offer $25 for this product'
+  message: 'I can offer $25 for this product',
+  user_id: 'USR_123456'  // REQUIRED
 });
 
 chatSocket.on('offer_sent', (data) => { /* offer payload */ });
@@ -314,6 +377,43 @@ chatSocket.on('offer_response', (data) => { /* accept/reject */ });
 ```
 
 ## Client-Side Implementation
+
+### App-Level Presence Management  
+
+**Modern Real-World Pattern:** Application maintains global presence (like Discord/WhatsApp/Slack)
+
+```javascript
+// ✅ REQUIRED: Global presence management pattern
+const GlobalPresenceManager = {
+  user_id: null,
+  
+  // Set after login
+  setUserId(userId) {
+    this.user_id = userId;
+  },
+  
+  // Send heartbeat to maintain presence across ALL namespaces 
+  startHeartbeat() {
+    const sendPing = () => {
+      if (this.user_id) {
+        // ✅ ALL ping handlers MUST include user_id for app-level presence
+        chatSocket.emit('ping', { user_id: this.user_id });
+        socialSocket.emit('ping', { user_id: this.user_id });
+        ordersSocket.emit('ping', { user_id: this.user_id });
+        notificationsSocket.emit('ping', { user_id: this.user_id });
+        
+        // These maintain single global presence record
+      }
+    };
+    
+    setInterval(sendPing, 45000); // Every 45 seconds
+  }
+};
+
+// Initialize after authentication
+GlobalPresenceManager.setUserId('USR_123456');
+GlobalPresenceManager.startHeartbeat();
+```
 
 ### Event Listeners Setup
 
