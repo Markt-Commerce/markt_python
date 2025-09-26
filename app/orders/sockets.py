@@ -1,7 +1,6 @@
 import logging
 from datetime import datetime
 from flask_socketio import Namespace, emit, join_room, leave_room
-from flask_login import current_user
 from external.redis import redis_client
 
 logger = logging.getLogger(__name__)
@@ -52,34 +51,11 @@ class OrderNamespace(Namespace):
         from main.sockets import SocketManager
 
         try:
-            if not current_user.is_authenticated:
-                logger.warning("Unauthorized order connection attempt")
-                return emit("error", {"message": "Unauthorized"})
-
-            # Join user-specific room
-            join_room(f"user_{current_user.id}")
-
-            # Join role-specific rooms
-            if current_user.is_buyer:
-                join_room(f"buyer_{current_user.buyer_account.id}")
-            if current_user.is_seller:
-                join_room(f"seller_{current_user.seller_account.id}")
-
-            # Mark user as online using centralized manager
-            SocketManager.mark_user_online(current_user.id, "orders")
-
             emit(
                 "connected",
-                {
-                    "status": "connected",
-                    "user_id": current_user.id,
-                    "roles": {
-                        "is_buyer": current_user.is_buyer,
-                        "is_seller": current_user.is_seller,
-                    },
-                },
+                {"status": "connected", "message": "Connected to orders namespace"},
             )
-            logger.info(f"User {current_user.id} connected to orders namespace")
+            logger.info("Client connected to orders namespace")
 
         except Exception as e:
             logger.error(f"Order connection error: {e}")
@@ -90,18 +66,7 @@ class OrderNamespace(Namespace):
         from main.sockets import SocketManager
 
         try:
-            if current_user.is_authenticated:
-                leave_room(f"user_{current_user.id}")
-                if current_user.is_buyer:
-                    leave_room(f"buyer_{current_user.buyer_account.id}")
-                if current_user.is_seller:
-                    leave_room(f"seller_{current_user.seller_account.id}")
-
-                SocketManager.mark_user_offline(current_user.id)
-                logger.info(
-                    f"User {current_user.id} disconnected from orders namespace"
-                )
-
+            logger.info("Client disconnected from orders namespace")
         except Exception as e:
             logger.error(f"Order disconnection error: {e}")
 
@@ -109,15 +74,16 @@ class OrderNamespace(Namespace):
     def on_join_order(self, data):
         """Join room for specific order updates with validation"""
         try:
-            if not current_user.is_authenticated:
-                return emit("error", {"message": "Unauthorized"})
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
 
             # Rate limiting
-            if not self._check_rate_limit("join_order", current_user.id):
+            if not self._check_rate_limit("join_order", user_id):
                 return emit("error", {"message": "Rate limit exceeded"})
 
             # Data validation
-            is_valid, error_msg = self._validate_data(data, ["order_id"])
+            is_valid, error_msg = self._validate_data(data, ["order_id", "user_id"])
             if not is_valid:
                 return emit("error", {"message": error_msg})
 
@@ -130,7 +96,7 @@ class OrderNamespace(Namespace):
                 return emit("error", {"message": "Order not found"})
 
             # Check if user has access to this order
-            if not OrderService.user_has_access_to_order(current_user.id, order_id):
+            if not OrderService.user_has_access_to_order(user_id, order_id):
                 return emit("error", {"message": "Access denied"})
 
             join_room(f"order_{order_id}")
@@ -158,11 +124,12 @@ class OrderNamespace(Namespace):
     def on_leave_order(self, data):
         """Leave order room with validation"""
         try:
-            if not current_user.is_authenticated:
-                return emit("error", {"message": "Unauthorized"})
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
 
             # Data validation
-            is_valid, error_msg = self._validate_data(data, ["order_id"])
+            is_valid, error_msg = self._validate_data(data, ["order_id", "user_id"])
             if not is_valid:
                 return emit("error", {"message": error_msg})
 
@@ -177,15 +144,16 @@ class OrderNamespace(Namespace):
     def on_payment_status(self, data):
         """Get payment status update with validation"""
         try:
-            if not current_user.is_authenticated:
-                return emit("error", {"message": "Unauthorized"})
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
 
             # Rate limiting
-            if not self._check_rate_limit("payment_status", current_user.id):
+            if not self._check_rate_limit("payment_status", user_id):
                 return emit("error", {"message": "Rate limit exceeded"})
 
             # Data validation
-            is_valid, error_msg = self._validate_data(data, ["payment_id"])
+            is_valid, error_msg = self._validate_data(data, ["payment_id", "user_id"])
             if not is_valid:
                 return emit("error", {"message": error_msg})
 
@@ -198,9 +166,7 @@ class OrderNamespace(Namespace):
                 return emit("error", {"message": "Payment not found"})
 
             # Check if user has access to this payment
-            if not PaymentService.user_has_access_to_payment(
-                current_user.id, payment_id
-            ):
+            if not PaymentService.user_has_access_to_payment(user_id, payment_id):
                 return emit("error", {"message": "Access denied"})
 
             try:
@@ -227,20 +193,30 @@ class OrderNamespace(Namespace):
     def on_join_seller_orders(self, data):
         """Join room for seller order updates with validation"""
         try:
-            if not current_user.is_authenticated:
-                return emit("error", {"message": "Unauthorized"})
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
 
-            if not current_user.is_seller:
+            # Data validation
+            is_valid, error_msg = self._validate_data(data, ["user_id"])
+            if not is_valid:
+                return emit("error", {"message": error_msg})
+
+            # Check seller account via user service (or extend validation logic)
+            from app.users.services import UserService
+
+            user = UserService.get_user_by_id(user_id)
+            if not user or not hasattr(user, "seller_account"):
                 return emit("error", {"message": "Seller access required"})
 
-            join_room(f"seller_orders_{current_user.seller_account.id}")
+            join_room(f"seller_orders_{user.seller_account.id}")
 
             # Get pending orders count
             from app.orders.services import SellerOrderService
 
             try:
                 stats = SellerOrderService.get_seller_order_stats(
-                    current_user.seller_account.id
+                    user.seller_account.id
                 )
                 emit(
                     "seller_stats",
@@ -262,8 +238,16 @@ class OrderNamespace(Namespace):
     def on_leave_seller_orders(self, data):
         """Leave seller orders room"""
         try:
-            if current_user.is_authenticated and current_user.is_seller:
-                leave_room(f"seller_orders_{current_user.seller_account.id}")
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
+
+            # Check seller account and leave room
+            from app.users.services import UserService
+
+            user = UserService.get_user_by_id(user_id)
+            if user and hasattr(user, "seller_account"):
+                leave_room(f"seller_orders_{user.seller_account.id}")
         except Exception as e:
             logger.error(f"Leave seller orders error: {e}")
 
@@ -273,21 +257,23 @@ class OrderNamespace(Namespace):
         from main.sockets import SocketManager
 
         try:
-            if not current_user.is_authenticated:
-                return emit("error", {"message": "Unauthorized"})
+            # Use user_id from client instead of current_user
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
 
             # Rate limiting
-            if not self._check_rate_limit("ping", current_user.id):
+            if not self._check_rate_limit("ping", user_id):
                 return emit("error", {"message": "Rate limit exceeded"})
 
             # Refresh online status using centralized manager
-            SocketManager.mark_user_online(current_user.id, "orders")
+            SocketManager.mark_user_online(user_id, "orders")
 
             emit(
                 "pong",
                 {
                     "timestamp": datetime.utcnow().isoformat(),
-                    "user_id": current_user.id,
+                    "user_id": user_id,
                 },
             )
 
@@ -298,8 +284,9 @@ class OrderNamespace(Namespace):
     def on_get_order_history(self, data):
         """Handle get order history request"""
         try:
-            if not current_user.is_authenticated:
-                return emit("error", {"message": "Unauthorized"})
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
 
             # Parse pagination parameters
             page = data.get("page", 1)
@@ -309,7 +296,7 @@ class OrderNamespace(Namespace):
             from app.orders.services import OrderService
 
             orders = OrderService.list_user_orders(
-                current_user.id, page=page, per_page=per_page, status=status_filter
+                user_id, page=page, per_page=per_page, status=status_filter
             )
 
             emit(

@@ -1,7 +1,6 @@
 import logging
 from datetime import datetime
 from flask_socketio import Namespace, emit, join_room, leave_room
-from flask_login import current_user
 from external.redis import redis_client
 from app.libs.socket_utils import RoomManager, EventManager
 
@@ -75,23 +74,11 @@ class SocialNamespace(Namespace):
         from main.sockets import SocketManager
 
         try:
-            if not current_user.is_authenticated:
-                logger.warning("Unauthorized social connection attempt")
-                return emit(
-                    "error", {"message": "Unauthorized", "code": "UNAUTHORIZED"}
-                )
-
-            # Join user-specific room
-            join_room(RoomManager.get_user_room(current_user.id))
-
-            # Mark user as online using centralized manager
-            SocketManager.mark_user_online(current_user.id, "social")
-
-            # Deliver offline messages
-            SocketManager.deliver_offline_messages(current_user.id)
-
-            emit("connected", {"status": "connected", "user_id": current_user.id})
-            logger.info(f"User {current_user.id} connected to social namespace")
+            emit(
+                "connected",
+                {"status": "connected", "message": "Connected to social namespace"},
+            )
+            logger.info("Client connected to social namespace")
 
         except Exception as e:
             logger.error(f"Social connection error: {e}")
@@ -102,12 +89,7 @@ class SocialNamespace(Namespace):
         from main.sockets import SocketManager
 
         try:
-            if current_user.is_authenticated:
-                leave_room(f"user_{current_user.id}")
-                SocketManager.mark_user_offline(current_user.id)
-                logger.info(
-                    f"User {current_user.id} disconnected from social namespace"
-                )
+            logger.info("Client disconnected from social namespace")
         except Exception as e:
             logger.error(f"Social disconnection error: {e}")
 
@@ -115,15 +97,16 @@ class SocialNamespace(Namespace):
     def on_typing_start(self, data):
         """Handle typing indicators for posts with validation"""
         try:
-            if not current_user.is_authenticated:
-                return emit("error", {"message": "Unauthorized"})
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
 
             # Rate limiting
-            if not self._check_rate_limit("typing_start", current_user.id):
+            if not self._check_rate_limit("typing_start", user_id):
                 return emit("error", {"message": "Rate limit exceeded"})
 
             # Data validation
-            is_valid, error_msg = self._validate_data(data, ["post_id"])
+            is_valid, error_msg = self._validate_data(data, ["post_id", "user_id"])
             if not is_valid:
                 return emit("error", {"message": error_msg})
 
@@ -137,16 +120,22 @@ class SocialNamespace(Namespace):
 
             # Track typing status
             redis_client.hset(
-                f"typing:post:{post_id}", current_user.id, datetime.utcnow().isoformat()
+                f"typing:post:{post_id}", user_id, datetime.utcnow().isoformat()
             )
             redis_client.expire(f"typing:post:{post_id}", 10)
+
+            # Get username from user service
+            from app.users.services import UserService
+
+            user = UserService.get_user_by_id(user_id)
+            username = user.username if user else "Unknown"
 
             emit(
                 "typing_update",
                 {
                     "post_id": post_id,
-                    "user_id": current_user.id,
-                    "username": current_user.username,
+                    "user_id": user_id,
+                    "username": username,
                     "action": "start",
                     "timestamp": datetime.utcnow().isoformat(),
                 },
@@ -161,26 +150,27 @@ class SocialNamespace(Namespace):
     def on_typing_stop(self, data):
         """Handle typing stop with validation"""
         try:
-            if not current_user.is_authenticated:
-                return emit("error", {"message": "Unauthorized"})
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
 
             # Rate limiting
-            if not self._check_rate_limit("typing_stop", current_user.id):
+            if not self._check_rate_limit("typing_stop", user_id):
                 return emit("error", {"message": "Rate limit exceeded"})
 
             # Data validation
-            is_valid, error_msg = self._validate_data(data, ["post_id"])
+            is_valid, error_msg = self._validate_data(data, ["post_id", "user_id"])
             if not is_valid:
                 return emit("error", {"message": error_msg})
 
             post_id = data.get("post_id")
-            redis_client.hdel(f"typing:post:{post_id}", current_user.id)
+            redis_client.hdel(f"typing:post:{post_id}", user_id)
 
             emit(
                 "typing_update",
                 {
                     "post_id": post_id,
-                    "user_id": current_user.id,
+                    "user_id": user_id,
                     "action": "stop",
                     "timestamp": datetime.utcnow().isoformat(),
                 },
@@ -193,12 +183,14 @@ class SocialNamespace(Namespace):
             emit("error", {"message": "Failed to process typing stop"})
 
     # ==================== POST ENGAGEMENT ====================
-    def on_join_post(self, post_id):
+    def on_join_post(self, data):
         """Join room for post updates with validation"""
         try:
-            if not current_user.is_authenticated:
-                return emit("error", {"message": "Unauthorized"})
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
 
+            post_id = data.get("post_id")
             if not post_id:
                 return emit("error", {"message": "Post ID required"})
 
@@ -228,21 +220,28 @@ class SocialNamespace(Namespace):
             logger.error(f"Join post error: {e}")
             emit("error", {"message": "Failed to join post"})
 
-    def on_leave_post(self, post_id):
+    def on_leave_post(self, data):
         """Leave post room"""
         try:
-            if current_user.is_authenticated and post_id:
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
+
+            post_id = data.get("post_id")
+            if post_id:
                 leave_room(f"post_{post_id}")
         except Exception as e:
             logger.error(f"Leave post error: {e}")
 
     # ==================== PRODUCT ENGAGEMENT ====================
-    def on_join_product(self, product_id):
+    def on_join_product(self, data):
         """Join room for product updates with validation"""
         try:
-            if not current_user.is_authenticated:
-                return emit("error", {"message": "Unauthorized"})
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
 
+            product_id = data.get("product_id")
             if not product_id:
                 return emit("error", {"message": "Product ID required"})
 
@@ -271,10 +270,15 @@ class SocialNamespace(Namespace):
             logger.error(f"Join product error: {e}")
             emit("error", {"message": "Failed to join product"})
 
-    def on_leave_product(self, product_id):
+    def on_leave_product(self, data):
         """Leave product room"""
         try:
-            if current_user.is_authenticated and product_id:
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
+
+            product_id = data.get("product_id")
+            if product_id:
                 leave_room(f"product_{product_id}")
         except Exception as e:
             logger.error(f"Leave product error: {e}")
@@ -283,45 +287,53 @@ class SocialNamespace(Namespace):
     def on_follow(self, data):
         """Handle follow updates with validation and rate limiting"""
         try:
-            if not current_user.is_authenticated:
-                return emit("error", {"message": "Unauthorized"})
+            # Get both user IDs from request
+            follower_id = data.get("follower_id")
+            if not follower_id:
+                return emit("error", {"message": "Follower ID required"})
+
+            target_user_id = data.get("user_id")
+            if not target_user_id:
+                return emit("error", {"message": "Target user ID required"})
 
             # Rate limiting
-            if not self._check_rate_limit("follow", current_user.id):
+            if not self._check_rate_limit("follow", follower_id):
                 return emit("error", {"message": "Rate limit exceeded"})
 
             # Data validation
-            is_valid, error_msg = self._validate_data(data, ["user_id"])
+            is_valid, error_msg = self._validate_data(data, ["user_id", "follower_id"])
             if not is_valid:
                 return emit("error", {"message": error_msg})
 
-            user_id = data.get("user_id")
-
-            if user_id == current_user.id:
+            if target_user_id == follower_id:
                 return emit("error", {"message": "Cannot follow yourself"})
 
             # Validate target user exists
             from app.users.services import UserService
 
-            if not UserService.user_exists(user_id):
+            if not UserService.user_exists(target_user_id):
                 return emit("error", {"message": "User not found"})
+
+            # Get follower info for display
+            follower = UserService.get_user_by_id(follower_id)
+            follower_name = follower.username if follower else "Unknown"
 
             # Emit follow event to target user
             emit(
                 "follow_update",
                 {
-                    "follower_id": current_user.id,
-                    "follower_name": current_user.username,
+                    "follower_id": follower_id,
+                    "follower_name": follower_name,
                     "timestamp": datetime.utcnow().isoformat(),
                 },
-                room=RoomManager.get_user_room(user_id),
+                room=RoomManager.get_user_room(target_user_id),
             )
 
-            # Emit confirmation to current user
+            # Emit confirmation to follower
             emit(
                 "follow_success",
                 {
-                    "followed_user_id": user_id,
+                    "followed_user_id": target_user_id,
                     "timestamp": datetime.utcnow().isoformat(),
                 },
             )
@@ -350,12 +362,14 @@ class SocialNamespace(Namespace):
     #
     # Real-time updates are handled by EventManager via /social namespace
 
-    def on_join_comment(self, comment_id):
+    def on_join_comment(self, data):
         """Join room for comment updates"""
         try:
-            if not current_user.is_authenticated:
-                return emit("error", {"message": "Unauthorized"})
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
 
+            comment_id = data.get("comment_id")
             if not comment_id:
                 return emit("error", {"message": "Comment ID required"})
 
@@ -378,10 +392,15 @@ class SocialNamespace(Namespace):
             logger.error(f"Join comment error: {e}")
             emit("error", {"message": "Failed to join comment"})
 
-    def on_leave_comment(self, comment_id):
+    def on_leave_comment(self, data):
         """Leave comment room"""
         try:
-            if current_user.is_authenticated and comment_id:
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
+
+            comment_id = data.get("comment_id")
+            if comment_id:
                 leave_room(f"comment_{comment_id}")
         except Exception as e:
             logger.error(f"Leave comment error: {e}")
@@ -392,15 +411,16 @@ class SocialNamespace(Namespace):
         from main.sockets import SocketManager
 
         try:
-            if not current_user.is_authenticated:
-                return emit("error", {"message": "Unauthorized"})
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
 
             # Rate limiting
-            if not self._check_rate_limit("ping", current_user.id):
+            if not self._check_rate_limit("ping", user_id):
                 return emit("error", {"message": "Rate limit exceeded"})
 
             # Refresh online status
-            SocketManager.mark_user_online(current_user.id, "social")
+            SocketManager.mark_user_online(user_id, "social")
             emit("pong", {"timestamp": datetime.utcnow().isoformat()})
 
         except Exception as e:
