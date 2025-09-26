@@ -385,7 +385,7 @@ class ChatNamespace(Namespace):
 
     # ==================== UTILITY ====================
     def on_ping(self, data):
-        """Handle ping for connection health check"""
+        """Handle ping for connection health check with app-level presence"""
         try:
             user_id = data.get("user_id")
             if not user_id:
@@ -394,6 +394,10 @@ class ChatNamespace(Namespace):
             # Rate limiting
             if not self._check_rate_limit("ping", user_id):
                 return emit("error", {"message": "Rate limit exceeded"})
+
+            from main.sockets import SocketManager
+
+            SocketManager.mark_user_online(user_id)
 
             emit(
                 "pong",

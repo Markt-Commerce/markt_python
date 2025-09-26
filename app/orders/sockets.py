@@ -257,7 +257,6 @@ class OrderNamespace(Namespace):
         from main.sockets import SocketManager
 
         try:
-            # Use user_id from client instead of current_user
             user_id = data.get("user_id")
             if not user_id:
                 return emit("error", {"message": "User ID required"})
@@ -266,8 +265,7 @@ class OrderNamespace(Namespace):
             if not self._check_rate_limit("ping", user_id):
                 return emit("error", {"message": "Rate limit exceeded"})
 
-            # Refresh online status using centralized manager
-            SocketManager.mark_user_online(user_id, "orders")
+            SocketManager.mark_user_online(user_id)
 
             emit(
                 "pong",

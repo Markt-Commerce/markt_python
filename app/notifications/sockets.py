@@ -138,8 +138,7 @@ class NotificationNamespace(Namespace):
             if not self._check_rate_limit("ping", user_id):
                 return emit("error", {"message": "Rate limit exceeded"})
 
-            # Refresh online status using centralized manager
-            SocketManager.mark_user_online(user_id, "notifications")
+            SocketManager.mark_user_online(user_id)
 
             emit(
                 "pong",
