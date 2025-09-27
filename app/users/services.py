@@ -91,19 +91,8 @@ class AuthService:
                             is_primary=(idx == 0),  # First category is primary
                         )
                         session.add(seller_category)
-
-            # Return user first, then send email verification outside transaction
+                        
             session.commit()
-
-            # Send email verification outside the transaction to avoid rollback
-            try:
-                AuthService.send_email_verification(user.email)
-            except Exception as e:
-                logger.warning(
-                    f"Failed to send verification email to {user.email}: {str(e)}"
-                )
-                # Don't fail registration if email fails
-
             return user
 
     @staticmethod
@@ -159,16 +148,8 @@ class AuthService:
 
             # Check email verification for new accounts
             if not user.email_verified:
-                # Send verification email if not already sent
-                try:
-                    AuthService.send_email_verification(user.email)
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to send verification email to {user.email}: {str(e)}"
-                    )
-
                 raise UnverifiedEmailError(
-                    "Please verify your email address before logging in. Check your email for verification code.",
+                    "Please verify your email address before logging in. Use the email verification endpoint to send a verification code.",
                     payload={"email": user.email},
                 )
 
