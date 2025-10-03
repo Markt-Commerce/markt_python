@@ -296,3 +296,75 @@ class PublicProfileSchema(Schema):
 # Legacy schema for backward compatibility
 class SellerSchema(SellerCreateSchema):
     """Legacy schema alias"""
+
+
+# Seller Start Cards Schemas
+class StartCardCTASchema(Schema):
+    label = fields.Str(required=True)
+    href = fields.Str(required=True)
+
+
+class StartCardProgressSchema(Schema):
+    current = fields.Int(required=True)
+    target = fields.Int(required=True)
+
+
+class StartCardSchema(Schema):
+    key = fields.Str(required=True)
+    title = fields.Str(required=True)
+    description = fields.Str(required=True)
+    cta = fields.Nested(StartCardCTASchema, required=True)
+    completed = fields.Bool(required=True)
+    progress = fields.Nested(StartCardProgressSchema, allow_none=True)
+
+
+class StartCardsMetadataSchema(Schema):
+    seller_id = fields.Int(required=True)
+    generated_at = fields.Str(required=True)
+
+
+class StartCardsResponseSchema(Schema):
+    items = fields.List(fields.Nested(StartCardSchema), required=True)
+    metadata = fields.Nested(StartCardsMetadataSchema, required=True)
+
+
+# Seller Analytics Schemas
+class AnalyticsOverviewSchema(Schema):
+    revenue_30d = fields.Float(required=True)
+    orders_30d = fields.Int(required=True)
+    views_30d = fields.Int(required=True)
+    conversion_30d = fields.Float(required=True)
+
+
+class AnalyticsTimeseriesPointSchema(Schema):
+    bucket_start = fields.Str(required=True)
+    value = fields.Float(required=True)
+
+
+class AnalyticsTimeseriesTotalsSchema(Schema):
+    value = fields.Float(required=True)
+    count = fields.Int(required=True)
+
+
+class AnalyticsTimeseriesResponseSchema(Schema):
+    metric = fields.Str(required=True)
+    bucket = fields.Str(required=True)
+    series = fields.List(fields.Nested(AnalyticsTimeseriesPointSchema), required=True)
+    totals = fields.Nested(AnalyticsTimeseriesTotalsSchema, required=True)
+
+
+# Query parameter schemas
+class AnalyticsTimeseriesQuerySchema(Schema):
+    metric = fields.Str(
+        required=True,
+        validate=validate.OneOf(["sales", "orders", "views", "conversion"]),
+    )
+    bucket = fields.Str(
+        required=True, validate=validate.OneOf(["day", "week", "month"])
+    )
+    start_date = fields.DateTime(required=True)
+    end_date = fields.DateTime(required=True)
+
+
+class AnalyticsOverviewQuerySchema(Schema):
+    window_days = fields.Int(missing=30, validate=validate.Range(min=1, max=365))
