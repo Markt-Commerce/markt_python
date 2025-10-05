@@ -47,6 +47,7 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
         "Notification", back_populates="user", lazy="dynamic"
     )
     transactions = db.relationship("Transaction", back_populates="user", lazy="dynamic")
+    posts = db.relationship("Post", back_populates="user", lazy="dynamic")
     post_likes = db.relationship("PostLike", back_populates="user", lazy="dynamic")
     post_comments = db.relationship(
         "PostComment", back_populates="user", lazy="dynamic"
@@ -180,7 +181,6 @@ class Seller(BaseModel):
     order_items = db.relationship("OrderItem", back_populates="seller")
     offers = db.relationship("SellerOffer", back_populates="seller", lazy="dynamic")
     transactions = db.relationship("Transaction", back_populates="seller")
-    posts = db.relationship("Post", back_populates="seller", lazy="dynamic")
     categories = db.relationship("SellerCategory", back_populates="seller")
 
     @property
