@@ -324,7 +324,7 @@ class PostCreateSchema(Schema):
 
 class PostSchema(Schema):
     id = fields.Str(dump_only=True)
-    seller_id = fields.Int(dump_only=True)
+    user_id = fields.Str(dump_only=True)
     caption = fields.Str()
     created_at = fields.DateTime(dump_only=True)
     like_count = fields.Int(dump_only=True)
@@ -346,7 +346,7 @@ class PostSchema(Schema):
         return []
 
     social_media = fields.List(fields.Nested("SocialMediaPostSchema"), dump_only=True)
-    seller = fields.Nested("SellerSimpleSchema", dump_only=True)
+    user = fields.Nested("UserSimpleSchema", dump_only=True)
 
 
 class SellerPostsSchema(Schema):
@@ -480,7 +480,7 @@ class FeedPostSchema(Schema):
     id = fields.Str(dump_only=True)
     type = fields.Str(dump_only=True)
     caption = fields.Str(dump_only=True)
-    seller = fields.Dict(dump_only=True)
+    user = fields.Dict(dump_only=True)
     media = fields.List(fields.Dict(), dump_only=True)
     likes_count = fields.Int(dump_only=True)
     comments_count = fields.Int(dump_only=True)
