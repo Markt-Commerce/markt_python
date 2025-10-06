@@ -74,8 +74,24 @@ class ProductSchema(ProductCreateSchema):
             ]
         return []
 
+    def get_seller_user_info(self, obj):
+        """Extract seller's user information for messaging functionality"""
+        if (
+            hasattr(obj, "seller")
+            and obj.seller
+            and hasattr(obj.seller, "user")
+            and obj.seller.user
+        ):
+            return {
+                "id": obj.seller.user.id,
+                "username": obj.seller.user.username,
+                "profile_picture": obj.seller.user.profile_picture,
+            }
+        return None
+
     images = fields.List(fields.Nested("ProductImageSchema"), dump_only=True)
     seller = fields.Nested("SellerSimpleSchema", dump_only=True)
+    seller_user = fields.Method("get_seller_user_info", dump_only=True)
 
 
 class ProductSearchSchema(Schema):
