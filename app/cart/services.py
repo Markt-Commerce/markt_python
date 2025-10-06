@@ -93,6 +93,10 @@ class CartService:
             if product.status.value != "active":
                 raise ValidationError("Product is not available for purchase")
 
+            # Handle variant_id properly - convert 0 to None for products without variants
+            if variant_id == 0:
+                variant_id = None
+
             # Validate variant if provided
             if variant_id:
                 variant = session.query(ProductVariant).get(variant_id)
