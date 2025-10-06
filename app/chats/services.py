@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List, Tuple
 
 # package imports
 from sqlalchemy.orm import joinedload
@@ -22,7 +22,15 @@ from app.products.models import Product
 from app.requests.models import BuyerRequest
 
 # app imports
-from .models import ChatRoom, ChatMessage, ChatOffer, ChatMessageReaction
+from .models import (
+    ChatRoom,
+    ChatMessage,
+    ChatOffer,
+    ChatMessageReaction,
+    ChatDiscount,
+    DiscountType,
+    DiscountStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -926,3 +934,665 @@ class ChatReactionService:
         except Exception as e:
             logger.error(f"Failed to get message reactions: {str(e)}")
             raise APIError("Failed to get reactions")
+
+
+class DiscountService:
+    """Service for managing discount offers within chat conversations"""
+
+    # Cache keys for discount data
+    CACHE_KEYS = {
+        "user_discounts": "discount:user:{user_id}:active",
+        "room_discounts": "discount:room:{room_id}:active",
+        "discount_validation": "discount:validate:{discount_id}",
+    }
+
+    @staticmethod
+    def create_discount_offer(
+        seller_id: str, room_id: int, discount_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Create a new discount offer within a chat conversation
+
+        Args:
+            seller_id: ID of the seller creating the discount
+            room_id: Chat room ID where discount is being offered
+            discount_data: Discount configuration data
+
+        Returns:
+            Dict containing the created discount details
+        """
+        try:
+            with session_scope() as session:
+                # Validate seller permissions
+                seller = (
+                    session.query(User)
+                    .filter(User.id == seller_id, User.seller_account.has())
+                    .first()
+                )
+
+                if not seller:
+                    raise ForbiddenError("Only sellers can create discount offers")
+
+                # Validate room access and get room details
+                room = (
+                    session.query(ChatRoom)
+                    .options(
+                        joinedload(ChatRoom.buyer),
+                        joinedload(ChatRoom.seller),
+                        joinedload(ChatRoom.product),
+                    )
+                    .filter(ChatRoom.id == room_id, ChatRoom.seller_id == seller_id)
+                    .first()
+                )
+
+                if not room:
+                    raise ForbiddenError("Access denied to this chat room")
+
+                # Validate discount data
+                validation_result = DiscountService._validate_discount_data(
+                    discount_data
+                )
+                if not validation_result["valid"]:
+                    raise ValidationError(validation_result["message"])
+
+                # Convert and store expires_at properly for database using timezone utilities
+                from app.libs.datetime_utils import ensure_timezone_aware
+
+                expires_at = ensure_timezone_aware(discount_data["expires_at"])
+
+                # Create discount record
+                discount = ChatDiscount(
+                    room_id=room_id,
+                    product_id=discount_data.get("product_id"),
+                    discount_type=discount_data["discount_type"],
+                    discount_value=discount_data["discount_value"],
+                    minimum_order_amount=discount_data.get("minimum_order_amount"),
+                    maximum_discount_amount=discount_data.get(
+                        "maximum_discount_amount"
+                    ),
+                    expires_at=expires_at,
+                    usage_limit=discount_data.get("usage_limit", 1),
+                    created_by_id=seller_id,
+                    offered_to_id=room.buyer_id,
+                    discount_message=discount_data.get("discount_message"),
+                    discount_code=discount_data.get("discount_code"),
+                    discount_metadata=discount_data.get("metadata", {}),
+                    status=DiscountStatus.PENDING,
+                )
+
+                session.add(discount)
+                session.flush()
+
+                # Create chat message for the discount offer
+                message_content = DiscountService._generate_discount_message(
+                    discount, room
+                )
+                message_data = {
+                    "discount_id": discount.id,
+                    "discount_type": discount.discount_type,
+                    "discount_value": discount.discount_value,
+                    "expires_at": discount.expires_at.isoformat(),
+                    "product_id": discount.product_id,
+                }
+
+                chat_message = ChatMessage(
+                    room_id=room_id,
+                    sender_id=seller_id,
+                    content=message_content,
+                    message_type="discount",
+                    message_data=message_data,
+                )
+
+                session.add(chat_message)
+                session.flush()
+
+                # Update discount with message reference
+                discount.message_id = chat_message.id
+
+                # Update room's last message timestamp
+                room.last_message_at = datetime.utcnow()
+                room.unread_count_buyer += 1
+
+                session.commit()
+
+                # Cache discount for quick access
+                DiscountService._cache_discount(discount)
+
+                # Prepare response data
+                discount_response = {
+                    "id": discount.id,
+                    "message_id": chat_message.id,
+                    "room_id": room_id,
+                    "discount_type": discount.discount_type,
+                    "discount_value": discount.discount_value,
+                    "minimum_order_amount": discount.minimum_order_amount,
+                    "maximum_discount_amount": discount.maximum_discount_amount,
+                    "expires_at": discount.expires_at.isoformat(),
+                    "usage_limit": discount.usage_limit,
+                    "status": discount.status,
+                    "discount_message": discount.discount_message,
+                    "discount_code": discount.discount_code,
+                    "created_at": discount.created_at.isoformat(),
+                    "product": {
+                        "id": room.product.id,
+                        "name": room.product.name,
+                        "price": float(room.product.price),
+                    }
+                    if room.product
+                    else None,
+                    "offered_to": {
+                        "id": room.buyer.id,
+                        "username": room.buyer.username,
+                    },
+                }
+
+                # Emit real-time event for discount offer
+                from app.realtime.event_manager import EventManager
+
+                EventManager.emit_event(
+                    event="discount_offered",
+                    data={
+                        "discount": discount_response,
+                        "message": {
+                            "id": chat_message.id,
+                            "content": message_content,
+                            "message_type": "discount",
+                            "sender_id": seller_id,
+                            "created_at": chat_message.created_at.isoformat(),
+                        },
+                    },
+                    room=f"room_{room_id}",
+                    namespace="/chat",
+                    use_async=True,
+                )
+
+                return discount_response
+
+        except (ValidationError, ForbiddenError, NotFoundError):
+            raise
+        except Exception as e:
+            logger.error(f"Failed to create discount offer: {str(e)}")
+            raise APIError("Failed to create discount offer")
+
+    @staticmethod
+    def respond_to_discount(
+        buyer_id: str,
+        discount_id: int,
+        response: str,
+        response_message: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Respond to a discount offer (accept/reject)
+
+        Args:
+            buyer_id: ID of the buyer responding
+            discount_id: ID of the discount being responded to
+            response: Response type ('accepted' or 'rejected')
+            response_message: Optional custom response message
+
+        Returns:
+            Dict containing the response details
+        """
+        try:
+            with session_scope() as session:
+                # Get discount with room details
+                discount = (
+                    session.query(ChatDiscount)
+                    .options(
+                        joinedload(ChatDiscount.room),
+                        joinedload(ChatDiscount.created_by),
+                        joinedload(ChatDiscount.product),
+                    )
+                    .filter(
+                        ChatDiscount.id == discount_id,
+                        ChatDiscount.offered_to_id == buyer_id,
+                    )
+                    .first()
+                )
+
+                if not discount:
+                    raise NotFoundError("Discount offer not found")
+
+                if discount.status != DiscountStatus.PENDING:
+                    raise ValidationError(
+                        "Discount offer has already been responded to"
+                    )
+
+                # Validate response
+                if response not in [DiscountStatus.ACCEPTED, DiscountStatus.REJECTED]:
+                    raise ValidationError(
+                        "Invalid response. Must be 'accepted' or 'rejected'"
+                    )
+
+                # Update discount status
+                discount.status = response
+                if response == DiscountStatus.ACCEPTED:
+                    discount.accepted_at = datetime.utcnow()
+                    discount.status = DiscountStatus.ACTIVE  # Make it available for use
+                else:
+                    discount.rejected_at = datetime.utcnow()
+
+                # Create response message
+                response_content = DiscountService._generate_response_message(
+                    discount, response, response_message
+                )
+
+                message_data = {
+                    "discount_id": discount_id,
+                    "response": response,
+                    "response_message": response_message,
+                }
+
+                response_chat_message = ChatMessage(
+                    room_id=discount.room_id,
+                    sender_id=buyer_id,
+                    content=response_content,
+                    message_type="discount_response",
+                    message_data=message_data,
+                )
+
+                session.add(response_chat_message)
+
+                # Update room's last message timestamp
+                discount.room.last_message_at = datetime.utcnow()
+                discount.room.unread_count_seller += 1
+
+                session.commit()
+
+                # Update cache
+                DiscountService._cache_discount(discount)
+
+                # Prepare response data
+                response_data = {
+                    "discount_id": discount_id,
+                    "response": response,
+                    "response_message": response_message,
+                    "message_id": response_chat_message.id,
+                    "updated_at": discount.updated_at.isoformat(),
+                    "discount": {
+                        "id": discount.id,
+                        "status": discount.status,
+                        "discount_type": discount.discount_type,
+                        "discount_value": discount.discount_value,
+                        "expires_at": discount.expires_at.isoformat(),
+                    },
+                }
+
+                # Emit real-time event for discount response
+                from app.realtime.event_manager import EventManager
+
+                EventManager.emit_event(
+                    event="discount_responded",
+                    data={
+                        "discount_response": response_data,
+                        "message": {
+                            "id": response_chat_message.id,
+                            "content": response_content,
+                            "message_type": "discount_response",
+                            "sender_id": buyer_id,
+                            "created_at": response_chat_message.created_at.isoformat(),
+                        },
+                    },
+                    room=f"room_{discount.room_id}",
+                    namespace="/chat",
+                    use_async=True,
+                )
+
+                return response_data
+
+        except (ValidationError, ForbiddenError, NotFoundError):
+            raise
+        except Exception as e:
+            logger.error(f"Failed to respond to discount: {str(e)}")
+            raise APIError("Failed to respond to discount")
+
+    @staticmethod
+    def get_active_discounts_for_user(
+        user_id: str, room_id: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get active discount offers for a user
+
+        Args:
+            user_id: ID of the user (buyer or seller)
+            room_id: Optional room ID to filter discounts
+
+        Returns:
+            List of active discount offers
+        """
+        try:
+            with session_scope() as session:
+                query = (
+                    session.query(ChatDiscount)
+                    .options(
+                        joinedload(ChatDiscount.room),
+                        joinedload(ChatDiscount.created_by),
+                        joinedload(ChatDiscount.offered_to),
+                        joinedload(ChatDiscount.product),
+                    )
+                    .filter(
+                        ChatDiscount.status.in_(
+                            [
+                                DiscountStatus.PENDING,
+                                DiscountStatus.ACTIVE,
+                                DiscountStatus.ACCEPTED,
+                            ]
+                        ),
+                        ChatDiscount.expires_at > datetime.utcnow(),
+                    )
+                )
+
+                # Filter by user role and room
+                if room_id:
+                    query = query.filter(ChatDiscount.room_id == room_id)
+                else:
+                    # Get discounts where user is either buyer or seller
+                    query = query.filter(
+                        db.or_(
+                            ChatDiscount.offered_to_id == user_id,
+                            ChatDiscount.created_by_id == user_id,
+                        )
+                    )
+
+                discounts = query.order_by(ChatDiscount.created_at.desc()).all()
+
+                # Format response
+                formatted_discounts = []
+                for discount in discounts:
+                    formatted_discounts.append(
+                        {
+                            "id": discount.id,
+                            "room_id": discount.room_id,
+                            "discount_type": discount.discount_type,
+                            "discount_value": discount.discount_value,
+                            "minimum_order_amount": discount.minimum_order_amount,
+                            "maximum_discount_amount": discount.maximum_discount_amount,
+                            "expires_at": discount.expires_at.isoformat(),
+                            "usage_limit": discount.usage_limit,
+                            "usage_count": discount.usage_count,
+                            "status": discount.status,
+                            "discount_message": discount.discount_message,
+                            "discount_code": discount.discount_code,
+                            "created_at": discount.created_at.isoformat(),
+                            "is_valid": discount.is_valid(),
+                            "product": {
+                                "id": discount.product.id,
+                                "name": discount.product.name,
+                                "price": float(discount.product.price),
+                            }
+                            if discount.product
+                            else None,
+                            "created_by": {
+                                "id": discount.created_by.id,
+                                "username": discount.created_by.username,
+                            },
+                            "offered_to": {
+                                "id": discount.offered_to.id,
+                                "username": discount.offered_to.username,
+                            },
+                        }
+                    )
+
+                return formatted_discounts
+
+        except Exception as e:
+            logger.error(f"Failed to get active discounts: {str(e)}")
+            raise APIError("Failed to get active discounts")
+
+    @staticmethod
+    def apply_discount_to_order(
+        user_id: str, discount_id: int, order_amount: float
+    ) -> Tuple[bool, float, str]:
+        """
+        Apply a discount to an order (validate and calculate discount amount)
+
+        Args:
+            user_id: ID of the user applying the discount
+            discount_id: ID of the discount to apply
+            order_amount: Amount of the order
+
+        Returns:
+            Tuple of (success, discount_amount, message)
+        """
+        try:
+            with session_scope() as session:
+                # Get discount
+                discount = (
+                    session.query(ChatDiscount)
+                    .filter(
+                        ChatDiscount.id == discount_id,
+                        ChatDiscount.offered_to_id == user_id,
+                    )
+                    .first()
+                )
+
+                if not discount:
+                    return False, 0.0, "Discount not found"
+
+                # Validate discount can be applied
+                can_apply, message = discount.can_be_applied_to_order(order_amount)
+                if not can_apply:
+                    return False, 0.0, message
+
+                # Calculate discount amount
+                discount_amount = discount.calculate_discount_amount(order_amount)
+
+                # Update usage count
+                discount.usage_count += 1
+                if discount.usage_count >= discount.usage_limit:
+                    discount.status = DiscountStatus.USED
+                    discount.used_at = datetime.utcnow()
+
+                session.commit()
+
+                # Update cache
+                DiscountService._cache_discount(discount)
+
+                # Emit real-time event for discount usage
+                from app.realtime.event_manager import EventManager
+
+                EventManager.emit_event(
+                    event="discount_applied",
+                    data={
+                        "discount_id": discount_id,
+                        "user_id": user_id,
+                        "order_amount": order_amount,
+                        "discount_amount": discount_amount,
+                        "remaining_usage": discount.usage_limit - discount.usage_count,
+                    },
+                    room=f"room_{discount.room_id}",
+                    namespace="/chat",
+                    use_async=True,
+                )
+
+                return True, discount_amount, "Discount applied successfully"
+
+        except Exception as e:
+            logger.error(f"Failed to apply discount: {str(e)}")
+            return False, 0.0, "Failed to apply discount"
+
+    @staticmethod
+    def cancel_discount(seller_id: str, discount_id: int) -> Dict[str, Any]:
+        """
+        Cancel a discount offer (seller only)
+
+        Args:
+            seller_id: ID of the seller cancelling the discount
+            discount_id: ID of the discount to cancel
+
+        Returns:
+            Dict containing cancellation details
+        """
+        try:
+            with session_scope() as session:
+                # Get discount
+                discount = (
+                    session.query(ChatDiscount)
+                    .filter(
+                        ChatDiscount.id == discount_id,
+                        ChatDiscount.created_by_id == seller_id,
+                        ChatDiscount.status.in_(
+                            [DiscountStatus.PENDING, DiscountStatus.ACTIVE]
+                        ),
+                    )
+                    .first()
+                )
+
+                if not discount:
+                    raise NotFoundError("Discount not found or cannot be cancelled")
+
+                # Update status
+                discount.status = DiscountStatus.CANCELLED
+                session.commit()
+
+                # Update cache
+                DiscountService._cache_discount(discount)
+
+                # Emit real-time event for discount cancellation
+                from app.realtime.event_manager import EventManager
+
+                EventManager.emit_event(
+                    event="discount_cancelled",
+                    data={
+                        "discount_id": discount_id,
+                        "cancelled_by": seller_id,
+                        "cancelled_at": datetime.utcnow().isoformat(),
+                    },
+                    room=f"room_{discount.room_id}",
+                    namespace="/chat",
+                    use_async=True,
+                )
+
+                return {
+                    "discount_id": discount_id,
+                    "status": DiscountStatus.CANCELLED,
+                    "cancelled_at": datetime.utcnow().isoformat(),
+                }
+
+        except (NotFoundError, ForbiddenError):
+            raise
+        except Exception as e:
+            logger.error(f"Failed to cancel discount: {str(e)}")
+            raise APIError("Failed to cancel discount")
+
+    # Helper methods
+    @staticmethod
+    def _validate_discount_data(discount_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate discount creation data"""
+        required_fields = ["discount_type", "discount_value", "expires_at"]
+
+        for field in required_fields:
+            if field not in discount_data:
+                return {"valid": False, "message": f"Missing required field: {field}"}
+
+        # Validate discount type
+        if discount_data["discount_type"] not in [
+            DiscountType.PERCENTAGE,
+            DiscountType.FIXED_AMOUNT,
+        ]:
+            return {"valid": False, "message": "Invalid discount type"}
+
+        # Validate discount value
+        discount_value = discount_data["discount_value"]
+        if discount_value <= 0:
+            return {"valid": False, "message": "Discount value must be greater than 0"}
+
+        if (
+            discount_data["discount_type"] == DiscountType.PERCENTAGE
+            and discount_value > 100
+        ):
+            return {"valid": False, "message": "Percentage discount cannot exceed 100%"}
+
+        # Validate expiry date using timezone-safe utilities
+        from app.libs.datetime_utils import (
+            ensure_timezone_aware,
+            utcnow_aware,
+            is_past_datetime,
+        )
+
+        try:
+            expires_at = ensure_timezone_aware(discount_data["expires_at"])
+        except (ValueError, TypeError):
+            return {"valid": False, "message": "Invalid expiry date format"}
+
+        if is_past_datetime(expires_at):
+            return {"valid": False, "message": "Expiry date must be in the future"}
+
+        # Validate minimum order amount
+        min_order = discount_data.get("minimum_order_amount")
+        if min_order is not None and min_order <= 0:
+            return {
+                "valid": False,
+                "message": "Minimum order amount must be greater than 0",
+            }
+
+        # Validate maximum discount amount
+        max_discount = discount_data.get("maximum_discount_amount")
+        if max_discount is not None and max_discount <= 0:
+            return {
+                "valid": False,
+                "message": "Maximum discount amount must be greater than 0",
+            }
+
+        return {"valid": True, "message": "Valid discount data"}
+
+    @staticmethod
+    def _generate_discount_message(discount: ChatDiscount, room: ChatRoom) -> str:
+        """Generate a human-readable discount offer message"""
+        product_name = room.product.name if room.product else "your order"
+
+        if discount.discount_type == DiscountType.PERCENTAGE:
+            discount_text = f"{discount.discount_value}% off"
+        else:
+            discount_text = f"${discount.discount_value:.2f} off"
+
+        message = f"🎉 Special discount offer: {discount_text} on {product_name}!"
+
+        if discount.minimum_order_amount:
+            message += f" (Minimum order: ${discount.minimum_order_amount:.2f})"
+
+        if discount.discount_message:
+            message += f"\n\n{discount.discount_message}"
+
+        message += (
+            f"\n\n⏰ Expires: {discount.expires_at.strftime('%B %d, %Y at %I:%M %p')}"
+        )
+
+        return message
+
+    @staticmethod
+    def _generate_response_message(
+        discount: ChatDiscount, response: str, custom_message: Optional[str] = None
+    ) -> str:
+        """Generate a response message for discount acceptance/rejection"""
+        if response == DiscountStatus.ACCEPTED:
+            message = f"✅ Accepted your discount offer!"
+            if custom_message:
+                message += f" {custom_message}"
+        else:
+            message = f"❌ Thank you for the offer, but I'll pass for now."
+            if custom_message:
+                message += f" {custom_message}"
+
+        return message
+
+    @staticmethod
+    def _cache_discount(discount: ChatDiscount):
+        """Cache discount data for quick access"""
+        try:
+            cache_key = DiscountService.CACHE_KEYS["discount_validation"].format(
+                discount_id=discount.id
+            )
+
+            cache_data = {
+                "id": discount.id,
+                "status": discount.status,
+                "expires_at": discount.expires_at.isoformat(),
+                "usage_count": discount.usage_count,
+                "usage_limit": discount.usage_limit,
+                "is_valid": discount.is_valid(),
+            }
+
+            redis_client.setex(cache_key, 3600, str(cache_data))  # 1 hour cache
+        except Exception as e:
+            logger.warning(f"Failed to cache discount: {str(e)}")

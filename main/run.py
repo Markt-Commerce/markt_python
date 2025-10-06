@@ -1,3 +1,7 @@
+from gevent.monkey import patch_all
+
+patch_all()
+
 from main.setup import create_app
 from main.config import settings
 import logging
