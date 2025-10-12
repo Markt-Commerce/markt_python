@@ -101,7 +101,7 @@ class AuthService:
                             is_primary=(idx == 0),  # First category is primary
                         )
                         session.add(seller_category)
-                        
+
             session.commit()
             return user
 
@@ -834,9 +834,12 @@ class ShopService:
                 )
 
                 # Get recent posts
+                # Post is now user-level; get posts from the shop owner's user account
                 recent_posts = (
                     session.query(Post)
-                    .filter(Post.seller_id == shop_id, Post.status == PostStatus.ACTIVE)
+                    .filter(
+                        Post.user_id == shop.user_id, Post.status == PostStatus.ACTIVE
+                    )
                     .order_by(Post.created_at.desc())
                     .limit(6)
                     .all()
@@ -993,14 +996,6 @@ class ShopService:
                 )
 
                 # Get post count
-                post_count = (
-                    session.query(Post)
-                    .filter(Post.seller_id == shop_id, Post.status == PostStatus.ACTIVE)
-                    .count()
-                )
-
-                # Get follower count - fix type mismatch
-                # shop_id is integer, but followee_id is string (user_id)
                 shop_user = session.query(Seller).filter(Seller.id == shop_id).first()
                 if not shop_user:
                     return {
@@ -1008,6 +1003,18 @@ class ShopService:
                         "post_count": 0,
                         "follower_count": 0,
                     }
+
+                post_count = (
+                    session.query(Post)
+                    .filter(
+                        Post.user_id == shop_user.user_id,
+                        Post.status == PostStatus.ACTIVE,
+                    )
+                    .count()
+                )
+
+                # Get follower count - fix type mismatch
+                # shop_id is integer, but followee_id is string (user_id)
 
                 follower_count = (
                     session.query(Follow)
@@ -1134,7 +1141,7 @@ class SellerStartCardsService:
         # Card 5: Publish First Post
         post_count = (
             session.query(Post)
-            .filter(Post.seller_id == seller.id, Post.status == PostStatus.ACTIVE)
+            .filter(Post.user_id == user.id, Post.status == PostStatus.ACTIVE)
             .count()
         )
         publish_first_post_completed = post_count > 0

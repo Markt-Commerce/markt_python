@@ -247,10 +247,8 @@ class ChatService:
                             "profile_picture": message.sender.profile_picture,
                         },
                         "is_read": message.is_read,
-                        "read_at": message.read_at.isoformat()
-                        if message.read_at
-                        else None,
-                        "created_at": message.created_at.isoformat(),
+                        "read_at": message.read_at if message.read_at else None,
+                        "created_at": message.created_at,
                     }
 
                     # Add offer data if message contains an offer
