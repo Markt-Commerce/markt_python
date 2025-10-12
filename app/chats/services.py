@@ -56,6 +56,10 @@ class ChatService:
     ) -> ChatRoom:
         """Create or get existing chat room between buyer and seller"""
         try:
+            # Validate that buyer and seller are different users
+            if buyer_id == seller_id:
+                raise ValidationError("Cannot create a chat room with yourself")
+
             with session_scope() as session:
                 # Check if room already exists
                 existing_room = (
