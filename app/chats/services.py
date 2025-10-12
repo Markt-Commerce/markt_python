@@ -176,7 +176,7 @@ class ChatService:
                         if last_message
                         else None,
                         "unread_count": unread_count,
-                        "last_message_at": room.last_message_at.isoformat()
+                        "last_message_at": room.last_message_at
                         if room.last_message_at
                         else None,
                     }

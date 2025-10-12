@@ -70,7 +70,7 @@ class ChatRooms(MethodView):
                 "seller_id": room.seller_id,
                 "product_id": room.product_id,
                 "request_id": room.request_id,
-                "last_message_at": room.last_message_at.isoformat()
+                "last_message_at": room.last_message_at
                 if room.last_message_at
                 else None,
                 "unread_count_buyer": room.unread_count_buyer,
@@ -120,7 +120,7 @@ class ChatMessages(MethodView):
                 "message_type": message.message_type,
                 "message_data": message.message_data,
                 "is_read": message.is_read,
-                "created_at": message.created_at.isoformat(),
+                "created_at": message.created_at,
             }
         except APIError as e:
             abort(e.status_code, message=e.message)
@@ -165,7 +165,7 @@ class ChatOffers(MethodView):
                 "message_type": message.message_type,
                 "message_data": message.message_data,
                 "is_read": message.is_read,
-                "created_at": message.created_at.isoformat(),
+                "created_at": message.created_at,
             }
         except APIError as e:
             abort(e.status_code, message=e.message)
