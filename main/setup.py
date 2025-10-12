@@ -24,12 +24,6 @@ logger = logging.getLogger(__name__)
 def configure_app(app):
     """Configure Flask application"""
     app.config.from_object(settings)
-    app.config.update(
-        SESSION_COOKIE_SAMESITE=settings.SESSION_COOKIE_SAMESITE,
-        SESSION_COOKIE_SECURE=settings.SESSION_COOKIE_SECURE,
-        REMEMBER_COOKIE_SAMESITE=settings.REMEMBER_COOKIE_SAMESITE,
-        REMEMBER_COOKIE_SECURE=settings.REMEMBER_COOKIE_SECURE,
-    )
 
     # Setup extensions
     login_manager = LoginManager(app)
@@ -46,7 +40,6 @@ def configure_app(app):
 
     database.init_app(app)
     Migrate(app, db)
-    # Use explicit origins for credentialed requests
     CORS(app, supports_credentials=True, origins=settings.ALLOWED_ORIGINS)
 
     # Initialize Flask-Smorest API
@@ -55,7 +48,12 @@ def configure_app(app):
     from .extensions import socketio
 
     # Initialize socketio
-    socketio.init_app(app, logger=settings.DEBUG, engineio_logger=settings.DEBUG)
+    socketio.init_app(
+        app,
+        logger=settings.DEBUG,
+        engineio_logger=settings.DEBUG,
+        cors_allowed_origins=settings.ALLOWED_ORIGINS,
+    )
 
     # Register error handler
     app.register_error_handler(Exception, handle_error)
