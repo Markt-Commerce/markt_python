@@ -24,16 +24,30 @@ logger = logging.getLogger(__name__)
 def configure_app(app):
     """Configure Flask application"""
     app.config.from_object(settings)
+    app.config.update(
+        SESSION_COOKIE_SAMESITE=settings.SESSION_COOKIE_SAMESITE,
+        SESSION_COOKIE_SECURE=settings.SESSION_COOKIE_SECURE,
+        REMEMBER_COOKIE_SAMESITE=settings.REMEMBER_COOKIE_SAMESITE,
+        REMEMBER_COOKIE_SECURE=settings.REMEMBER_COOKIE_SECURE,
+    )
 
     # Setup extensions
     login_manager = LoginManager(app)
     login_manager.login_view = "users.UserLogin"
 
+    # API-friendly unauthorized response (avoid redirects to GET /users/login)
+    @login_manager.unauthorized_handler
+    def _unauthorized():
+        from flask import jsonify
+
+        return jsonify({"message": "Unauthorized"}), 401
+
     from external.database import db, database
 
     database.init_app(app)
     Migrate(app, db)
-    CORS(app, supports_credentials=True, origins=["*"])
+    # Use explicit origins for credentialed requests
+    CORS(app, supports_credentials=True, origins=settings.ALLOWED_ORIGINS)
 
     # Initialize Flask-Smorest API
     api = Api(app)

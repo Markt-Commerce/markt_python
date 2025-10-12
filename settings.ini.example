@@ -32,6 +32,16 @@ OPENAPI_URL_PREFIX=/
 OPENAPI_SWAGGER_UI_PATH=/swagger-ui
 OPENAPI_SWAGGER_UI_URL=https://cdn.jsdelivr.net/npm/swagger-ui-dist/
 
+# CORS / Cookies
+ALLOWED_ORIGINS=http://localhost:3000,https://test.marktcommerce.com
+
+# Cookie settings (set these for HTTPS cross-site in production)
+# For cross-site cookies over HTTPS, set SAMESITE=None and SECURE=True
+SESSION_COOKIE_SAMESITE=
+SESSION_COOKIE_SECURE=
+REMEMBER_COOKIE_SAMESITE=
+REMEMBER_COOKIE_SECURE=
+
 # Paystack Configuration
 PAYSTACK_SECRET_KEY=sk_test_your_secret_key_here
 PAYSTACK_PUBLIC_KEY=pk_test_your_public_key_here

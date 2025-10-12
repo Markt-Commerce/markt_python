@@ -25,6 +25,19 @@ class Config:
         self.SECRET_KEY = config("SECRET_KEY", default="dev-secret-key")
         self.SESSION_COOKIE_NAME = "markt_session"
 
+        # Session/Cookie settings (env-driven)
+        # Use None + Secure=True for cross-site cookies over HTTPS
+        self.SESSION_COOKIE_SAMESITE = config("SESSION_COOKIE_SAMESITE", default="Lax")
+        self.SESSION_COOKIE_SECURE = config(
+            "SESSION_COOKIE_SECURE", default=False, cast=bool
+        )
+        self.REMEMBER_COOKIE_SAMESITE = config(
+            "REMEMBER_COOKIE_SAMESITE", default="Lax"
+        )
+        self.REMEMBER_COOKIE_SECURE = config(
+            "REMEMBER_COOKIE_SECURE", default=False, cast=bool
+        )
+
         # App
         self.BIND = config("BIND", default="127.0.0.1:8000")
         self.DEBUG = config("DEBUG", default=True, cast=bool)
