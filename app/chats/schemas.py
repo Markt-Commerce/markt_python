@@ -25,6 +25,7 @@ class ChatMessageSchema(Schema):
     id = fields.Integer(required=True)
     room_id = fields.Integer(required=True)
     sender_id = fields.String(required=True)
+    sender = fields.Nested("UserBasicSchema", required=True)
     content = fields.String(required=True)
     message_type = fields.String(
         validate=validate.OneOf(["text", "image", "product", "offer"]), default="text"

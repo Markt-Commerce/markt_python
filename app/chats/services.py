@@ -242,14 +242,17 @@ class ChatService:
                 for message in reversed(messages):  # Reverse to get chronological order
                     message_data = {
                         "id": message.id,
-                        "content": message.content,
-                        "message_type": message.message_type,
-                        "message_data": message.message_data,
+                        "room_id": message.room_id,
+                        "sender_id": message.sender_id,
                         "sender": {
                             "id": message.sender.id,
                             "username": message.sender.username,
                             "profile_picture": message.sender.profile_picture,
+                            "is_seller": message.sender.is_seller,
                         },
+                        "content": message.content,
+                        "message_type": message.message_type,
+                        "message_data": message.message_data,
                         "is_read": message.is_read,
                         "read_at": message.read_at if message.read_at else None,
                         "created_at": message.created_at,
