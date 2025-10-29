@@ -157,7 +157,11 @@ class ChatService:
                             "price": float(room.product.price),
                             "image": (
                                 room.product.images[0].media.get_url()
-                                if room.product.images and room.product.images[0].media
+                                if (
+                                    room.product.images
+                                    and len(room.product.images) > 0
+                                    and room.product.images[0].media
+                                )
                                 else None
                             ),
                         }
@@ -172,10 +176,10 @@ class ChatService:
                         else None,
                         "last_message": {
                             "id": last_message.id,
+                            "sender_id": last_message.sender_id,
                             "content": last_message.content,
                             "message_type": last_message.message_type,
-                            "sender_id": last_message.sender_id,
-                            "created_at": last_message.created_at.isoformat(),
+                            "created_at": last_message.created_at,
                         }
                         if last_message
                         else None,
@@ -365,7 +369,11 @@ class ChatService:
                         "price": float(room.product.price),
                         "image": (
                             room.product.images[0].media.get_url()
-                            if room.product.images and room.product.images[0].media
+                            if (
+                                room.product.images
+                                and len(room.product.images) > 0
+                                and room.product.images[0].media
+                            )
                             else None
                         ),
                     }
