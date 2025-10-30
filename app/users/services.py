@@ -418,11 +418,23 @@ class UserService:
             if not user:
                 raise AuthError("User not found")
 
+            # Verify user has both account types
             if not (user.is_buyer and user.is_seller):
                 raise AuthError("User doesn't have both account types")
 
-            previous_role = user.current_role
-            user.current_role = "seller" if user.current_role == "buyer" else "buyer"
+            # Ensure _current_role is explicitly set to avoid default property logic
+            if not hasattr(user, "_current_role") or not user._current_role:
+                # If not set, determine from is_buyer/is_seller flags
+                # Default to buyer if both exist
+                user._current_role = "buyer" if user.is_buyer else "seller"
+
+            # Get previous role before switching
+            previous_role = user._current_role
+
+            # Switch to the opposite role
+            new_role = "seller" if previous_role == "buyer" else "buyer"
+            user.current_role = new_role
+
             session.commit()
 
             return {

@@ -99,7 +99,21 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
 
     @property
     def current_role(self):
-        return getattr(self, "_current_role", "buyer" if self.is_buyer else "seller")
+        """Get current role with intelligent defaulting"""
+        # If explicitly set, return it
+        if hasattr(self, "_current_role") and self._current_role:
+            return self._current_role
+
+        # Otherwise, determine based on available accounts
+        # Priority: buyer > seller (consistent with login defaults)
+        if self.is_buyer and self.is_seller:
+            return "buyer"  # Default to buyer for dual-account users
+        elif self.is_buyer:
+            return "buyer"
+        elif self.is_seller:
+            return "seller"
+        else:
+            return "buyer"  # Fallback default
 
     @current_role.setter
     def current_role(self, value):

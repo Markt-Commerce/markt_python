@@ -233,8 +233,8 @@ class RoleSwitchSchema(Schema):
     """Schema for role switching responses"""
 
     success = fields.Bool(required=True)
-    previous_role = fields.Str(dump_only=True)
-    current_role = fields.Bool(required=True)
+    previous_role = fields.Str(required=True)
+    current_role = fields.Str(required=True)
     message = fields.Str(required=True)
     user = fields.Nested(UserSchema, dump_only=True)
 
