@@ -102,6 +102,9 @@ class AuthService:
                         )
                         session.add(seller_category)
 
+            # Explicitly set current_role during registration
+            user.current_role = data["account_type"]
+
             session.commit()
             return user
 
@@ -568,6 +571,13 @@ class AccountService:
 
             session.add(buyer)
             user.is_buyer = True
+
+            # Ensure current_role is set if not already set
+            if not hasattr(user, "_current_role") or not user._current_role:
+                # If user already has seller account, keep seller role
+                # Otherwise set to buyer
+                user.current_role = "seller" if user.is_seller else "buyer"
+
             return buyer
 
     @staticmethod
@@ -610,6 +620,13 @@ class AccountService:
 
             session.add(seller)
             user.is_seller = True
+
+            # Ensure current_role is set if not already set
+            if not hasattr(user, "_current_role") or not user._current_role:
+                # If user already has buyer account, keep buyer role
+                # Otherwise set to seller
+                user.current_role = "buyer" if user.is_buyer else "seller"
+
             return seller
 
     @staticmethod
