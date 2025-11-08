@@ -906,7 +906,7 @@ class ShopService:
                             "id": product.id,
                             "name": product.name,
                             "price": float(product.price),
-                            "image": product.images[0].url if product.images else None,
+                            "image": ShopService._get_primary_product_image(product),
                         }
                         for product in recent_products
                     ],
@@ -1008,6 +1008,51 @@ class ShopService:
         except Exception as e:
             logger.error(f"Failed to get shop categories: {str(e)}")
             return []
+
+    @staticmethod
+    def _get_primary_product_image(product):
+        """Safely resolve the primary image URL for a product"""
+        if not getattr(product, "images", None):
+            return None
+
+        # Prefer featured images before falling back to sort order
+        sorted_images = sorted(
+            product.images,
+            key=lambda img: (
+                not getattr(img, "is_featured", False),
+                getattr(img, "sort_order", 0)
+                if getattr(img, "sort_order", None) is not None
+                else 0,
+            ),
+        )
+
+        for image in sorted_images:
+            media = getattr(image, "media", None)
+            if not media or getattr(media, "is_deleted", False):
+                continue
+
+            # Try responsive variants first, then fall back to original asset
+            url_candidates = []
+            if hasattr(media, "get_best_variant_for_screen"):
+                url_candidates.extend(
+                    [
+                        media.get_best_variant_for_screen("desktop"),
+                        media.get_best_variant_for_screen("mobile"),
+                    ]
+                )
+
+            if hasattr(media, "get_url"):
+                url_candidates.append(media.get_url(MediaVariantType.THUMBNAIL))
+                url_candidates.append(media.get_url())
+
+            # Finally, fall back to storage key when URL generation fails
+            url_candidates.append(getattr(media, "storage_key", None))
+
+            for url in url_candidates:
+                if url:
+                    return url
+
+        return None
 
     @staticmethod
     def _get_shop_stats(shop_id):
