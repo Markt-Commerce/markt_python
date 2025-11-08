@@ -914,10 +914,7 @@ class ShopService:
                         {
                             "id": post.id,
                             "caption": post.caption,
-                            "media": [
-                                {"url": m.media_url, "type": m.media_type}
-                                for m in post.social_media
-                            ],
+                            "media": ShopService._serialize_post_media(post),
                             "likes_count": len(post.likes),
                             "comments_count": len(post.comments),
                             "created_at": post.created_at.isoformat(),
@@ -1008,6 +1005,43 @@ class ShopService:
         except Exception as e:
             logger.error(f"Failed to get shop categories: {str(e)}")
             return []
+
+    @staticmethod
+    def _serialize_post_media(post):
+        """Serialize social media attachments for a post."""
+        if not getattr(post, "social_media", None):
+            return []
+
+        media_items = []
+        for attachment in post.social_media:
+            media = getattr(attachment, "media", None)
+            if not media or getattr(media, "is_deleted", False):
+                continue
+
+            url_candidates = []
+            if hasattr(media, "get_best_variant_for_screen"):
+                url_candidates.append(media.get_best_variant_for_screen("desktop"))
+                url_candidates.append(media.get_best_variant_for_screen("mobile"))
+            if hasattr(media, "get_url"):
+                url_candidates.append(media.get_url(MediaVariantType.THUMBNAIL))
+                url_candidates.append(media.get_url())
+            url_candidates.append(getattr(media, "storage_key", None))
+
+            url = next((u for u in url_candidates if u), None)
+            if not url:
+                continue
+
+            media_items.append(
+                {
+                    "url": url,
+                    "type": media.media_type.value
+                    if hasattr(media.media_type, "value")
+                    else media.media_type,
+                    "alt_text": media.alt_text,
+                }
+            )
+
+        return media_items
 
     @staticmethod
     def _get_primary_product_image(product):
