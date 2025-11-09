@@ -2,7 +2,7 @@
 import random
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 # package imports
 from sqlalchemy.orm import joinedload
@@ -104,6 +104,7 @@ class AuthService:
 
             # Explicitly set current_role during registration
             user.current_role = data["account_type"]
+            UserService._cache_current_role(user.id, user.current_role)
 
             session.commit()
             return user
@@ -168,6 +169,7 @@ class AuthService:
 
             # Update current_role and last login timestamp
             user.current_role = account_type
+            UserService._cache_current_role(user.id, user.current_role)
             try:
                 # Update last login time for session management on frontend
                 from datetime import datetime
@@ -297,6 +299,50 @@ class AuthService:
 
 
 class UserService:
+    CURRENT_ROLE_CACHE_KEY = "user:current_role:{user_id}"
+    CURRENT_ROLE_CACHE_TTL = 60 * 60 * 24  # 24 hours
+
+    @staticmethod
+    def _cache_current_role(user_id: str, role: Optional[str]):
+        """Persist the user's current role in Redis for cross-session access."""
+        if not role:
+            return
+
+        cache_key = UserService.CURRENT_ROLE_CACHE_KEY.format(user_id=user_id)
+        try:
+            redis_client.setex(cache_key, UserService.CURRENT_ROLE_CACHE_TTL, role)
+        except Exception as exc:
+            logger.debug("Failed to cache current role for %s: %s", user_id, exc)
+
+    @staticmethod
+    def _get_cached_current_role(user_id: str) -> Optional[str]:
+        """Retrieve persisted current role from Redis if available."""
+        cache_key = UserService.CURRENT_ROLE_CACHE_KEY.format(user_id=user_id)
+        try:
+            cached = redis_client.get(cache_key)
+            if not cached:
+                return None
+
+            if isinstance(cached, bytes):
+                cached = cached.decode("utf-8")
+
+            if cached in {"buyer", "seller"}:
+                return cached
+
+            return None
+        except Exception as exc:
+            logger.debug("Failed to read cached current role for %s: %s", user_id, exc)
+            return None
+
+    @staticmethod
+    def _clear_cached_current_role(user_id: str):
+        """Remove cached current role (used when accounts are deactivated)."""
+        cache_key = UserService.CURRENT_ROLE_CACHE_KEY.format(user_id=user_id)
+        try:
+            redis_client.delete(cache_key)
+        except Exception as exc:
+            logger.debug("Failed to clear cached current role for %s: %s", user_id, exc)
+
     @staticmethod
     def get_user_profile(user_id):
         with session_scope() as session:
@@ -425,18 +471,23 @@ class UserService:
             if not (user.is_buyer and user.is_seller):
                 raise AuthError("User doesn't have both account types")
 
-            # Ensure _current_role is explicitly set to avoid default property logic
-            if not hasattr(user, "_current_role") or not user._current_role:
-                # If not set, determine from is_buyer/is_seller flags
-                # Default to buyer if both exist
-                user._current_role = "buyer" if user.is_buyer else "seller"
+            # Determine previous role using cache first, then fall back to attribute defaults
+            cached_role = UserService._get_cached_current_role(user.id)
+            if cached_role:
+                current_role = cached_role
+                user._current_role = cached_role
+            elif hasattr(user, "_current_role") and user._current_role:
+                current_role = user._current_role
+            else:
+                current_role = "buyer" if user.is_buyer else "seller"
+                user._current_role = current_role
 
-            # Get previous role before switching
-            previous_role = user._current_role
+            previous_role = current_role
 
             # Switch to the opposite role
             new_role = "seller" if previous_role == "buyer" else "buyer"
             user.current_role = new_role
+            UserService._cache_current_role(user.id, user.current_role)
 
             session.commit()
 
@@ -572,11 +623,15 @@ class AccountService:
             session.add(buyer)
             user.is_buyer = True
 
-            # Ensure current_role is set if not already set
+            # Ensure current_role is set if not already set, preferring cached value
+            cached_role = UserService._get_cached_current_role(user.id)
+            if cached_role:
+                user._current_role = cached_role
             if not hasattr(user, "_current_role") or not user._current_role:
                 # If user already has seller account, keep seller role
                 # Otherwise set to buyer
                 user.current_role = "seller" if user.is_seller else "buyer"
+            UserService._cache_current_role(user.id, user.current_role)
 
             return buyer
 
@@ -621,11 +676,15 @@ class AccountService:
             session.add(seller)
             user.is_seller = True
 
-            # Ensure current_role is set if not already set
+            # Ensure current_role is set if not already set, preferring cached value
+            cached_role = UserService._get_cached_current_role(user.id)
+            if cached_role:
+                user._current_role = cached_role
             if not hasattr(user, "_current_role") or not user._current_role:
                 # If user already has buyer account, keep buyer role
                 # Otherwise set to seller
                 user.current_role = "buyer" if user.is_buyer else "seller"
+            UserService._cache_current_role(user.id, user.current_role)
 
             return seller
 

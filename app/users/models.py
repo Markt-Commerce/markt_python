@@ -5,6 +5,11 @@ from datetime import datetime
 from app.libs.models import BaseModel
 from app.libs.helpers import UniqueIdMixin
 from external.database import db
+from external.redis import redis_client
+
+
+CURRENT_ROLE_CACHE_KEY = "user:current_role:{user_id}"
+CURRENT_ROLE_CACHE_TTL = 60 * 60 * 24  # 24 hours
 
 
 class User(BaseModel, UserMixin, UniqueIdMixin):
@@ -104,6 +109,20 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
         if hasattr(self, "_current_role") and self._current_role:
             return self._current_role
 
+        # Attempt to restore from cache to maintain user preference across sessions
+        try:
+            cache_key = CURRENT_ROLE_CACHE_KEY.format(user_id=self.id)
+            cached_role = redis_client.get(cache_key)
+            if cached_role:
+                if isinstance(cached_role, bytes):
+                    cached_role = cached_role.decode("utf-8")
+                if cached_role in {"buyer", "seller"}:
+                    self._current_role = cached_role
+                    return cached_role
+        except Exception:
+            # Redis failures should not break role determination
+            pass
+
         # Otherwise, determine based on available accounts
         # Priority: buyer > seller (consistent with login defaults)
         if self.is_buyer and self.is_seller:
@@ -124,6 +143,12 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
         if value == "seller" and not self.is_seller:
             raise ValueError("User doesn't have seller account")
         self._current_role = value
+        try:
+            cache_key = CURRENT_ROLE_CACHE_KEY.format(user_id=self.id)
+            redis_client.setex(cache_key, CURRENT_ROLE_CACHE_TTL, value)
+        except Exception:
+            # Redis failures shouldn't break role switching
+            pass
 
     def deactivate(self):
         """Deactivate user account"""
