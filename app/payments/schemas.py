@@ -52,8 +52,21 @@ class PaymentListSchema(Schema):
 class PaymentProcessSchema(Schema):
     """Payment processing schema"""
 
+    # For saved-card charges (existing behaviour)
     authorization_code = fields.Str()
     card_token = fields.Str()
+
+    # For bank transfer / direct‑debit style payments via Paystack Charge API.
+    # We keep this generic so the frontend can pass through the exact structure
+    # expected by Paystack, e.g.:
+    # {
+    #   "bank": {
+    #       "code": "057",
+    #       "account_number": "0000000000"
+    #   }
+    # }
+    bank = fields.Dict(required=False)
+
     metadata = fields.Dict(missing={})
 
 

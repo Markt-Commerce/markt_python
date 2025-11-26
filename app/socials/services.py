@@ -1479,6 +1479,7 @@ class PostService:
             )
 
             # Apply filters
+            # 1) Basic filters from args (user, category)
             if args.get("user_id"):
                 base_query = base_query.filter(Post.user_id == args["user_id"])
 
@@ -1486,6 +1487,13 @@ class PostService:
                 base_query = base_query.join(PostCategory).filter(
                     PostCategory.category_id == args["category_id"]
                 )
+
+            # 2) Text search on caption (used by unified search endpoint & /socials/posts)
+            #    We keep this intentionally simple (ILIKE on caption) so it works across
+            #    databases and plays nicely with the existing full‑text index.
+            if args.get("search"):
+                search_term = f"%{args['search']}%"
+                base_query = base_query.filter(Post.caption.ilike(search_term))
 
             # Order by creation date
             base_query = base_query.order_by(Post.created_at.desc())

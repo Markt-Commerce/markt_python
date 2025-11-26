@@ -412,13 +412,88 @@ class PaymentService:
     def _process_bank_transfer(
         payment: Payment, payment_data: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Process bank transfer payment"""
-        # For bank transfers, we typically wait for webhook confirmation
-        # This is a simplified implementation
-        return {
-            "status": PaymentStatus.PENDING,
-            "gateway_response": {"method": "bank_transfer", "pending": True},
-        }
+        """
+        Process bank transfer payment using Paystack's Charge API.
+
+        The typical flow is:
+        1. Frontend collects bank details securely (e.g. account number + bank code).
+        2. Frontend sends a `bank` object in `payment_data` to this endpoint.
+        3. We call Paystack `/charge` with those details and mark the payment as
+           PENDING while we wait for webhook confirmation (`charge.success`).
+        """
+        try:
+            bank_details = payment_data.get("bank")
+            if not bank_details:
+                raise ValidationError(
+                    "Bank details are required for bank transfer payments"
+                )
+
+            order = payment.order
+            if not order or not order.buyer or not order.buyer.user:
+                raise ValidationError("Associated order/buyer information is missing")
+
+            payload: Dict[str, Any] = {
+                "amount": int(payment.amount * 100),  # Convert to kobo
+                "email": order.buyer.user.email,
+                "currency": payment.currency,
+                "bank": bank_details,
+                "metadata": {
+                    "payment_id": payment.id,
+                    "order_id": payment.order_id,
+                    "buyer_id": order.buyer.user.id,
+                    "method": "bank_transfer",
+                },
+            }
+
+            # Reuse the same reference style used elsewhere so we can match
+            # incoming webhooks back to this payment.
+            payload["reference"] = payment.transaction_id or f"PAY_{payment.id}"
+
+            response = requests.post(
+                f"{PaymentService.PAYSTACK_BASE_URL}/charge",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {PaymentService.PAYSTACK_SECRET_KEY}"
+                },
+            )
+
+            if response.status_code != 200:
+                logger.error(
+                    "Paystack bank transfer charge failed with status %s: %s",
+                    response.status_code,
+                    response.text,
+                )
+                raise APIError("Bank transfer initialization failed", 500)
+
+            data = response.json()
+
+            # For bank payments Paystack typically returns a pending status while
+            # waiting for customer action/OTP. We keep our Payment in PENDING and
+            # rely on the webhook (`charge.success`) to mark it COMPLETED.
+            if not data.get("status"):
+                return {
+                    "status": PaymentStatus.FAILED,
+                    "gateway_response": data,
+                }
+
+            reference = (
+                data.get("data", {}).get("reference")
+                or data.get("data", {}).get("id")
+                or payload["reference"]
+            )
+
+            return {
+                "status": PaymentStatus.PENDING,
+                "transaction_id": reference,
+                "gateway_response": data,
+            }
+
+        except APIError:
+            # Already logged / wrapped, just bubble up
+            raise
+        except Exception as e:
+            logger.error(f"Bank transfer processing failed: {str(e)}")
+            raise APIError("Bank transfer processing failed", 500)
 
     @staticmethod
     def _verify_webhook_signature(payload: Dict[str, Any], signature: str) -> bool:

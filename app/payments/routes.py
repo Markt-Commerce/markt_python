@@ -56,10 +56,16 @@ class PaymentCreate(MethodView):
 class PaymentProcess(MethodView):
     @login_required
     @buyer_required
-    @bp.arguments(PaymentSchema)
+    @bp.arguments(PaymentProcessSchema)
     @bp.response(200, PaymentSchema)
     def post(self, payment_data, payment_id):
-        """Process payment with Paystack"""
+        """Process payment with Paystack.
+
+        - For card payments, expects an `authorization_code` or `card_token`
+          (see `PaymentProcessSchema`).
+        - For bank transfers, expects a `bank` object which is forwarded to
+          Paystack's Charge API.
+        """
         return PaymentService.process_payment(payment_id, payment_data)
 
 
