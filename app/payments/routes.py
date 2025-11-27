@@ -16,6 +16,7 @@ from .schemas import (
     PaymentCreateSchema,
     PaymentVerifySchema,
     PaymentListSchema,
+    PaymentProcessSchema,
 )
 
 bp = Blueprint(
