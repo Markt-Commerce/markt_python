@@ -267,16 +267,53 @@ class SellerSimpleSchema(Schema):
     id = fields.Int(dump_only=True)
     shop_name = fields.Str(dump_only=True)
     shop_slug = fields.Str(dump_only=True)
-    verification_status = fields.Enum(
-        SellerVerificationStatus, by_value=True, dump_only=True
-    )
-    average_rating = fields.Float(dump_only=True)
-    total_products = fields.Int(dump_only=True)
+    verification_status = fields.Method("get_verification_status", dump_only=True)
+    average_rating = fields.Method("get_average_rating", dump_only=True)
+    total_products = fields.Method("get_total_products", dump_only=True)
     profile_picture_url = fields.Method("get_profile_picture_url", dump_only=True)
+
+    def get_verification_status(self, obj):
+        """Get verification status, handling both enum objects and string values"""
+        if isinstance(obj, dict):
+            # Already serialized dict from ShopService (already a string)
+            return obj.get("verification_status")
+        elif hasattr(obj, "verification_status"):
+            # Seller model object with enum
+            status = obj.verification_status
+            if isinstance(status, SellerVerificationStatus):
+                return status.value
+            return status
+        return None
+
+    def get_average_rating(self, obj):
+        """Get average rating, handling both dict and model objects"""
+        if isinstance(obj, dict):
+            return obj.get("average_rating", 0.0)
+        # For model objects, calculate from total_rating and total_raters
+        total_rating = getattr(obj, "total_rating", 0) or 0
+        total_raters = getattr(obj, "total_raters", 0) or 0
+        if total_raters > 0:
+            return float(total_rating) / total_raters
+        return 0.0
+
+    def get_total_products(self, obj):
+        """Get total products, handling both dict and model objects"""
+        if isinstance(obj, dict):
+            # Check stats dict first (from ShopService.search_shops)
+            stats = obj.get("stats", {})
+            if isinstance(stats, dict):
+                return stats.get("product_count", 0)
+            return 0
+        # For model objects, return 0 if not available as property
+        return getattr(obj, "total_products", 0) or 0
 
     def get_profile_picture_url(self, obj):
         """Get profile picture URL with fallback to default"""
-        if hasattr(obj, "user") and obj.user and obj.user.profile_picture:
+        if isinstance(obj, dict):
+            # Already serialized dict from ShopService
+            user = obj.get("user", {})
+            return user.get("profile_picture") or "/static/images/default-avatar.jpg"
+        elif hasattr(obj, "user") and obj.user and obj.user.profile_picture:
             return obj.user.profile_picture
         return "/static/images/default-avatar.jpg"
 
