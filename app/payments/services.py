@@ -353,15 +353,31 @@ class PaymentService:
     ):
         """Initialize Paystack transaction"""
         try:
+            from main.config import settings
+
             order = payment.order
             buyer = order.buyer.user
+
+            # Build callback URL using configured base URL
+            base_url = settings.API_BASE_URL
+            if not base_url:
+                # Fallback: try to construct from request if available
+                try:
+                    from flask import request
+
+                    if request:
+                        base_url = f"{request.scheme}://{request.host}"
+                except:
+                    base_url = "http://localhost:8000"  # Final fallback
+
+            callback_url = f"{base_url}/api/v1/payments/callback/{payment.id}"
 
             payload = {
                 "amount": int(payment.amount * 100),  # Convert to kobo
                 "email": buyer.email,
                 "currency": payment.currency,
                 "reference": f"PAY_{payment.id}",
-                "callback_url": f"https://yourdomain.com/payment/callback/{payment.id}",
+                "callback_url": callback_url,
                 "metadata": {
                     "payment_id": payment.id,
                     "order_id": payment.order_id,

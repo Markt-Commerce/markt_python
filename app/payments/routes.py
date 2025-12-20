@@ -156,41 +156,42 @@ class PaymentInitialize(MethodView):
 @bp.route("/callback/<payment_id>")
 class PaymentCallback(MethodView):
     def get(self, payment_id):
-        """Handle payment callback from Paystack"""
+        """Handle payment callback from Paystack and redirect to frontend"""
+        from flask import redirect
+        from main.config import settings
+
         try:
             # Get reference from query params
             reference = request.args.get("reference")
             if not reference:
-                abort(400, message="Missing reference")
+                # Redirect to frontend error page
+                frontend_url = settings.FRONTEND_BASE_URL or "http://localhost:3000"
+                return redirect(
+                    f"{frontend_url}/payment/failed?error=missing_reference"
+                )
 
             # Verify payment
             verification_result = PaymentService.verify_payment(payment_id)
 
+            # Get frontend URL from config
+            frontend_url = settings.FRONTEND_BASE_URL or "http://localhost:3000"
+
             if verification_result["verified"]:
-                return (
-                    jsonify(
-                        {
-                            "status": "success",
-                            "message": "Payment verified successfully",
-                            "payment_id": payment_id,
-                        }
-                    ),
-                    200,
+                # Redirect to frontend success page
+                return redirect(
+                    f"{frontend_url}/payment/success?payment_id={payment_id}&reference={reference}"
                 )
             else:
-                return (
-                    jsonify(
-                        {
-                            "status": "failed",
-                            "message": "Payment verification failed",
-                            "payment_id": payment_id,
-                        }
-                    ),
-                    400,
+                # Redirect to frontend failure page
+                return redirect(
+                    f"{frontend_url}/payment/failed?payment_id={payment_id}&reference={reference}"
                 )
 
         except Exception as e:
-            abort(500, message=str(e))
+            current_app.logger.error(f"Payment callback error: {str(e)}")
+            # Redirect to frontend error page
+            frontend_url = settings.FRONTEND_BASE_URL or "http://localhost:3000"
+            return redirect(f"{frontend_url}/payment/failed?error=server_error")
 
 
 # Admin routes for payment management
