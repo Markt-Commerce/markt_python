@@ -103,7 +103,11 @@ class Checkout(MethodView):
     def post(self, checkout_data):
         """Checkout cart and create order"""
         try:
-            order = CartService.checkout_cart(current_user.id, checkout_data)
+            order = CartService.checkout_cart(
+                current_user.id,
+                checkout_data,
+                idempotency_key=checkout_data.get("idempotency_key"),
+            )
             return {"order_id": order.id, "message": "Order created successfully"}
         except APIError as e:
             abort(e.status_code, message=e.message)

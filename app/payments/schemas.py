@@ -29,6 +29,9 @@ class PaymentCreateSchema(Schema):
     currency = fields.Str(validate=validate.Length(equal=3), missing="NGN")
     method = fields.Str(missing="card")  # PaymentMethod.CARD.value
     metadata = fields.Dict(missing={})
+    idempotency_key = fields.Str(
+        allow_none=True
+    )  # Optional idempotency key for retry safety
 
 
 class PaymentVerifySchema(Schema):

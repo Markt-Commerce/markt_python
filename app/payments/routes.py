@@ -50,6 +50,7 @@ class PaymentCreate(MethodView):
             currency=payment_data.get("currency", "NGN"),
             method=payment_data.get("method", "card"),
             metadata=payment_data.get("metadata"),
+            idempotency_key=payment_data.get("idempotency_key"),
         )
 
 
@@ -132,6 +133,7 @@ class PaymentInitialize(MethodView):
                 currency=payment_data.get("currency", "NGN"),
                 method=payment_data.get("method", "card"),
                 metadata=payment_data.get("metadata"),
+                idempotency_key=payment_data.get("idempotency_key"),
             )
 
             # Return Paystack initialization data

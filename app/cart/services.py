@@ -284,9 +284,25 @@ class CartService:
             return cart
 
     @staticmethod
-    def checkout_cart(user_id: str, checkout_data: Dict[str, Any]) -> Order:
+    def checkout_cart(
+        user_id: str,
+        checkout_data: Dict[str, Any],
+        idempotency_key: Optional[str] = None,
+    ) -> Order:
         """Convert cart to order and process checkout"""
+        import uuid
+
         with session_scope() as session:
+            # Check idempotency if key provided
+            if idempotency_key:
+                existing_order = (
+                    session.query(Order)
+                    .filter_by(idempotency_key=idempotency_key)
+                    .first()
+                )
+                if existing_order:
+                    return existing_order
+
             # Validate user
             user = session.query(User).get(user_id)
             if not user or not user.is_buyer:
@@ -300,14 +316,32 @@ class CartService:
             # Validate cart items (check availability, prices, etc.)
             CartService._validate_cart_items(cart.items)
 
+            # Calculate order totals
+            subtotal = cart.subtotal()
+            shipping_fee = CartService._calculate_shipping_fee(
+                cart, checkout_data.get("shipping_address")
+            )
+            tax = CartService._calculate_tax(
+                subtotal, checkout_data.get("shipping_address")
+            )
+            discount = CartService._calculate_discount(subtotal, cart.coupon_code)
+            total = subtotal + shipping_fee + tax - discount
+
             # Create order
             order = Order()
             order.buyer_id = user.buyer_account.id
-            order.status = OrderStatus.PENDING
-            order.subtotal = cart.subtotal()
+            order.status = (
+                OrderStatus.PENDING_PAYMENT
+            )  # Explicit status for payment pending
+            order.subtotal = subtotal
+            order.shipping_fee = shipping_fee
+            order.tax = tax
+            order.discount = discount
+            order.total = total
             order.shipping_address = checkout_data.get("shipping_address")
             order.billing_address = checkout_data.get("billing_address")
             order.customer_note = checkout_data.get("notes")
+            order.idempotency_key = idempotency_key or str(uuid.uuid4())
             session.add(order)
             session.flush()
 
@@ -421,22 +455,92 @@ class CartService:
     @staticmethod
     def _validate_cart_items(cart_items: List[CartItem]):
         """Validate cart items for checkout"""
-        for item in cart_items:
-            # Check if product is still available
-            if item.product.status.value != "active":
-                raise ValidationError(
-                    f"Product {item.product.name} is no longer available"
+        from app.products.models import ProductInventory
+
+        with session_scope() as session:
+            for item in cart_items:
+                # Check if product is still available
+                if item.product.status.value != "active":
+                    raise ValidationError(
+                        f"Product {item.product.name} is no longer available"
+                    )
+
+                # Check if price has changed significantly
+                price_diff = (
+                    abs(item.product.price - item.product_price) / item.product_price
                 )
+                if price_diff > 0.1:  # 10% price change threshold
+                    raise ValidationError(
+                        f"Price for {item.product.name} has changed. "
+                        f"Please review your cart and try again."
+                    )
 
-            # Check if price has changed significantly
-            price_diff = (
-                abs(item.product.price - item.product_price) / item.product_price
-            )
-            if price_diff > 0.1:  # 10% price change threshold
-                raise ValidationError(f"Price for {item.product.name} has changed")
+                # Check inventory availability
+                if item.variant_id:
+                    # Check variant inventory
+                    inventory = (
+                        session.query(ProductInventory)
+                        .filter_by(
+                            product_id=item.product_id, variant_id=item.variant_id
+                        )
+                        .first()
+                    )
+                    available_qty = inventory.quantity if inventory else 0
 
-            # TODO: Check inventory availability
-            # TODO: Check variant availability
+                    if available_qty < item.quantity:
+                        raise ValidationError(
+                            f"Insufficient stock for {item.product.name}. "
+                            f"Available: {available_qty}, Requested: {item.quantity}"
+                        )
+                else:
+                    # Check main product stock
+                    product = session.query(Product).get(item.product_id)
+                    if not product:
+                        raise NotFoundError(f"Product {item.product_id} not found")
+
+                    available_qty = product.stock if product else 0
+
+                    if available_qty < item.quantity:
+                        raise ValidationError(
+                            f"Insufficient stock for {item.product.name}. "
+                            f"Available: {available_qty}, Requested: {item.quantity}"
+                        )
+
+    @staticmethod
+    def _calculate_shipping_fee(cart: Cart, shipping_address: Optional[Dict]) -> float:
+        """Calculate shipping fee based on cart and shipping address"""
+        # TODO: Implement actual shipping calculation logic
+        # For now, return a flat rate or calculate based on address/weight
+        # Example: Flat rate of 10.00 for now
+        if not shipping_address:
+            return 0.0
+
+        # Basic flat rate shipping (can be enhanced with weight-based, distance-based, etc.)
+        return 10.00
+
+    @staticmethod
+    def _calculate_tax(subtotal: float, shipping_address: Optional[Dict]) -> float:
+        """Calculate tax based on subtotal and shipping address"""
+        # TODO: Implement actual tax calculation logic
+        # For now, return a simple percentage (e.g., 5% VAT for Nigeria)
+        if not shipping_address:
+            return 0.0
+
+        # Basic tax calculation: 5% VAT (can be enhanced with location-based tax)
+        tax_rate = 0.05  # 5%
+        return subtotal * tax_rate
+
+    @staticmethod
+    def _calculate_discount(subtotal: float, coupon_code: Optional[str]) -> float:
+        """Calculate discount based on coupon code"""
+        # TODO: Implement actual coupon validation and discount calculation
+        # For now, return 0 if no coupon or coupon is invalid
+        if not coupon_code:
+            return 0.0
+
+        # Placeholder: Return 0 for now until coupon system is implemented
+        # This should validate coupon, check expiry, calculate discount amount/percentage
+        return 0.0
 
     @staticmethod
     def _notify_seller_cart_addition(seller_id: int, product_id: str, quantity: int):

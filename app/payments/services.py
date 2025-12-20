@@ -57,16 +57,32 @@ class PaymentService:
         currency: str = "NGN",
         method: PaymentMethod = PaymentMethod.CARD,
         metadata: Optional[Dict] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Payment:
         """Create a new payment record"""
+        import uuid
+
         with session_scope() as session:
+            # Check idempotency if key provided
+            if idempotency_key:
+                existing_payment = (
+                    session.query(Payment)
+                    .filter_by(idempotency_key=idempotency_key)
+                    .first()
+                )
+                if existing_payment:
+                    return existing_payment
+
             # Validate order
             order = session.query(Order).get(order_id)
             if not order:
                 raise NotFoundError("Order not found")
 
-            if order.status != OrderStatus.PENDING:
-                raise ValidationError("Order is not in pending status")
+            # Accept both PENDING and PENDING_PAYMENT for backward compatibility
+            if order.status not in (OrderStatus.PENDING, OrderStatus.PENDING_PAYMENT):
+                raise ValidationError(
+                    f"Order is not in pending payment status. Current status: {order.status.value}"
+                )
 
             # Convert string method to enum if needed
             if isinstance(method, str):
@@ -83,6 +99,7 @@ class PaymentService:
                 method=method,
                 status=PaymentStatus.PENDING,
                 gateway_response={},
+                idempotency_key=idempotency_key or str(uuid.uuid4()),
             )
 
             session.add(payment)
@@ -131,9 +148,14 @@ class PaymentService:
                 if result["status"] == PaymentStatus.COMPLETED:
                     payment.paid_at = datetime.utcnow()
 
-                    # Update order status to processing (since we don't have PAID status)
-                    order = session.query(Order).get(payment.order_id)
-                    if order:
+                # Update order status to processing after payment succeeds
+                order = session.query(Order).get(payment.order_id)
+                if order:
+                    # Move from PENDING_PAYMENT (or PENDING for backward compat) to PROCESSING
+                    if order.status in (
+                        OrderStatus.PENDING,
+                        OrderStatus.PENDING_PAYMENT,
+                    ):
                         order.status = OrderStatus.PROCESSING
 
                         # Reduce inventory for all order items
@@ -530,10 +552,15 @@ class PaymentService:
                 payment.paid_at = datetime.utcnow()
                 payment.gateway_response = data
 
-                # Update order status to processing
+                # Update order status to processing after payment succeeds
                 order = session.query(Order).get(payment.order_id)
                 if order:
-                    order.status = OrderStatus.PROCESSING
+                    # Move from PENDING_PAYMENT (or PENDING for backward compat) to PROCESSING
+                    if order.status in (
+                        OrderStatus.PENDING,
+                        OrderStatus.PENDING_PAYMENT,
+                    ):
+                        order.status = OrderStatus.PROCESSING
 
                     # Reduce inventory for all order items
                     from app.products.services import ProductService
