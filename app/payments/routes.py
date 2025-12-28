@@ -137,20 +137,39 @@ class PaymentInitialize(MethodView):
             )
 
             # Return Paystack initialization data
-            if payment.gateway_response and "data" in payment.gateway_response:
+            # Note: gateway_response is only set for CARD payments
+            # Bank transfers don't get authorization_url (they use /process endpoint)
+            if payment.method.value == "card":
+                if payment.gateway_response and "data" in payment.gateway_response:
+                    gateway_data = payment.gateway_response["data"]
+                    return {
+                        "payment_id": payment.id,
+                        "authorization_url": gateway_data.get("authorization_url"),
+                        "reference": gateway_data.get("reference"),
+                        "access_code": gateway_data.get("access_code"),
+                    }
+                else:
+                    raise APIError(
+                        "Failed to initialize payment: No gateway response from Paystack",
+                        500,
+                    )
+            else:
+                # For bank_transfer or other methods, return payment info
+                # Bank transfer uses /process endpoint with bank details
                 return {
                     "payment_id": payment.id,
-                    "authorization_url": payment.gateway_response["data"][
-                        "authorization_url"
-                    ],
-                    "reference": payment.gateway_response["data"]["reference"],
-                    "access_code": payment.gateway_response["data"]["access_code"],
+                    "reference": payment.transaction_id or f"PAY_{payment.id}",
+                    "message": "Payment created. For bank transfers, use /process endpoint with bank details.",
                 }
-            else:
-                raise APIError("Failed to initialize payment", 500)
 
+        except APIError as e:
+            current_app.logger.error(f"Payment initialization API error: {str(e)}")
+            abort(e.status_code, message=e.message)
         except Exception as e:
-            abort(500, message=str(e))
+            current_app.logger.error(
+                f"Payment initialization error: {str(e)}", exc_info=True
+            )
+            abort(500, message=f"Failed to initialize payment: {str(e)}")
 
 
 @bp.route("/callback/<payment_id>")
