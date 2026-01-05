@@ -49,13 +49,17 @@ class ChatRooms(MethodView):
     def post(self, room_data):
         """Create or get existing chat room"""
         try:
-            # Determine user roles
+            # Determine user roles and validate required fields
             if current_user.current_role == "buyer":
                 buyer_id = current_user.id
-                seller_id = room_data["seller_id"]
+                seller_id = room_data.get("seller_id")
+                if not seller_id:
+                    abort(400, message="seller_id is required when creating a chat room as a buyer")
             else:
-                buyer_id = room_data["buyer_id"]
+                buyer_id = room_data.get("buyer_id")
                 seller_id = current_user.id
+                if not buyer_id:
+                    abort(400, message="buyer_id is required when creating a chat room as a seller")
 
             room = ChatService.create_or_get_chat_room(
                 buyer_id=buyer_id,
