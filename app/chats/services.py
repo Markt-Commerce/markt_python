@@ -54,19 +54,32 @@ class ChatService:
         product_id: Optional[str] = None,
         request_id: Optional[str] = None,
     ) -> ChatRoom:
-        """Create or get existing chat room between buyer and seller"""
+        """Create or get existing chat room between buyer and seller
+
+        This method ensures that only one chat room exists between two users
+        for a given product/request, regardless of which user initiated the conversation.
+        """
         try:
             # Validate that buyer and seller are different users
             if buyer_id == seller_id:
                 raise ValidationError("Cannot create a chat room with yourself")
 
             with session_scope() as session:
-                # Check if room already exists
+                # Check if room already exists in either direction
+                # (buyer_id=A, seller_id=B) OR (buyer_id=B, seller_id=A)
                 existing_room = (
                     session.query(ChatRoom)
                     .filter(
-                        ChatRoom.buyer_id == buyer_id,
-                        ChatRoom.seller_id == seller_id,
+                        db.or_(
+                            db.and_(
+                                ChatRoom.buyer_id == buyer_id,
+                                ChatRoom.seller_id == seller_id,
+                            ),
+                            db.and_(
+                                ChatRoom.buyer_id == seller_id,
+                                ChatRoom.seller_id == buyer_id,
+                            ),
+                        ),
                         ChatRoom.product_id == product_id,
                         ChatRoom.request_id == request_id,
                     )
@@ -410,9 +423,26 @@ class ChatService:
 
     @staticmethod
     def send_message(
-        user_id: str, room_id: int, content: str, product_id: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """Send a message in a chat room (simplified for socket usage)"""
+        user_id: str,
+        room_id: int,
+        content: str,
+        message_type: str = "text",
+        message_data: Optional[Dict[str, Any]] = None,
+        product_id: Optional[str] = None,
+    ) -> ChatMessage:
+        """Send a message in a chat room
+
+        Args:
+            user_id: ID of the user sending the message
+            room_id: ID of the chat room
+            content: Message content
+            message_type: Type of message (text, image, product, offer)
+            message_data: Additional message data (for images, products, etc.)
+            product_id: Optional product ID (for backward compatibility)
+
+        Returns:
+            ChatMessage object
+        """
         try:
             with session_scope() as session:
                 # Verify user has access to this room
@@ -431,13 +461,19 @@ class ChatService:
                 if not room:
                     raise ForbiddenError("Access denied to this chat room")
 
+                # Prepare message_data
+                final_message_data = message_data or {}
+                # For backward compatibility, if product_id is provided, add it to message_data
+                if product_id and "product_id" not in final_message_data:
+                    final_message_data["product_id"] = product_id
+
                 # Create message
                 message = ChatMessage(
                     room_id=room_id,
                     sender_id=user_id,
                     content=content,
-                    message_type="text",
-                    message_data={"product_id": product_id} if product_id else None,
+                    message_type=message_type,
+                    message_data=final_message_data if final_message_data else None,
                 )
 
                 session.add(message)
@@ -454,19 +490,7 @@ class ChatService:
 
                 session.commit()
 
-                # Get sender info
-                sender = session.query(User).filter(User.id == user_id).first()
-
-                return {
-                    "id": message.id,
-                    "content": message.content,
-                    "message_type": message.message_type,
-                    "message_data": message.message_data,
-                    "sender_id": message.sender_id,
-                    "sender_username": sender.username,
-                    "is_read": message.is_read,
-                    "created_at": message.created_at.isoformat(),
-                }
+                return message
 
         except Exception as e:
             logger.error(f"Failed to send message: {str(e)}")

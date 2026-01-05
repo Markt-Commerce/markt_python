@@ -105,8 +105,8 @@ class ChatMessages(MethodView):
         """Send a message in a chat room"""
         try:
             message = ChatService.send_message(
+                user_id=current_user.id,
                 room_id=room_id,
-                sender_id=current_user.id,
                 content=message_data["content"],
                 message_type=message_data.get("message_type", "text"),
                 message_data=message_data.get("message_data"),

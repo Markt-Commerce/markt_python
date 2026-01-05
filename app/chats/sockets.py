@@ -162,12 +162,32 @@ class ChatNamespace(Namespace):
 
             # Process message through service (includes persistence and validation)
             try:
-                message_data = ChatService.send_message(
+                message = ChatService.send_message(
                     user_id=user_id,
                     room_id=room_id,
                     content=message_content,
                     product_id=product_id,
                 )
+
+                # Get sender info for the response
+                from app.users.models import User
+
+                with session_scope() as session:
+                    sender = session.query(User).filter(User.id == user_id).first()
+                    sender_username = sender.username if sender else None
+
+                # Convert ChatMessage to dict for socket emission
+                message_data = {
+                    "id": message.id,
+                    "room_id": message.room_id,
+                    "sender_id": message.sender_id,
+                    "sender_username": sender_username,
+                    "content": message.content,
+                    "message_type": message.message_type,
+                    "message_data": message.message_data,
+                    "is_read": message.is_read,
+                    "created_at": message.created_at.isoformat(),
+                }
 
                 # Emit to all users in the room (server-side emission)
                 emit(
@@ -181,7 +201,7 @@ class ChatNamespace(Namespace):
                 emit(
                     "message_sent",
                     {
-                        "message_id": message_data["id"],
+                        "message_id": message.id,
                         "timestamp": datetime.utcnow().isoformat(),
                     },
                 )
