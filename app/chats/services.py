@@ -389,7 +389,7 @@ class ChatService:
 
     @staticmethod
     def send_message(
-        user_id: str, room_id: int, content: str, product_id: Optional[str] = None
+        user_id: str, room_id: int, content: str, message_type: str, product_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """Send a message in a chat room (simplified for socket usage)"""
         try:
@@ -415,7 +415,7 @@ class ChatService:
                     room_id=room_id,
                     sender_id=user_id,
                     content=content,
-                    message_type="text",
+                    message_type=message_type,
                     message_data={"product_id": product_id} if product_id else None,
                 )
 
@@ -450,6 +450,8 @@ class ChatService:
         except Exception as e:
             logger.error(f"Failed to send message: {str(e)}")
             raise APIError("Failed to send message")
+
+
 
     @staticmethod
     def send_offer(
