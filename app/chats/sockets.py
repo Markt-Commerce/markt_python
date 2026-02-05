@@ -154,6 +154,7 @@ class ChatNamespace(Namespace):
 
             room_id = data.get("room_id")
             message_content = data.get("message")
+            message_type =  data.get("message_type")
             product_id = data.get("product_id")
 
             # Validate room access
@@ -166,6 +167,7 @@ class ChatNamespace(Namespace):
                     user_id=user_id,
                     room_id=room_id,
                     content=message_content,
+                    message_type=message_type
                     product_id=product_id,
                 )
 
