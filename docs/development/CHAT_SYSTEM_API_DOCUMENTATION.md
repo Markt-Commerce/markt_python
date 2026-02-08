@@ -134,7 +134,7 @@ GET /api/v1/chats/rooms/{room_id}/messages?page=1&per_page=50
 }
 ```
 
-#### **Send Message**
+#### **Send Message (REST)**
 ```
 POST /api/v1/chats/rooms/{room_id}/messages
 ```
@@ -235,25 +235,35 @@ The socket connection automatically uses the session cookie for authentication.
 
 **Join Room**
 ```javascript
-socket.emit('join_room', {
-  room_id: 123
-});
+socket.emit('join_room', { room_id: 123 });
 ```
 
 **Leave Room**
 ```javascript
-socket.emit('leave_room', {
-  room_id: 123
-});
+socket.emit('leave_room', { room_id: 123 });
 ```
 
-**Send Message**
+**Send Message (WebSocket)**
 ```javascript
 socket.emit('message', {
   room_id: 123,
   message: "Hello, I'm interested in your product",
-  product_id: "PRD_789"  // Optional
+  product_id: "PRD_789" // Optional: attaches product to message
 });
+```
+
+Messages sent via WebSocket are persisted by the server and broadcast to the room.
+The server sends two responses:
+
+```javascript
+// Ack to the sender only
+socket.on('message_sent', ({ message_id, timestamp }) => { /* optimistic confirm */ });
+
+// Broadcast to room participants (primary event)
+socket.on('message', (msg) => { /* see payload shape below */ });
+
+// In some flows, centralized pipeline emits 'new_message' with same shape
+socket.on('new_message', (msg) => { /* handle same as 'message' */ });
 ```
 
 **Send Offer**
@@ -326,8 +336,12 @@ socket.on('room_left', (data) => {
 **Message Events**
 ```javascript
 socket.on('message', (data) => {
-  console.log('New message:', data);
-  // data contains: id, content, message_type, sender_id, sender_username, etc.
+  // { id, content, message_type, message_data, sender_id, sender_username, is_read, created_at }
+});
+
+// Centralized pipeline variant
+socket.on('new_message', (data) => {
+  // same shape as 'message'
 });
 
 socket.on('message_sent', (data) => {
@@ -353,8 +367,7 @@ socket.on('offer_response', (data) => {
 **Typing Events**
 ```javascript
 socket.on('typing_update', (data) => {
-  console.log('Typing update:', data);
-  // data contains: room_id, user_id, username, action ("start"/"stop")
+  // { room_id, user_id, username, action: 'start' | 'stop', timestamp }
 });
 ```
 

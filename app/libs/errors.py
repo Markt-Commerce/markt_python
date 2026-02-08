@@ -22,6 +22,16 @@ class AuthError(APIError):
         super().__init__(message, status_code)
 
 
+class UnverifiedEmailError(APIError):
+    """Raised when a user attempts to authenticate with an unverified email"""
+
+    def __init__(self, message="Email not verified", status_code=403, payload=None):
+        default_payload = {"error_type": "unverified_email"}
+        if payload:
+            default_payload.update(payload)
+        super().__init__(message, status_code, default_payload)
+
+
 class ForbiddenError(APIError):
     """Forbidden access errors"""
 

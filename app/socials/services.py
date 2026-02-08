@@ -517,17 +517,32 @@ class NicheService:
                 elif not membership.banned_until:
                     return {"can_post": False, "reason": "You are permanently banned"}
 
-            # Check role-based posting rules
-            if user.is_buyer and not niche.allow_buyer_posts:
-                return {
-                    "can_post": False,
-                    "reason": "Buyers cannot post in this community",
-                }
+            # Check role-based posting rules (now more flexible)
+            # If both buyer and seller posts are allowed, anyone can post
+            if niche.allow_buyer_posts and niche.allow_seller_posts:
+                return {"can_post": True, "requires_approval": niche.require_approval}
 
-            if user.is_seller and not niche.allow_seller_posts:
+            # If only buyer posts are allowed, only buyers can post
+            if niche.allow_buyer_posts and not niche.allow_seller_posts:
+                if not user.is_buyer:
+                    return {
+                        "can_post": False,
+                        "reason": "Only buyers can post in this community",
+                    }
+
+            # If only seller posts are allowed, only sellers can post
+            if niche.allow_seller_posts and not niche.allow_buyer_posts:
+                if not user.is_seller:
+                    return {
+                        "can_post": False,
+                        "reason": "Only sellers can post in this community",
+                    }
+
+            # If neither is allowed, no one can post
+            if not niche.allow_buyer_posts and not niche.allow_seller_posts:
                 return {
                     "can_post": False,
-                    "reason": "Sellers cannot post in this community",
+                    "reason": "Posting is disabled in this community",
                 }
 
             return {"can_post": True, "requires_approval": niche.require_approval}
@@ -546,20 +561,10 @@ class NicheService:
 
             # Get niche and user
             niche = session.query(Niche).get(niche_id)
-            user = session.query(User).get(user_id)
+            session.query(User).get(user_id)
 
-            # Create the post using PostService
-            if user.is_seller:
-                # For sellers, create post with seller_id
-                seller = session.query(Seller).filter_by(user_id=user_id).first()
-                if not seller:
-                    raise ValidationError("Seller account not found")
-
-                post = PostService.create_post(current_user, post_data)
-            else:
-                # For buyers, we need to handle this differently since posts are seller-based
-                # For now, we'll create a special buyer post or use a different approach
-                raise ValidationError("Buyer posts not yet implemented")
+            # Create the post using PostService (now works for all users)
+            post = PostService.create_post(current_user, post_data)
 
             # Create the niche post association
             niche_post = NichePost(
@@ -632,9 +637,7 @@ class NicheService:
                     NichePost.is_approved == True,
                 )
                 .options(
-                    joinedload(NichePost.post)
-                    .joinedload(Post.seller)
-                    .joinedload(Seller.user),
+                    joinedload(NichePost.post).joinedload(Post.user),
                     joinedload(NichePost.post).joinedload(Post.social_media),
                     joinedload(NichePost.post)
                     .joinedload(Post.tagged_products)
@@ -710,11 +713,11 @@ class NicheService:
                 post.status = PostStatus.ACTIVE
 
             # Notify the post creator
-            if post and post.seller.user_id != moderator_id:
+            if post and post.user_id != moderator_id:
                 from app.notifications.services import NotificationService
 
                 NotificationService.create_notification(
-                    user_id=post.seller.user_id,
+                    user_id=post.user_id,
                     notification_type=NotificationType.NICHE_POST_APPROVED,
                     reference_type="post",
                     reference_id=post_id,
@@ -767,11 +770,11 @@ class NicheService:
 
             # Notify the post creator
             post = session.query(Post).get(post_id)
-            if post and post.seller.user_id != moderator_id:
+            if post and post.user_id != moderator_id:
                 from app.notifications.services import NotificationService
 
                 NotificationService.create_notification(
-                    user_id=post.seller.user_id,
+                    user_id=post.user_id,
                     notification_type=NotificationType.NICHE_POST_REJECTED,
                     reference_type="post",
                     reference_id=post_id,
@@ -900,19 +903,19 @@ class NicheService:
 class PostService:
     @staticmethod
     def create_post(current_user, post_data):
-        seller_id = current_user.seller_account.id
+        user_id = current_user.id
         try:
             with session_scope() as session:
-                # Verify seller exists
-                seller = session.query(Seller).get(seller_id)
-                if not seller:
-                    raise NotFoundError("Seller not found")
+                # Verify user exists
+                user = session.query(User).get(user_id)
+                if not user:
+                    raise NotFoundError("User not found")
 
                 # Set status from request or default to draft
                 status = PostStatus(post_data.get("status", "draft"))
 
                 post = Post(
-                    seller_id=seller_id,
+                    user_id=user_id,
                     caption=post_data.get("caption"),
                     status=status,
                     tags=post_data.get("tags", []),
@@ -963,9 +966,9 @@ class PostService:
                 # Add tagged products if provided
                 if "products" in post_data:
                     for product_data in post_data["products"]:
-                        # Verify product belongs to seller
+                        # Verify product exists (users can tag any product)
                         product = session.query(Product).get(product_data["product_id"])
-                        if not product or product.seller_id != seller_id:
+                        if not product:
                             raise ValidationError("Invalid product ID")
 
                         post_product = PostProduct(
@@ -973,9 +976,9 @@ class PostService:
                         )
                         session.add(post_product)
 
-                # Update Redis counters - now using seller_id
+                # Update Redis counters - now using user_id
                 redis_client.zadd(
-                    f"seller:{seller_id}:posts",
+                    f"user:{user_id}:posts",
                     {post.id: int(post.created_at.timestamp())},
                 )
 
@@ -993,7 +996,7 @@ class PostService:
                 post = (
                     session.query(Post)
                     .options(
-                        joinedload(Post.seller).joinedload(Seller.user),
+                        joinedload(Post.user),
                         joinedload(Post.social_media),
                         joinedload(Post.tagged_products).joinedload(
                             PostProduct.product
@@ -1017,7 +1020,7 @@ class PostService:
                 post = (
                     session.query(Post)
                     .options(
-                        joinedload(Post.seller).joinedload(Seller.user),
+                        joinedload(Post.user),
                         joinedload(Post.social_media),
                         joinedload(Post.tagged_products).joinedload(
                             PostProduct.product
@@ -1067,12 +1070,12 @@ class PostService:
         return posts
 
     @staticmethod
-    def get_seller_posts(seller_id, page=1, per_page=20):
-        """Get paginated posts by seller"""
+    def get_user_posts(user_id, page=1, per_page=20):
+        """Get paginated posts by user"""
         with session_scope() as session:
             base_query = (
                 session.query(Post)
-                .filter(Post.seller_id == seller_id, Post.status == PostStatus.ACTIVE)
+                .filter(Post.user_id == user_id, Post.status == PostStatus.ACTIVE)
                 .options(
                     joinedload(Post.social_media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
@@ -1124,11 +1127,11 @@ class PostService:
                 post = session.query(Post).get(post_id)
                 user = session.query(User).get(user_id)
 
-                if post.seller.user_id != user_id:  # Don't notify for self-likes
+                if post.user_id != user_id:  # Don't notify for self-likes
                     from app.notifications.services import NotificationService
 
                     NotificationService.create_notification(
-                        user_id=post.seller.user_id,
+                        user_id=post.user_id,
                         notification_type=NotificationType.POST_LIKE,
                         actor_id=user_id,
                         reference_type="post",
@@ -1200,14 +1203,14 @@ class PostService:
             logger.warning(f"Redis error while unliking post: {str(e)}", exc_info=True)
 
     @staticmethod
-    def update_post(post_id, seller_id, update_data):
+    def update_post(post_id, user_id, update_data):
         """Update post details (caption, media, products)"""
         try:
             with session_scope() as session:
                 post = session.query(Post).get(post_id)
                 if not post:
                     raise NotFoundError("Post not found")
-                if post.seller_id != seller_id:
+                if post.user_id != user_id:
                     raise ValidationError("You can only edit your own posts")
                 if post.status == PostStatus.DELETED:
                     raise ValidationError("Cannot edit deleted posts")
@@ -1244,7 +1247,7 @@ class PostService:
                     # Add new products
                     for product_data in update_data["products"]:
                         product = session.query(Product).get(product_data["product_id"])
-                        if not product or product.seller_id != seller_id:
+                        if not product:
                             raise ValidationError("Invalid product ID")
 
                         post_product = PostProduct(
@@ -1258,14 +1261,14 @@ class PostService:
             raise ConflictError("Failed to update post")
 
     @staticmethod
-    def change_post_status(post_id, seller_id, new_status):
+    def change_post_status(post_id, user_id, new_status):
         """Change post status (publish, archive, etc)"""
         try:
             with session_scope() as session:
                 post = session.query(Post).get(post_id)
                 if not post:
                     raise NotFoundError("Post not found")
-                if post.seller_id != seller_id:
+                if post.user_id != user_id:
                     raise ValidationError("You can only modify your own posts")
 
                 status_mapping = POST_STATUS_TRANSITIONS
@@ -1284,14 +1287,14 @@ class PostService:
 
                 # Handle Redis updates for status changes
                 if new_status == "publish":
-                    # Add to seller's active posts in Redis
+                    # Add to user's active posts in Redis
                     redis_client.zadd(
-                        f"seller:{seller_id}:posts",
+                        f"user:{user_id}:posts",
                         {post.id: int(post.created_at.timestamp())},
                     )
                 elif new_status == "delete":
-                    # Remove from seller's posts in Redis
-                    redis_client.zrem(f"seller:{seller_id}:posts", post.id)
+                    # Remove from user's posts in Redis
+                    redis_client.zrem(f"user:{user_id}:posts", post.id)
 
                 return post
         except SQLAlchemyError as e:
@@ -1303,12 +1306,12 @@ class PostService:
             )
 
     @staticmethod
-    def get_seller_drafts(seller_id, page=1, per_page=20):
-        """Get seller's draft posts"""
+    def get_user_drafts(user_id, page=1, per_page=20):
+        """Get user's draft posts"""
         with session_scope() as session:
             base_query = (
                 session.query(Post)
-                .filter(Post.seller_id == seller_id, Post.status == PostStatus.DRAFT)
+                .filter(Post.user_id == user_id, Post.status == PostStatus.DRAFT)
                 .options(
                     joinedload(Post.social_media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
@@ -1328,12 +1331,12 @@ class PostService:
             }
 
     @staticmethod
-    def get_seller_archived(seller_id, page=1, per_page=20):
-        """Get seller's archived posts"""
+    def get_user_archived(user_id, page=1, per_page=20):
+        """Get user's archived posts"""
         with session_scope() as session:
             base_query = (
                 session.query(Post)
-                .filter(Post.seller_id == seller_id, Post.status == PostStatus.ARCHIVED)
+                .filter(Post.user_id == user_id, Post.status == PostStatus.ARCHIVED)
                 .options(
                     joinedload(Post.social_media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
@@ -1373,11 +1376,11 @@ class PostService:
                 redis_client.zincrby(f"post:{post_id}:comments", 1, user_id)
 
                 # Notify post owner if not self-comment
-                if post.seller.user_id != user_id:
+                if post.user_id != user_id:
                     from app.notifications.services import NotificationService
 
                     NotificationService.create_notification(
-                        user_id=post.seller.user_id,
+                        user_id=post.user_id,
                         notification_type=NotificationType.POST_COMMENT,
                         actor_id=user_id,
                         reference_type="post",
@@ -1418,7 +1421,7 @@ class PostService:
                     raise NotFoundError("Comment not found")
 
                 # Allow post owner or comment author to delete
-                post_owner_id = comment.post.seller.user_id
+                post_owner_id = comment.post.user_id
                 if comment.user_id != user_id and post_owner_id != user_id:
                     raise ValidationError("Not authorized to delete this comment")
 
@@ -1465,7 +1468,7 @@ class PostService:
                 session.query(Post)
                 .filter(Post.status == PostStatus.ACTIVE)
                 .options(
-                    joinedload(Post.seller).joinedload(Seller.user),
+                    joinedload(Post.user),
                     joinedload(Post.social_media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
                     joinedload(Post.likes),
@@ -1476,13 +1479,21 @@ class PostService:
             )
 
             # Apply filters
-            if args.get("seller_id"):
-                base_query = base_query.filter(Post.seller_id == args["seller_id"])
+            # 1) Basic filters from args (user, category)
+            if args.get("user_id"):
+                base_query = base_query.filter(Post.user_id == args["user_id"])
 
             if args.get("category_id"):
-                base_query = base_query.join(Seller).filter(
-                    Seller.category_id == args["category_id"]
+                base_query = base_query.join(PostCategory).filter(
+                    PostCategory.category_id == args["category_id"]
                 )
+
+            # 2) Text search on caption (used by unified search endpoint & /socials/posts)
+            #    We keep this intentionally simple (ILIKE on caption) so it works across
+            #    databases and plays nicely with the existing full‑text index.
+            if args.get("search"):
+                search_term = f"%{args['search']}%"
+                base_query = base_query.filter(Post.caption.ilike(search_term))
 
             # Order by creation date
             base_query = base_query.order_by(Post.created_at.desc())
@@ -1506,14 +1517,14 @@ class PostService:
             }
 
     @staticmethod
-    def delete_post(post_id, seller_id):
-        """Delete post (seller only)"""
+    def delete_post(post_id, user_id):
+        """Delete post (user only)"""
         with session_scope() as session:
             post = session.query(Post).get(post_id)
             if not post:
                 raise NotFoundError("Post not found")
 
-            if post.seller_id != seller_id:
+            if post.user_id != user_id:
                 raise ForbiddenError("You can only delete your own posts")
 
             # Soft delete by changing status
@@ -1521,19 +1532,19 @@ class PostService:
             post.updated_at = datetime.utcnow()
 
             # Remove from Redis
-            redis_client.zrem(f"seller:{seller_id}:posts", post_id)
+            redis_client.zrem(f"user:{user_id}:posts", post_id)
 
             return True
 
     @staticmethod
-    def update_post_status(post_id, seller_id, new_status):
-        """Update post status (seller only)"""
+    def update_post_status(post_id, user_id, new_status):
+        """Update post status (user only)"""
         with session_scope() as session:
             post = session.query(Post).get(post_id)
             if not post:
                 raise NotFoundError("Post not found")
 
-            if post.seller_id != seller_id:
+            if post.user_id != user_id:
                 raise ForbiddenError("You can only update your own posts")
 
             # Validate status transition
@@ -1612,11 +1623,11 @@ class PostService:
             session.flush()
 
             # Notify post owner
-            if post.seller.user_id != user_id:
+            if post.user_id != user_id:
                 from app.notifications.services import NotificationService
 
                 NotificationService.create_notification(
-                    user_id=post.seller.user_id,
+                    user_id=post.user_id,
                     notification_type=NotificationType.POST_COMMENT,
                     reference_type="post",
                     reference_id=post_id,
@@ -1661,7 +1672,7 @@ class PostService:
                 if not post:
                     raise NotFoundError("Post not found")
 
-                if post.seller.user_id != user_id:
+                if post.user_id != user_id:
                     raise ForbiddenError("You can only add media to your own posts")
 
                 # 1. Upload media using updated media service (returns only media object)
@@ -1726,7 +1737,7 @@ class PostService:
                     raise NotFoundError("Post media not found")
 
                 # Verify user owns the post
-                if social_post.post.seller.user_id != user_id:
+                if social_post.post.user_id != user_id:
                     raise ForbiddenError(
                         "You can only delete media from your own posts"
                     )
@@ -2028,21 +2039,27 @@ class FollowService:
 
                 followee = (
                     session.query(User)
-                    .options(joinedload(User.seller_account))
+                    .options(
+                        joinedload(User.buyer_account), joinedload(User.seller_account)
+                    )
                     .get(followee_id)
                 )
 
-                # Validate followee can be followed (must be a seller)
-                if not followee or not followee.seller_account:
-                    raise ValidationError("You can only follow sellers")
+                # Validate followee exists
+                if not followee:
+                    raise ValidationError("User not found")
 
-                # Determine follow type based on permanent capabilities
+                # Determine follow type based on user capabilities
                 if follower.buyer_account and followee.seller_account:
                     follow_type = FollowType.CUSTOMER
                 elif follower.seller_account and followee.seller_account:
                     follow_type = FollowType.PEER
+                elif follower.buyer_account and followee.buyer_account:
+                    follow_type = FollowType.PEER  # Buyers can follow other buyers
+                elif follower.seller_account and followee.buyer_account:
+                    follow_type = FollowType.CUSTOMER  # Sellers can follow buyers
                 else:
-                    raise ValidationError("Invalid follow relationship")
+                    follow_type = FollowType.PEER  # Default to peer relationship
 
                 follow = Follow(
                     follower_id=follower_id,
@@ -2207,7 +2224,7 @@ class FeedService:
                     posts = (
                         session.query(Post)
                         .options(
-                            joinedload(Post.seller).joinedload(Seller.user),
+                            joinedload(Post.user),
                             joinedload(Post.social_media),
                             joinedload(Post.likes),
                             joinedload(Post.comments),
@@ -2272,14 +2289,10 @@ class FeedService:
                                 "id": post.id,
                                 "type": "post",
                                 "caption": post.caption,
-                                "seller": {
-                                    "id": post.seller.id,
-                                    "shop_name": post.seller.shop_name,
-                                    "user": {
-                                        "id": post.seller.user.id,
-                                        "username": post.seller.user.username,
-                                        "profile_picture": post.seller.user.profile_picture,
-                                    },
+                                "user": {
+                                    "id": post.user.id,
+                                    "username": post.user.username,
+                                    "profile_picture": post.user.profile_picture,
                                 },
                                 "media": [
                                     {
@@ -2373,7 +2386,7 @@ class FeedService:
                 feed_items.extend(followed_items)
 
                 # Get content from engaged sellers (NEW!)
-                engaged_items = FeedService._get_engaged_seller_content(user_id)
+                engaged_items = FeedService._get_engaged_user_content(user_id)
                 feed_items.extend(engaged_items)
 
                 # Get trending content based on user interests
@@ -2498,8 +2511,19 @@ class FeedService:
                 .all()
             )
 
-            # Get user's followed sellers categories
-            followed_categories = (
+            # Get user's followed users categories (from both posts and seller profiles)
+            # Categories from posts by followed users
+            post_categories = (
+                session.query(PostCategory.category_id)
+                .join(Post, Post.id == PostCategory.post_id)
+                .join(Follow, Post.user_id == Follow.followee_id)
+                .filter(Follow.follower_id == user_id)
+                .distinct()
+                .all()
+            )
+
+            # Categories from followed users' seller profiles
+            seller_categories = (
                 session.query(SellerCategory.category_id)
                 .join(Seller, Seller.id == SellerCategory.seller_id)
                 .join(Follow, Seller.user_id == Follow.followee_id)
@@ -2507,6 +2531,9 @@ class FeedService:
                 .distinct()
                 .all()
             )
+
+            # Combine both category sources
+            followed_categories = post_categories + seller_categories
 
             # Combine and weight interests
             interests = {}
@@ -2642,13 +2669,12 @@ class FeedService:
 
     @staticmethod
     def _get_followed_content(user_id):
-        """Get content from followed sellers with enhanced scoring"""
+        """Get content from followed users with enhanced scoring"""
         with session_scope() as session:
-            # Get followed seller IDs
-            followed_seller_ids = [
-                seller_id[0]
-                for seller_id in session.query(Seller.id)
-                .join(Follow, Follow.followee_id == Seller.user_id)
+            # Get followed user IDs
+            followed_user_ids = [
+                user_id[0]
+                for user_id in session.query(Follow.followee_id)
                 .filter(
                     Follow.follower_id == user_id,
                     # Follow.is_active == True,
@@ -2656,17 +2682,17 @@ class FeedService:
                 .all()
             ]
 
-            if not followed_seller_ids:
+            if not followed_user_ids:
                 return []
 
-            # Get recent posts from followed sellers
+            # Get recent posts from followed users
             posts = (
                 session.query(Post)
                 .options(
                     joinedload(Post.niche_posts).joinedload(NichePost.niche),
                 )
                 .filter(
-                    Post.seller_id.in_(followed_seller_ids),
+                    Post.user_id.in_(followed_user_ids),
                     Post.status == PostStatus.ACTIVE,
                 )
                 .order_by(Post.created_at.desc())
@@ -2677,11 +2703,13 @@ class FeedService:
             # Filter posts based on niche visibility
             posts = FeedService._filter_posts_by_niche_visibility(posts, user_id)
 
-            # Get recent products from followed sellers
+            # Get recent products from followed users (if they're sellers)
             products = (
                 session.query(Product)
+                .join(Seller, Seller.id == Product.seller_id)
+                .join(User, User.id == Seller.user_id)
                 .filter(
-                    Product.seller_id.in_(followed_seller_ids),
+                    User.id.in_(followed_user_ids),
                     Product.status == Product.Status.ACTIVE,
                 )
                 .order_by(Product.created_at.desc())
@@ -2885,9 +2913,7 @@ class FeedService:
                 with session_scope() as session:
                     post = session.query(Post).filter(Post.id == item["id"]).first()
                     if post:
-                        is_followed = FeedService._is_from_followed_seller(
-                            post, user_id
-                        )
+                        is_followed = FeedService._is_from_followed_user(post, user_id)
                         if is_followed:
                             item["score"] *= 1.5
                         matches_interests = FeedService._matches_user_interests(
@@ -3167,14 +3193,14 @@ class FeedService:
         }
 
     @staticmethod
-    def _is_from_followed_seller(post, user_id):
-        """Check if post is from a followed seller"""
+    def _is_from_followed_user(post, user_id):
+        """Check if post is from a followed user"""
         with session_scope() as session:
             follow = (
                 session.query(Follow)
                 .filter(
                     Follow.follower_id == user_id,
-                    Follow.followee_id == post.seller.user_id,
+                    Follow.followee_id == post.user_id,
                     # Follow.is_active == True,
                 )
                 .first()
@@ -3334,7 +3360,7 @@ class FeedService:
         score = 0
 
         # 1. Base score for followed accounts
-        is_followed = FeedService._is_from_followed_seller(post, user_id)
+        is_followed = FeedService._is_from_followed_user(post, user_id)
         score += 15 if is_followed else 5
 
         # 2. Engagement signals with logarithmic scaling
@@ -3370,8 +3396,13 @@ class FeedService:
             score += 5
 
         # 4. Seller reputation
-        if product.seller.verification_status == SellerVerificationStatus.VERIFIED:
-            score += 5
+        if (
+            hasattr(product, "seller")
+            and product.seller
+            and hasattr(product.seller, "verification_status")
+        ):
+            if product.seller.verification_status == SellerVerificationStatus.VERIFIED:
+                score += 5
 
         # 5. Personalization
         if FeedService._matches_user_preferences(product, user_id):
@@ -3380,31 +3411,31 @@ class FeedService:
         return score
 
     @staticmethod
-    def _get_engaged_seller_content(user_id):
-        """Get content from sellers the user has previously engaged with (liked posts)"""
+    def _get_engaged_user_content(user_id):
+        """Get content from users the current user has previously engaged with (liked posts)"""
         with session_scope() as session:
-            # Get sellers whose posts the user has liked
-            engaged_seller_ids = (
-                session.query(Post.seller_id)
+            # Get users whose posts the current user has liked
+            engaged_user_ids = (
+                session.query(Post.user_id)
                 .join(PostLike, Post.id == PostLike.post_id)
                 .filter(PostLike.user_id == user_id)
                 .distinct()
                 .all()
             )
 
-            engaged_seller_ids = [seller_id[0] for seller_id in engaged_seller_ids]
+            engaged_user_ids = [user_id[0] for user_id in engaged_user_ids]
 
-            if not engaged_seller_ids:
+            if not engaged_user_ids:
                 return []
 
-            # Get recent posts from engaged sellers
+            # Get recent posts from engaged users
             posts = (
                 session.query(Post)
                 .options(
                     joinedload(Post.niche_posts).joinedload(NichePost.niche),
                 )
                 .filter(
-                    Post.seller_id.in_(engaged_seller_ids),
+                    Post.user_id.in_(engaged_user_ids),
                     Post.status == PostStatus.ACTIVE,
                 )
                 .order_by(Post.created_at.desc())
@@ -3415,11 +3446,13 @@ class FeedService:
             # Filter posts based on niche visibility
             posts = FeedService._filter_posts_by_niche_visibility(posts, user_id)
 
-            # Get recent products from engaged sellers
+            # Get recent products from engaged users (if they're sellers)
             products = (
                 session.query(Product)
+                .join(Seller, Seller.id == Product.seller_id)
+                .join(User, User.id == Seller.user_id)
                 .filter(
-                    Product.seller_id.in_(engaged_seller_ids),
+                    User.id.in_(engaged_user_ids),
                     Product.status == Product.Status.ACTIVE,
                 )
                 .order_by(Product.created_at.desc())
@@ -3646,7 +3679,7 @@ class TrendingService:
                         session.query(Post)
                         .filter(Post.id.in_(post_ids))
                         .options(
-                            joinedload(Post.seller).joinedload(Seller.user),
+                            joinedload(Post.user),
                             joinedload(Post.social_media),
                             joinedload(Post.tagged_products).joinedload(
                                 PostProduct.product

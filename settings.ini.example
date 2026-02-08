@@ -32,11 +32,29 @@ OPENAPI_URL_PREFIX=/
 OPENAPI_SWAGGER_UI_PATH=/swagger-ui
 OPENAPI_SWAGGER_UI_URL=https://cdn.jsdelivr.net/npm/swagger-ui-dist/
 
+# CORS / Cookies
+ALLOWED_ORIGINS=http://localhost:3000,https://test.marktcommerce.com
+
+# Cookie settings (set these for HTTPS cross-site in production)
+# For cross-site cookies over HTTPS, set SAMESITE=None and SECURE=True
+SESSION_COOKIE_SAMESITE=
+SESSION_COOKIE_SECURE=
+
 # Paystack Configuration
 PAYSTACK_SECRET_KEY=sk_test_your_secret_key_here
 PAYSTACK_PUBLIC_KEY=pk_test_your_public_key_here
 PAYMENT_CURRENCY=NGN
 PAYMENT_GATEWAY=paystack
+
+# API & Frontend URLs (for payment callbacks and redirects)
+# Development: http://localhost:8000
+# Production: https://api.yourdomain.com
+API_BASE_URL=http://localhost:8000
+
+# Frontend URL (where users are redirected after payment)
+# Development: http://localhost:3000
+# Production: https://yourdomain.com or https://app.yourdomain.com
+FRONTEND_BASE_URL=http://localhost:3000
 
 # AWS Configuration
 AWS_ACCESS_KEY=your_aws_access_key_here

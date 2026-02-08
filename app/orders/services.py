@@ -47,11 +47,15 @@ class OrderService:
                     raise ValidationError("Cannot create order from empty cart")
 
                 # Create single order for buyer
+                # Note: This method is deprecated in favor of CartService.checkout_cart()
+                # Keeping for backward compatibility but should use checkout_cart for full totals
                 order = Order(
                     buyer_id=buyer_id,
                     shipping_address=shipping_address,
                     subtotal=cart.subtotal(),
-                    status=OrderStatus.PENDING,
+                    status=OrderStatus.PENDING_PAYMENT,  # Use explicit status
+                    # TODO: Calculate shipping_fee, tax, discount, total here
+                    # For now, these will be null and should be calculated
                 )
                 session.add(order)
                 session.flush()
@@ -112,26 +116,36 @@ class OrderService:
 
     @staticmethod
     def process_payment(order_id, payment_data):
-        with session_scope() as session:
-            order = session.query(Order).get(order_id)
-            if not order:
-                raise ValueError("Order not found")
+        """
+        DEPRECATED: This method is deprecated. Use PaymentService.create_payment() instead.
 
-            # Mock payment processing
-            payment = Payment(
-                order_id=order_id,
-                amount=order.total,
-                method=payment_data["method"],
-                status=PaymentStatus.COMPLETED,
-                transaction_id=f"mock_{datetime.now().timestamp()}",
-                paid_at=datetime.utcnow(),
-            )
-            session.add(payment)
+        This method was a mock implementation. For real payment processing,
+        use PaymentService.create_payment() and PaymentService.process_payment().
 
-            # Update order status
-            order.status = OrderStatus.PROCESSING
+        Kept for backward compatibility but will redirect to PaymentService.
+        """
+        from app.payments.services import PaymentService
 
-            return payment
+        # Get order to determine amount
+        order = OrderService.get_order(order_id)
+        if not order:
+            raise NotFoundError("Order not found")
+
+        # Use PaymentService instead
+        payment = PaymentService.create_payment(
+            order_id=order_id,
+            amount=order.total
+            or order.subtotal,  # Fallback to subtotal if total not set
+            currency="NGN",
+            method=payment_data.get("method", "card"),
+            metadata=payment_data.get("metadata"),
+        )
+
+        # If payment_data has processing info, process it
+        if payment_data.get("authorization_code") or payment_data.get("bank"):
+            payment = PaymentService.process_payment(payment.id, payment_data)
+
+        return payment
 
     @staticmethod
     def update_order_status(order_id, new_status):

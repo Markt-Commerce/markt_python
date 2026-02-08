@@ -272,12 +272,14 @@ class BuyerRequestService:
             if not request:
                 raise NotFoundError("Request not found")
 
-            # Role-based access control
+            # Role-based access control using current_role for dual-account users
             if user_id:
                 user = session.query(User).get(user_id)
                 if user:
+                    current_role = user.current_role
+
                     # Buyers can only see their own requests or public requests
-                    if user.is_buyer and request.user_id != user_id:
+                    if current_role == "buyer" and request.user_id != user_id:
                         # Check if request is still open and not expired
                         current_time = datetime.utcnow()
                         request_expires = BuyerRequestService._normalize_datetime(
@@ -290,7 +292,7 @@ class BuyerRequestService:
                             raise ForbiddenError("Access denied")
 
                     # Sellers can see all open requests
-                    elif user.is_seller:
+                    elif current_role == "seller":
                         if request.status != RequestStatus.OPEN:
                             raise ForbiddenError(
                                 "Request is no longer accepting offers"
@@ -556,15 +558,18 @@ class BuyerRequestService:
                     BuyerRequest.budget <= args["max_budget"]
                 )
 
-            # Role-based filtering
+            # Role-based filtering using current_role for dual-account users
             if user_id:
                 user = session.query(User).get(user_id)
-                if user and user.is_buyer:
-                    # Buyers see all open requests except their own
-                    base_query = base_query.filter(BuyerRequest.user_id != user_id)
-                elif user and user.is_seller:
-                    # Sellers see all open requests
-                    pass
+                if user:
+                    # Use current_role to determine filter behavior for dual-account users
+                    current_role = user.current_role
+                    if current_role == "buyer":
+                        # Buyers see all open requests except their own
+                        base_query = base_query.filter(BuyerRequest.user_id != user_id)
+                    elif current_role == "seller":
+                        # Sellers see all open requests
+                        pass
 
             # Order by relevance (views, upvotes, recency)
             base_query = base_query.order_by(

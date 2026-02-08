@@ -5,6 +5,11 @@ from datetime import datetime
 from app.libs.models import BaseModel
 from app.libs.helpers import UniqueIdMixin
 from external.database import db
+from external.redis import redis_client
+
+
+CURRENT_ROLE_CACHE_KEY = "user:current_role:{user_id}"
+CURRENT_ROLE_CACHE_TTL = 60 * 60 * 24  # 24 hours
 
 
 class User(BaseModel, UserMixin, UniqueIdMixin):
@@ -25,6 +30,8 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
 
     # Email verification
     email_verified = db.Column(db.Boolean, default=False)
+    # Last login timestamp for session management
+    last_login_at = db.Column(db.DateTime)
 
     # Relationships
     address = db.relationship("UserAddress", uselist=False, back_populates="user")
@@ -45,6 +52,7 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
         "Notification", back_populates="user", lazy="dynamic"
     )
     transactions = db.relationship("Transaction", back_populates="user", lazy="dynamic")
+    posts = db.relationship("Post", back_populates="user", lazy="dynamic")
     post_likes = db.relationship("PostLike", back_populates="user", lazy="dynamic")
     post_comments = db.relationship(
         "PostComment", back_populates="user", lazy="dynamic"
@@ -96,7 +104,35 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
 
     @property
     def current_role(self):
-        return getattr(self, "_current_role", "buyer" if self.is_buyer else "seller")
+        """Get current role with intelligent defaulting"""
+        # If explicitly set, return it
+        if hasattr(self, "_current_role") and self._current_role:
+            return self._current_role
+
+        # Attempt to restore from cache to maintain user preference across sessions
+        try:
+            cache_key = CURRENT_ROLE_CACHE_KEY.format(user_id=self.id)
+            cached_role = redis_client.get(cache_key)
+            if cached_role:
+                if isinstance(cached_role, bytes):
+                    cached_role = cached_role.decode("utf-8")
+                if cached_role in {"buyer", "seller"}:
+                    self._current_role = cached_role
+                    return cached_role
+        except Exception:
+            # Redis failures should not break role determination
+            pass
+
+        # Otherwise, determine based on available accounts
+        # Priority: buyer > seller (consistent with login defaults)
+        if self.is_buyer and self.is_seller:
+            return "buyer"  # Default to buyer for dual-account users
+        elif self.is_buyer:
+            return "buyer"
+        elif self.is_seller:
+            return "seller"
+        else:
+            return "buyer"  # Fallback default
 
     @current_role.setter
     def current_role(self, value):
@@ -107,6 +143,12 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
         if value == "seller" and not self.is_seller:
             raise ValueError("User doesn't have seller account")
         self._current_role = value
+        try:
+            cache_key = CURRENT_ROLE_CACHE_KEY.format(user_id=self.id)
+            redis_client.setex(cache_key, CURRENT_ROLE_CACHE_TTL, value)
+        except Exception:
+            # Redis failures shouldn't break role switching
+            pass
 
     def deactivate(self):
         """Deactivate user account"""
@@ -178,7 +220,6 @@ class Seller(BaseModel):
     order_items = db.relationship("OrderItem", back_populates="seller")
     offers = db.relationship("SellerOffer", back_populates="seller", lazy="dynamic")
     transactions = db.relationship("Transaction", back_populates="seller")
-    posts = db.relationship("Post", back_populates="seller", lazy="dynamic")
     categories = db.relationship("SellerCategory", back_populates="seller")
 
     @property

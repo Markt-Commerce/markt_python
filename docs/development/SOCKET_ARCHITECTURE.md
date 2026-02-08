@@ -65,7 +65,7 @@ Your application uses a **dual socket architecture** with two complementary syst
 // User actions that trigger immediate responses
 socialSocket.emit('typing_start', { post_id: '123' });
 socialSocket.emit('join_post', { post_id: '123' });
-chatSocket.emit('new_message', { content: 'Hello!' });
+chatSocket.emit('message', { room_id: 123, message: 'Hello!' });
 ```
 
 #### **Server-Initiated Events** (Centralized Event System)
@@ -94,6 +94,8 @@ const notificationsSocket = io('http://your-api-domain.com/notification');
 // Listen for events on appropriate sockets
 socialSocket.on('post_liked', handlePostLiked);
 ordersSocket.on('order_status_changed', handleOrderUpdate);
+// Listen to both to cover centralized and direct emissions
+chatSocket.on('message', handleNewMessage);
 chatSocket.on('new_message', handleNewMessage);
 ```
 
