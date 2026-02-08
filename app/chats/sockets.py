@@ -171,7 +171,6 @@ class ChatNamespace(Namespace):
                     content=message_content,
                     message_type=message_type,
                     product_id=product_id,
-                    message_type=message_type
                 )
 
                 # Get sender info for the response
