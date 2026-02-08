@@ -1,0 +1,998 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Markt Chat Discount - Real Auth Test</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .header h1 {
+            margin-bottom: 10px;
+            font-size: 2em;
+        }
+
+        .status {
+            background: rgba(255,255,255,0.2);
+            padding: 10px;
+            border-radius: 10px;
+            margin-top: 10px;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            padding: 20px;
+        }
+
+        .user-panel {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            border: 2px solid #e9ecef;
+        }
+
+        .user-panel.seller {
+            border-color: #28a745;
+        }
+
+        .user-panel.buyer {
+            border-color: #007bff;
+        }
+
+        .user-panel h3 {
+            margin-bottom: 15px;
+            color: #333;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .user-panel.seller h3::before {
+            content: "🛍️";
+        }
+
+        .user-panel.buyer h3::before {
+            content: "🛒";
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+            color: #555;
+        }
+
+        .form-group input, .form-group select, .form-group textarea {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        .form-group input:focus, .form-group select:focus, .form-group textarea:focus {
+            outline: none;
+            border-color: #4facfe;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: transform 0.2s;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+        }
+
+        .btn.danger {
+            background: linear-gradient(135deg, #ff6b6b 0%, #ee5a24 100%);
+        }
+
+        .btn.success {
+            background: linear-gradient(135deg, #51cf66 0%, #40c057 100%);
+        }
+
+        .btn.warning {
+            background: linear-gradient(135deg, #ffd43b 0%, #fab005 100%);
+        }
+
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .chat-area {
+            grid-column: 1 / -1;
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+            height: 400px;
+            overflow-y: auto;
+            border: 2px solid #e9ecef;
+        }
+
+        .message {
+            background: white;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 10px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            border-left: 4px solid #4facfe;
+        }
+
+        .message.discount {
+            border-left-color: #28a745;
+            background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%);
+        }
+
+        .message.discount-response {
+            border-left-color: #ffc107;
+            background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%);
+        }
+
+        .message.system {
+            border-left-color: #6c757d;
+            background: #f8f9fa;
+            font-style: italic;
+        }
+
+        .message-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .message-sender {
+            font-weight: 600;
+            color: #333;
+        }
+
+        .message-time {
+            font-size: 12px;
+            color: #666;
+        }
+
+        .message-content {
+            color: #555;
+            line-height: 1.5;
+        }
+
+        .discount-details {
+            background: rgba(255,255,255,0.7);
+            padding: 10px;
+            border-radius: 8px;
+            margin-top: 10px;
+            font-size: 14px;
+        }
+
+        .discount-value {
+            font-weight: 600;
+            color: #28a745;
+            font-size: 16px;
+        }
+
+        .discount-actions {
+            margin-top: 10px;
+            display: flex;
+            gap: 10px;
+        }
+
+        .discount-actions .btn {
+            padding: 8px 16px;
+            font-size: 12px;
+        }
+
+        .log-area {
+            grid-column: 1 / -1;
+            background: #2d3748;
+            color: #e2e8f0;
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+            height: 200px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 2px 0;
+        }
+
+        .log-entry.info { color: #63b3ed; }
+        .log-entry.success { color: #68d391; }
+        .log-entry.warning { color: #f6e05e; }
+        .log-entry.error { color: #fc8181; }
+
+        .connection-status {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+
+        .connection-status.connected { background: #51cf66; }
+        .connection-status.disconnected { background: #ff6b6b; }
+        .connection-status.connecting { background: #ffd43b; animation: pulse 1s infinite; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .hidden { display: none; }
+
+        .discount-form {
+            background: #e8f5e8;
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 15px;
+            border: 2px solid #28a745;
+        }
+
+        .discount-form h4 {
+            color: #28a745;
+            margin-bottom: 10px;
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .auth-status {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            padding: 10px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+
+        .auth-status.authenticated {
+            background: #d4edda;
+            border-color: #c3e6cb;
+        }
+
+        .auth-status.error {
+            background: #f8d7da;
+            border-color: #f5c6cb;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🛍️ Markt Chat Discount - Real Auth Test</h1>
+            <div class="status">
+                <span class="connection-status" id="connectionStatus"></span>
+                <span id="connectionText">Not Connected</span>
+                <span id="userInfo"></span>
+            </div>
+            <div style="margin-top: 10px; font-size: 12px; background: rgba(255,255,255,0.1); padding: 5px; border-radius: 5px;">
+                ⚠️ If you see "CORS Error" in logs, access this page via http://localhost:3000 instead of opening the HTML file directly
+            </div>
+        </div>
+
+        <div class="main-content">
+            <!-- Seller Panel -->
+            <div class="user-panel seller">
+                <h3>Seller Account</h3>
+                
+                <div class="auth-status" id="sellerAuthStatus">
+                    <strong>Authentication Required</strong><br>
+                    Email: seller1@markt.com
+                </div>
+
+                <div class="form-group">
+                    <label>Email:</label>
+                    <input type="email" id="sellerEmail" value="seller1@markt.com" readonly>
+                </div>
+
+                <div class="form-group">
+                    <label>Password:</label>
+                    <input type="password" id="sellerPassword" value="Password123">
+                </div>
+
+                <div class="form-group">
+                    <label>Room ID:</label>
+                    <input type="number" id="roomId" value="1" readonly>
+                </div>
+
+                <div class="form-group">
+                    <label>Product ID:</label>
+                    <input type="text" id="productId" value="PRD_D4YJKSJ0" readonly>
+                </div>
+
+                <button class="btn" onclick="loginAsSeller()" id="sellerLoginBtn">Login as Seller</button>
+                <button class="btn danger" onclick="logout()" id="sellerLogoutBtn" disabled>Logout</button>
+
+                <!-- Discount Form -->
+                <div class="discount-form" id="sellerDiscountForm" style="display: none;">
+                    <h4>🎉 Create Discount Offer</h4>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Discount Type:</label>
+                            <select id="discountType">
+                                <option value="percentage">Percentage</option>
+                                <option value="fixed_amount">Fixed Amount</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Discount Value:</label>
+                            <input type="number" id="discountValue" placeholder="e.g., 15 or 25.50" step="0.01">
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Min Order Amount:</label>
+                            <input type="number" id="minOrderAmount" placeholder="Optional" step="0.01">
+                        </div>
+                        <div class="form-group">
+                            <label>Max Discount:</label>
+                            <input type="number" id="maxDiscountAmount" placeholder="Optional" step="0.01">
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Expires At:</label>
+                        <input type="datetime-local" id="expiresAt">
+                    </div>
+
+                    <div class="form-group">
+                        <label>Discount Message:</label>
+                        <textarea id="discountMessage" placeholder="Optional custom message..." rows="2"></textarea>
+                    </div>
+
+                    <button class="btn success" onclick="createDiscountOffer()">Create Discount Offer</button>
+                </div>
+            </div>
+
+            <!-- Buyer Panel -->
+            <div class="user-panel buyer">
+                <h3>Buyer Account</h3>
+                
+                <div class="auth-status" id="buyerAuthStatus">
+                    <strong>Authentication Required</strong><br>
+                    Email: buyer1@markt.com
+                </div>
+
+                <div class="form-group">
+                    <label>Email:</label>
+                    <input type="email" id="buyerEmail" value="buyer1@markt.com" readonly>
+                </div>
+
+                <div class="form-group">
+                    <label>Password:</label>
+                    <input type="password" id="buyerPassword" value="Password123">
+                </div>
+
+                <div class="form-group">
+                    <label>Room ID:</label>
+                    <input type="number" id="buyerRoomId" value="1" readonly>
+                </div>
+
+                <button class="btn" onclick="loginAsBuyer()" id="buyerLoginBtn">Login as Buyer</button>
+                <button class="btn danger" onclick="logout()" id="buyerLogoutBtn" disabled>Logout</button>
+
+                <div class="form-group" style="margin-top: 20px;">
+                    <label>Test Message:</label>
+                    <textarea id="testMessage" placeholder="Type your message..." rows="2"></textarea>
+                    <button class="btn" onclick="sendTestMessage()" id="sendMessageBtn" disabled>Send Message</button>
+                </div>
+
+                <div class="form-group">
+                    <label>Order Amount (for testing):</label>
+                    <input type="number" id="orderAmount" placeholder="e.g., 100.00" step="0.01" value="59.99">
+                    <button class="btn success" onclick="testDiscountApplication()" id="applyDiscountBtn" disabled>Test Apply Discount</button>
+                </div>
+            </div>
+
+            <!-- Chat Area -->
+            <div class="chat-area" id="chatArea">
+                <div class="message system">
+                    <div class="message-header">
+                        <span class="message-sender">System</span>
+                        <span class="message-time" id="systemTime"></span>
+                    </div>
+                    <div class="message-content">
+                        Welcome to the Markt Chat Discount Test Client! 
+                        Login as both seller and buyer to test the discount functionality with real authentication.
+                    </div>
+                </div>
+            </div>
+
+            <!-- Log Area -->
+            <div class="log-area" id="logArea">
+                <div class="log-entry info">[INFO] Test client initialized. Ready for authentication.</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Socket.IO CDN -->
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    
+    <script>
+        // Global variables
+        let socket = null;
+        let currentUserType = null;
+        let currentUserId = null;
+        let currentRoomId = null;
+        let activeDiscounts = [];
+        let isAuthenticated = false;
+
+        // Real test data from your system
+        const TEST_DATA = {
+            roomId: 1,
+            sellerId: "USR_NS7XRZ8J",
+            buyerId: "USR_ES400737", 
+            productId: "PRD_D4YJKSJ0",
+            productName: "Wireless Earbuds",
+            productPrice: 59.99
+        };
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            // Set default expiry time to 24 hours from now
+            const tomorrow = new Date();
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            document.getElementById('expiresAt').value = tomorrow.toISOString().slice(0, 16);
+            
+            updateSystemTime();
+            setInterval(updateSystemTime, 1000);
+        });
+
+        function updateSystemTime() {
+            document.getElementById('systemTime').textContent = new Date().toLocaleTimeString();
+        }
+
+        function log(message, type = 'info') {
+            const logArea = document.getElementById('logArea');
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = document.createElement('div');
+            logEntry.className = `log-entry ${type}`;
+            logEntry.textContent = `[${timestamp}] ${message}`;
+            logArea.appendChild(logEntry);
+            logArea.scrollTop = logArea.scrollHeight;
+        }
+
+        function updateConnectionStatus(status, text) {
+            const statusElement = document.getElementById('connectionStatus');
+            const textElement = document.getElementById('connectionText');
+            const userInfoElement = document.getElementById('userInfo');
+            
+            statusElement.className = `connection-status ${status}`;
+            textElement.textContent = text;
+            
+            if (currentUserType && currentUserId) {
+                userInfoElement.textContent = ` | Connected as ${currentUserType}: ${currentUserId}`;
+            } else {
+                userInfoElement.textContent = '';
+            }
+        }
+
+        function updateAuthStatus(userType, authenticated, userData = null) {
+            const authElement = document.getElementById(`${userType}AuthStatus`);
+            const loginBtn = document.getElementById(`${userType}LoginBtn`);
+            const logoutBtn = document.getElementById(`${userType}LogoutBtn`);
+            
+            if (authenticated && userData) {
+                authElement.className = 'auth-status authenticated';
+                authElement.innerHTML = `<strong>✅ Authenticated</strong><br>User: ${userData.email} (${userData.id})`;
+                loginBtn.disabled = true;
+                logoutBtn.disabled = false;
+            } else {
+                authElement.className = 'auth-status';
+                authElement.innerHTML = `<strong>Authentication Required</strong><br>Email: ${userType === 'seller' ? 'seller1@markt.com' : 'buyer1@markt.com'}`;
+                loginBtn.disabled = false;
+                logoutBtn.disabled = true;
+            }
+        }
+
+        async function loginAsSeller() {
+            const email = document.getElementById('sellerEmail').value;
+            const password = document.getElementById('sellerPassword').value;
+            
+            try {
+                log(`Attempting to login as seller: ${email}`, 'info');
+                
+                const response = await fetch('http://localhost:8000/api/v1/users/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    credentials: 'include', // Important for session cookies
+                    body: JSON.stringify({
+                        email: email,
+                        password: password
+                    })
+                }).catch(error => {
+                    if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
+                        throw new Error('CORS Error: Unable to connect to API server. Please access this test via http://localhost:3000 instead of opening the HTML file directly.');
+                    }
+                    throw error;
+                });
+
+                log(`Response status: ${response.status}`, 'info');
+                
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    log(`HTTP Error ${response.status}: ${errorText}`, 'error');
+                    updateAuthStatus('seller', false);
+                    return;
+                }
+
+                const data = await response.json();
+                log(`Response data: ${JSON.stringify(data)}`, 'info');
+                
+                if (data.id && data.email) {
+                    log(`Seller login successful: ${data.email}`, 'success');
+                    updateAuthStatus('seller', true, data);
+                    
+                    // Set current user info
+                    currentUserType = 'seller';
+                    currentUserId = data.id;
+                    currentRoomId = TEST_DATA.roomId;
+                    isAuthenticated = true;
+                    
+                    // Show discount form
+                    document.getElementById('sellerDiscountForm').style.display = 'block';
+                    
+                    // Connect to websocket
+                    connectToWebSocket();
+                } else {
+                    log(`Seller login failed: Invalid response format`, 'error');
+                    updateAuthStatus('seller', false);
+                }
+            } catch (error) {
+                const errorMsg = error.message.includes('CORS Error') ? 
+                    error.message : 
+                    `Error: ${error.message || error}`;
+                log(errorMsg, 'error');
+                updateAuthStatus('seller', false);
+                
+                // Show helpful message about CORS
+                if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
+                    alert('🔒 CORS Error: Please access this test client via: http://localhost:3000\n\n' +
+                          'The browser blocks API calls when loading HTML files directly. ' +
+                          'Use a local HTTP server instead.');
+                }
+            }
+        }
+
+        async function loginAsBuyer() {
+            const email = document.getElementById('buyerEmail').value;
+            const password = document.getElementById('buyerPassword').value;
+            
+            try {
+                log(`Attempting to login as buyer: ${email}`, 'info');
+                
+                const response = await fetch('http://localhost:8000/api/v1/users/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    credentials: 'include', // Important for session cookies
+                    body: JSON.stringify({
+                        email: email,
+                        password: password
+                    })
+                });
+
+                log(`Response status: ${response.status}`, 'info');
+                
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    log(`HTTP Error ${response.status}: ${errorText}`, 'error');
+                    updateAuthStatus('buyer', false);
+                    return;
+                }
+
+                const data = await response.json();
+                log(`Response data: ${JSON.stringify(data)}`, 'info');
+                
+                if (data.id && data.email) {
+                    log(`Buyer login successful: ${data.email}`, 'success');
+                    updateAuthStatus('buyer', true, data);
+                    
+                    // Set current user info
+                    currentUserType = 'buyer';
+                    currentUserId = data.id;
+                    currentRoomId = TEST_DATA.roomId;
+                    isAuthenticated = true;
+                    
+                    // Enable buyer controls
+                    document.getElementById('sendMessageBtn').disabled = false;
+                    document.getElementById('applyDiscountBtn').disabled = false;
+                    
+                    // Connect to websocket
+                    connectToWebSocket();
+                } else {
+                    log(`Buyer login failed: Invalid response format`, 'error');
+                    updateAuthStatus('buyer', false);
+                }
+            } catch (error) {
+                const errorMsg = error.message.includes('CORS Error') ? 
+                    error.message : 
+                    `Error: ${error.message || error}`;
+                log(errorMsg, 'error');
+                updateAuthStatus('buyer', false);
+                
+                // Show helpful message about CORS
+                if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
+                    alert('🔒 CORS Error: Please access this test client via: http://localhost:3000\n\n' +
+                          'The browser blocks API calls when loading HTML files directly. ' +
+                          'Use a local HTTP server instead.');
+                }
+            }
+        }
+
+        async function logout() {
+            try {
+                const response = await fetch('http://localhost:8000/api/v1/users/logout', {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+                
+                if (response.ok) {
+                    log(`${currentUserType} logged out successfully`, 'warning');
+                    updateAuthStatus(currentUserType, false);
+                    
+                    // Disable controls
+                    document.getElementById('sellerDiscountForm').style.display = 'none';
+                    document.getElementById('sendMessageBtn').disabled = true;
+                    document.getElementById('applyDiscountBtn').disabled = true;
+                    
+                    // Disconnect websocket
+                    if (socket) {
+                        socket.disconnect();
+                        socket = null;
+                    }
+                    
+                    // Reset state
+                    currentUserType = null;
+                    currentUserId = null;
+                    currentRoomId = null;
+                    isAuthenticated = false;
+                    updateConnectionStatus('disconnected', 'Not Connected');
+                }
+            } catch (error) {
+                log(`Logout error: ${error}`, 'error');
+            }
+        }
+
+        function connectToWebSocket() {
+            if (socket) {
+                socket.disconnect();
+            }
+
+            updateConnectionStatus('connecting', 'Connecting...');
+            log(`Connecting as ${currentUserType}: ${currentUserId} to room ${currentRoomId}`, 'info');
+
+            // Connect to the chat namespace
+            socket = io('http://localhost:8000/chat', {
+                transports: ['websocket', 'polling']
+            });
+
+            socket.on('connect', function() {
+                updateConnectionStatus('connected', 'Connected');
+                log(`Connected to chat namespace`, 'success');
+                
+                // Join the room with user_id for authentication
+                socket.emit('join_room', { room_id: currentRoomId, user_id: currentUserId });
+                log(`Joined room ${currentRoomId} as ${currentUserId}`, 'success');
+            });
+
+            socket.on('disconnect', function() {
+                updateConnectionStatus('disconnected', 'Disconnected');
+                log('Disconnected from server', 'warning');
+            });
+
+            socket.on('error', function(data) {
+                log(`Error: ${data.message}`, 'error');
+            });
+
+            socket.on('message', function(data) {
+                const senderName = data.sender_username || `User ${data.sender_id}`;
+                addMessageToChat(data.content, data.message_type, senderName, data.message_data);
+                log(`Received message: ${data.content}`, 'info');
+            });
+
+            socket.on('message_sent', function(data) {
+                log(`Message sent successfully: ${data.message_id}`, 'success');
+            });
+
+            // Discount events
+            socket.on('discount_offered', function(data) {
+                log(`Discount offered: ${JSON.stringify(data)}`, 'success');
+                addMessageToChat(
+                    `New discount offer created!`, 
+                    'discount', 
+                    'System', 
+                    data.discount
+                );
+            });
+
+            socket.on('discount_offer_created', function(data) {
+                log(`Discount created successfully: ${data.discount_id}`, 'success');
+                // We'll update chat when we receive the actual discount_offered event from the backend
+            });
+
+            socket.on('discount_responded', function(data) {
+                log(`Discount responded: ${JSON.stringify(data)}`, 'success');
+                addMessageToChat(
+                    `Discount ${data.discount_response.response} by buyer`, 
+                    'discount-response', 
+                    'System'
+                );
+            });
+
+            socket.on('discount_applied', function(data) {
+                log(`Discount applied: ${JSON.stringify(data)}`, 'success');
+                addMessageToChat(
+                    `Discount applied! Amount: $${data.discount_amount}`, 
+                    'system', 
+                    'System'
+                );
+            });
+
+            socket.on('discount_cancelled', function(data) {
+                log(`Discount cancelled: ${JSON.stringify(data)}`, 'warning');
+                addMessageToChat(
+                    `Discount cancelled by seller`, 
+                    'system', 
+                    'System'
+                );
+            });
+
+            socket.on('discounts_list', function(data) {
+                log(`Active discounts: ${JSON.stringify(data.discounts)}`, 'info');
+                activeDiscounts = data.discounts;
+            });
+        }
+
+        function addMessageToChat(content, type = 'message', sender = 'System', data = null) {
+            const chatArea = document.getElementById('chatArea');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}`;
+            
+            const timestamp = new Date().toLocaleTimeString();
+            
+            let messageContent = `
+                <div class="message-header">
+                    <span class="message-sender">${sender}</span>
+                    <span class="message-time">${timestamp}</span>
+                </div>
+                <div class="message-content">${content}</div>
+            `;
+
+            // Add discount details if it's a discount message
+            if (type === 'discount' && data) {
+                const discountValue = data.discount_type === 'percentage' 
+                    ? `${data.discount_value}% off`
+                    : `$${data.discount_value} off`;
+                
+                messageContent += `
+                    <div class="discount-details">
+                        <div class="discount-value">${discountValue}</div>
+                        <div>Expires: ${new Date(data.expires_at).toLocaleString()}</div>
+                        ${data.discount_message ? `<div>Message: ${data.discount_message}</div>` : ''}
+                        <div class="discount-actions">
+                            <button class="btn success" onclick="respondToDiscount(${data.discount_id}, 'accepted')">Accept</button>
+                            <button class="btn danger" onclick="respondToDiscount(${data.discount_id}, 'rejected')">Reject</button>
+                        </div>
+                    </div>
+                `;
+            }
+
+            messageDiv.innerHTML = messageContent;
+            chatArea.appendChild(messageDiv);
+            chatArea.scrollTop = chatArea.scrollHeight;
+        }
+
+        function sendTestMessage() {
+            if (!socket || !socket.connected || !isAuthenticated) {
+                alert('Please login and connect first');
+                return;
+            }
+
+            const message = document.getElementById('testMessage').value;
+            if (!message) {
+                alert('Please enter a message');
+                return;
+            }
+
+            socket.emit('message', {
+                room_id: currentRoomId,
+                message: message,
+                user_id: currentUserId
+            });
+
+            addMessageToChat(message, 'message', `${currentUserType}: ${currentUserId}`);
+            document.getElementById('testMessage').value = '';
+        }
+
+        function createDiscountOffer() {
+            if (!socket || !socket.connected || !isAuthenticated || currentUserType !== 'seller') {
+                alert('Please login as a seller first');
+                return;
+            }
+
+            const discountData = {
+                room_id: currentRoomId,  // Required for socket handler
+                discount_type: document.getElementById('discountType').value,
+                discount_value: parseFloat(document.getElementById('discountValue').value),
+                minimum_order_amount: document.getElementById('minOrderAmount').value ? 
+                    parseFloat(document.getElementById('minOrderAmount').value) : null,
+                maximum_discount_amount: document.getElementById('maxDiscountAmount').value ? 
+                    parseFloat(document.getElementById('maxDiscountAmount').value) : null,
+                expires_at: new Date(document.getElementById('expiresAt').value).toISOString(),
+                usage_limit: 1,
+                product_id: TEST_DATA.productId,
+                discount_message: document.getElementById('discountMessage').value || null,
+                user_id: currentUserId  // Add user_id for socket authentication
+            };
+
+            // Validate required fields
+            if (!discountData.discount_value || !discountData.expires_at) {
+                alert('Please fill in all required discount fields');
+                return;
+            }
+
+            log(`Creating discount offer: ${JSON.stringify(discountData)}`, 'info');
+            
+            // Use WebSocket for discount creation (avoids API session issues)
+            socket.emit('discount_offer', discountData);
+            log(`Sending discount offer via WebSocket`, 'info');
+        }
+
+        function respondToDiscount(discountId, response) {
+            if (!socket || !socket.connected || !isAuthenticated || currentUserType !== 'buyer') {
+                alert('Please login as a buyer first');
+                return;
+            }
+
+            log(`Responding to discount ${discountId} with: ${response}`, 'info');
+
+            fetch('http://localhost:8000/api/v1/chats/discounts/' + discountId + '/respond', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                credentials: 'include',
+                body: JSON.stringify({
+                    response: response,
+                    response_message: response === 'accepted' ? 'Great deal!' : 'Thanks but no thanks'
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                log(`Discount response sent: ${JSON.stringify(data)}`, 'success');
+                addMessageToChat(
+                    `Discount ${response} by buyer`,
+                    'discount-response',
+                    `${currentUserType}: ${currentUserId}`
+                );
+            })
+            .catch(error => {
+                log(`Error responding to discount: ${error}`, 'error');
+            });
+        }
+
+        function testDiscountApplication() {
+            if (!socket || !socket.connected || !isAuthenticated) {
+                alert('Please login and connect first');
+                return;
+            }
+
+            const orderAmount = parseFloat(document.getElementById('orderAmount').value);
+            if (!orderAmount || orderAmount <= 0) {
+                alert('Please enter a valid order amount');
+                return;
+            }
+
+            if (activeDiscounts.length === 0) {
+                alert('No active discounts available. Create one first!');
+                return;
+            }
+
+            const discount = activeDiscounts[0]; // Use first available discount
+            log(`Testing discount application: ${discount.id} for order amount: $${orderAmount}`, 'info');
+
+            fetch('http://localhost:8000/api/v1/chats/discounts/' + discount.id + '/apply', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                credentials: 'include',
+                body: JSON.stringify({
+                    order_amount: orderAmount
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                log(`Discount application result: ${JSON.stringify(data)}`, 'success');
+                addMessageToChat(
+                    `Discount applied: $${data.discount_amount} off $${data.order_amount} order (Final: $${data.final_amount})`,
+                    'system',
+                    'System'
+                );
+            })
+            .catch(error => {
+                log(`Error applying discount: ${error}`, 'error');
+            });
+        }
+
+        // Get active discounts for current room
+        function getActiveDiscounts() {
+            if (!socket || !socket.connected || !isAuthenticated) {
+                alert('Please login and connect first');
+                return;
+            }
+
+            socket.emit('get_discounts', { room_id: currentRoomId });
+            log('Requesting active discounts...', 'info');
+        }
+
+        // Add keyboard shortcuts
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && e.ctrlKey) {
+                if (currentUserType === 'seller') {
+                    createDiscountOffer();
+                } else if (currentUserType === 'buyer') {
+                    sendTestMessage();
+                }
+            }
+        });
+    </script>
+</body>
+</html>

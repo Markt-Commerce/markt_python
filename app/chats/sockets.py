@@ -160,6 +160,8 @@ class ChatNamespace(Namespace):
             # Validate room access
             if not ChatService.user_has_access_to_room(user_id, room_id):
                 return emit("error", {"message": "Access denied to this room"})
+            
+            #TODO: message type needs to be check to make sure it falls within the acceptable types
 
             # Process message through service (includes persistence and validation)
             try:
@@ -167,8 +169,9 @@ class ChatNamespace(Namespace):
                     user_id=user_id,
                     room_id=room_id,
                     content=message_content,
-                    message_type=message_type
+                    message_type=message_type,
                     product_id=product_id,
+                    message_type=message_type
                 )
 
                 # Get sender info for the response

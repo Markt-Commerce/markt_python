@@ -1,0 +1,422 @@
+{
+  "info": {
+    "name": "Markt Checkout & Role Flow",
+    "_postman_id": "9bcbe6a3-5a0f-4a40-88c9-3b2d97f976b0",
+    "description": "End-to-end collection for validating the revised checkout sequence (cart ➜ checkout ➜ order ➜ payment) and the dual-role switch behaviour.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Checkout Flow",
+      "description": "Run these requests in order to simulate a successful buyer checkout. The collection relies on Flask-Login cookies, so keep the same Postman session for all requests.",
+      "item": [
+        {
+          "name": "Authenticate Buyer",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Login succeeded\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const data = pm.response.json();",
+                  "pm.collectionVariables.set(\"buyerId\", data.id);",
+                  "pm.collectionVariables.set(\"currentRole\", data.current_role || \"\");",
+                  "pm.collectionVariables.set(\"buyerEmail\", data.email || pm.collectionVariables.get(\"buyerEmail\"));",
+                  "pm.collectionVariables.set(\"buyerUsername\", data.username || \"\");"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"email\": \"{{buyerEmail}}\",\n    \"password\": \"{{buyerPassword}}\",\n    \"account_type\": \"buyer\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/users/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "users",
+                "login"
+              ]
+            },
+            "description": "Logs in a buyer account and stores key identifiers for downstream requests."
+          }
+        },
+        {
+          "name": "Add Product To Cart",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Item added to cart\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "const data = pm.response.json();",
+                  "pm.collectionVariables.set(\"cartItemId\", data.id);",
+                  "pm.collectionVariables.set(\"cartId\", data.cart_id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"product_id\": \"{{productId}}\",\n    \"quantity\": {{cartQuantity}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/cart/add",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "cart",
+                "add"
+              ]
+            },
+            "description": "Adds a product to the authenticated buyer's cart. Set {{productId}} and optional {{cartQuantity}} before running."
+          }
+        },
+        {
+          "name": "Checkout Cart (Prepare Payment)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Checkout summary generated\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "const data = pm.response.json();",
+                  "pm.collectionVariables.set(\"checkoutReference\", data.checkout_reference);",
+                  "pm.collectionVariables.set(\"checkoutCartId\", data.cart_id);",
+                  "pm.collectionVariables.set(\"checkoutSubtotal\", data.subtotal);",
+                  "pm.collectionVariables.set(\"checkoutBuyerId\", data.buyer_id);",
+                  "pm.collectionVariables.set(\"checkoutExpiresAt\", data.expires_at);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"shipping_address\": {\n        \"full_name\": \"Test Buyer\",\n        \"line1\": \"123 Market Street\",\n        \"city\": \"Lagos\",\n        \"state\": \"LA\",\n        \"postal_code\": \"100001\",\n        \"country\": \"NG\"\n    },\n    \"billing_address\": {\n        \"full_name\": \"Test Buyer\",\n        \"line1\": \"123 Market Street\",\n        \"city\": \"Lagos\",\n        \"state\": \"LA\",\n        \"postal_code\": \"100001\",\n        \"country\": \"NG\"\n    },\n    \"notes\": \"Checkout snapshot generated via Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/cart/checkout",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "cart",
+                "checkout"
+              ]
+            },
+            "description": "Generates the checkout snapshot without creating an order. Response contains checkout_reference, cart_id and pricing summary."
+          }
+        },
+        {
+          "name": "Create Order From Cart",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Order created\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "const data = pm.response.json();",
+                  "pm.collectionVariables.set(\"orderId\", data.id);",
+                  "pm.collectionVariables.set(\"orderNumber\", data.order_number || \"\");"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"checkout_reference\": \"{{checkoutReference}}\",\n    \"cart_id\": {{checkoutCartId}},\n    \"shipping_address\": {\n        \"full_name\": \"Test Buyer\",\n        \"line1\": \"123 Market Street\",\n        \"city\": \"Lagos\",\n        \"state\": \"LA\",\n        \"postal_code\": \"100001\",\n        \"country\": \"NG\"\n    },\n    \"billing_address\": {\n        \"full_name\": \"Test Buyer\",\n        \"line1\": \"123 Market Street\",\n        \"city\": \"Lagos\",\n        \"state\": \"LA\",\n        \"postal_code\": \"100001\",\n        \"country\": \"NG\"\n    },\n    \"payment_method\": \"card\",\n    \"customer_note\": \"Order generated after payment confirmation\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "description": "Finalises the order using the existing cart after external payment succeeds. Requires checkout_cart_id from the previous step."
+          }
+        },
+        {
+          "name": "Initialize Payment",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Payment initialised\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "const data = pm.response.json();",
+                  "pm.collectionVariables.set(\"paymentId\", data.id);",
+                  "pm.collectionVariables.set(\"paymentStatus\", data.status || \"pending\");"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"order_id\": \"{{orderId}}\",\n    \"amount\": {{checkoutSubtotal}},\n    \"currency\": \"NGN\",\n    \"method\": \"card\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/payments/create",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "payments",
+                "create"
+              ]
+            },
+            "description": "Creates a payment intent for the newly created order. Use the checkout subtotal to set the amount."
+          }
+        },
+        {
+          "name": "Process Payment (Mock Gateway)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Payment processed\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const data = pm.response.json();",
+                  "pm.collectionVariables.set(\"paymentStatus\", data.status || data.payment?.status || \"\");"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"order_id\": \"{{orderId}}\",\n    \"amount\": {{checkoutSubtotal}},\n    \"currency\": \"NGN\",\n    \"method\": \"card\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/payments/{{paymentId}}/process",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "payments",
+                "{{paymentId}}",
+                "process"
+              ]
+            },
+            "description": "Simulates confirming the payment via the configured gateway. Use after the payment has been initialised."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Role Switching",
+      "description": "Quick checks for dual-role accounts. Run after logging in with a user that has both buyer and seller profiles.",
+      "item": [
+        {
+          "name": "Switch Role (Toggle)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Role switched\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const data = pm.response.json();",
+                  "pm.collectionVariables.set(\"previousRole\", data.previous_role || \"\");",
+                  "pm.collectionVariables.set(\"currentRole\", data.current_role || \"\");"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/users/switch-role",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "users",
+                "switch-role"
+              ]
+            },
+            "description": "Toggles the authenticated user's role. Run once to move buyer → seller, then run again to confirm seller → buyer works."
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000/api/v1",
+      "type": "string"
+    },
+    {
+      "key": "buyerEmail",
+      "value": "buyer@example.com",
+      "type": "string"
+    },
+    {
+      "key": "buyerPassword",
+      "value": "password123",
+      "type": "string"
+    },
+    {
+      "key": "productId",
+      "value": "PRD_SAMPLE123",
+      "type": "string"
+    },
+    {
+      "key": "cartQuantity",
+      "value": "1",
+      "type": "string"
+    },
+    {
+      "key": "buyerId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "cartId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "checkoutCartId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "checkoutSubtotal",
+      "value": "0",
+      "type": "string"
+    },
+    {
+      "key": "orderId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "paymentId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "currentRole",
+      "value": "buyer",
+      "type": "string"
+    }
+  ]
+}

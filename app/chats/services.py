@@ -64,6 +64,27 @@ class ChatService:
             if buyer_id == seller_id:
                 raise ValidationError("Cannot create a chat room with yourself")
 
+            # Validate that both users exist
+            buyer = session.query(User).filter(User.id == buyer_id).first()
+            if not buyer:
+                raise NotFoundError(f"Buyer with ID {buyer_id} not found")
+
+            seller = session.query(User).filter(User.id == seller_id).first()
+            if not seller:
+                raise NotFoundError(f"Seller with ID {seller_id} not found")
+
+            # Validate product_id if provided
+            if product_id:
+                product = session.query(Product).filter(Product.id == product_id).first()
+                if not product:
+                    raise NotFoundError(f"Product with ID {product_id} not found")
+
+            # Validate request_id if provided
+            if request_id:
+                request_obj = session.query(BuyerRequest).filter(BuyerRequest.id == request_id).first()
+                if not request_obj:
+                    raise NotFoundError(f"Request with ID {request_id} not found")
+
             with session_scope() as session:
                 # Check if room already exists in either direction
                 # (buyer_id=A, seller_id=B) OR (buyer_id=B, seller_id=A)
@@ -473,7 +494,7 @@ class ChatService:
                     sender_id=user_id,
                     content=content,
                     message_type=message_type,
-                    message_data=final_message_data if final_message_data else None,
+                    message_data={"product_id": product_id} if product_id else None,
                 )
 
                 session.add(message)
@@ -495,6 +516,8 @@ class ChatService:
         except Exception as e:
             logger.error(f"Failed to send message: {str(e)}")
             raise APIError("Failed to send message")
+
+
 
     @staticmethod
     def send_offer(
