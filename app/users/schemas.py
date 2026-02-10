@@ -30,6 +30,7 @@ class UserSchema(Schema):
     current_role = fields.Str(dump_only=True)
     created_at = fields.DateTime(dump_only=True)
     updated_at = fields.DateTime(dump_only=True)
+    last_login_at = fields.DateTime(dump_only=True)
 
     def get_profile_picture_url(self, obj):
         """Get profile picture URL with fallback to default"""
@@ -232,8 +233,8 @@ class RoleSwitchSchema(Schema):
     """Schema for role switching responses"""
 
     success = fields.Bool(required=True)
-    previous_role = fields.Str(dump_only=True)
-    current_role = fields.Bool(required=True)
+    previous_role = fields.Str(required=True)
+    current_role = fields.Str(required=True)
     message = fields.Str(required=True)
     user = fields.Nested(UserSchema, dump_only=True)
 
@@ -266,16 +267,53 @@ class SellerSimpleSchema(Schema):
     id = fields.Int(dump_only=True)
     shop_name = fields.Str(dump_only=True)
     shop_slug = fields.Str(dump_only=True)
-    verification_status = fields.Enum(
-        SellerVerificationStatus, by_value=True, dump_only=True
-    )
-    average_rating = fields.Float(dump_only=True)
-    total_products = fields.Int(dump_only=True)
+    verification_status = fields.Method("get_verification_status", dump_only=True)
+    average_rating = fields.Method("get_average_rating", dump_only=True)
+    total_products = fields.Method("get_total_products", dump_only=True)
     profile_picture_url = fields.Method("get_profile_picture_url", dump_only=True)
+
+    def get_verification_status(self, obj):
+        """Get verification status, handling both enum objects and string values"""
+        if isinstance(obj, dict):
+            # Already serialized dict from ShopService (already a string)
+            return obj.get("verification_status")
+        elif hasattr(obj, "verification_status"):
+            # Seller model object with enum
+            status = obj.verification_status
+            if isinstance(status, SellerVerificationStatus):
+                return status.value
+            return status
+        return None
+
+    def get_average_rating(self, obj):
+        """Get average rating, handling both dict and model objects"""
+        if isinstance(obj, dict):
+            return obj.get("average_rating", 0.0)
+        # For model objects, calculate from total_rating and total_raters
+        total_rating = getattr(obj, "total_rating", 0) or 0
+        total_raters = getattr(obj, "total_raters", 0) or 0
+        if total_raters > 0:
+            return float(total_rating) / total_raters
+        return 0.0
+
+    def get_total_products(self, obj):
+        """Get total products, handling both dict and model objects"""
+        if isinstance(obj, dict):
+            # Check stats dict first (from ShopService.search_shops)
+            stats = obj.get("stats", {})
+            if isinstance(stats, dict):
+                return stats.get("product_count", 0)
+            return 0
+        # For model objects, return 0 if not available as property
+        return getattr(obj, "total_products", 0) or 0
 
     def get_profile_picture_url(self, obj):
         """Get profile picture URL with fallback to default"""
-        if hasattr(obj, "user") and obj.user and obj.user.profile_picture:
+        if isinstance(obj, dict):
+            # Already serialized dict from ShopService
+            user = obj.get("user", {})
+            return user.get("profile_picture") or "/static/images/default-avatar.jpg"
+        elif hasattr(obj, "user") and obj.user and obj.user.profile_picture:
             return obj.user.profile_picture
         return "/static/images/default-avatar.jpg"
 
@@ -295,3 +333,75 @@ class PublicProfileSchema(Schema):
 # Legacy schema for backward compatibility
 class SellerSchema(SellerCreateSchema):
     """Legacy schema alias"""
+
+
+# Seller Start Cards Schemas
+class StartCardCTASchema(Schema):
+    label = fields.Str(required=True)
+    href = fields.Str(required=True)
+
+
+class StartCardProgressSchema(Schema):
+    current = fields.Int(required=True)
+    target = fields.Int(required=True)
+
+
+class StartCardSchema(Schema):
+    key = fields.Str(required=True)
+    title = fields.Str(required=True)
+    description = fields.Str(required=True)
+    cta = fields.Nested(StartCardCTASchema, required=True)
+    completed = fields.Bool(required=True)
+    progress = fields.Nested(StartCardProgressSchema, allow_none=True)
+
+
+class StartCardsMetadataSchema(Schema):
+    seller_id = fields.Int(required=True)
+    generated_at = fields.Str(required=True)
+
+
+class StartCardsResponseSchema(Schema):
+    items = fields.List(fields.Nested(StartCardSchema), required=True)
+    metadata = fields.Nested(StartCardsMetadataSchema, required=True)
+
+
+# Seller Analytics Schemas
+class AnalyticsOverviewSchema(Schema):
+    revenue_30d = fields.Float(required=True)
+    orders_30d = fields.Int(required=True)
+    views_30d = fields.Int(required=True)
+    conversion_30d = fields.Float(required=True)
+
+
+class AnalyticsTimeseriesPointSchema(Schema):
+    bucket_start = fields.Str(required=True)
+    value = fields.Float(required=True)
+
+
+class AnalyticsTimeseriesTotalsSchema(Schema):
+    value = fields.Float(required=True)
+    count = fields.Int(required=True)
+
+
+class AnalyticsTimeseriesResponseSchema(Schema):
+    metric = fields.Str(required=True)
+    bucket = fields.Str(required=True)
+    series = fields.List(fields.Nested(AnalyticsTimeseriesPointSchema), required=True)
+    totals = fields.Nested(AnalyticsTimeseriesTotalsSchema, required=True)
+
+
+# Query parameter schemas
+class AnalyticsTimeseriesQuerySchema(Schema):
+    metric = fields.Str(
+        required=True,
+        validate=validate.OneOf(["sales", "orders", "views", "conversion"]),
+    )
+    bucket = fields.Str(
+        required=True, validate=validate.OneOf(["day", "week", "month"])
+    )
+    start_date = fields.DateTime(required=True)
+    end_date = fields.DateTime(required=True)
+
+
+class AnalyticsOverviewQuerySchema(Schema):
+    window_days = fields.Int(missing=30, validate=validate.Range(min=1, max=365))

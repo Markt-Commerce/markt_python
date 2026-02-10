@@ -271,11 +271,10 @@ class PostList(MethodView):
         return PostService.get_posts(args)
 
     @login_required
-    @seller_required
     @bp.arguments(PostCreateSchema)
     @bp.response(201, PostDetailSchema)
     def post(self, post_data):
-        """Create new post (sellers only)"""
+        """Create new post (all users)"""
         return PostService.create_post(current_user, post_data)
 
 
@@ -293,11 +292,9 @@ class PostDetail(MethodView):
         """Update post (owner only)"""
         try:
             post = PostService.get_post(post_id)
-            if post.seller_id != current_user.seller_account.id:
+            if post.user_id != current_user.id:
                 abort(403, message="You can only edit your own posts")
-            return PostService.update_post(
-                post_id, current_user.seller_account.id, post_data
-            )
+            return PostService.update_post(post_id, current_user.id, post_data)
         except APIError as e:
             abort(e.status_code, message=e.message)
 
@@ -307,9 +304,9 @@ class PostDetail(MethodView):
         """Delete post (owner only)"""
         try:
             post = PostService.get_post(post_id)
-            if post.seller_id != current_user.seller_account.id:
+            if post.user_id != current_user.id:
                 abort(403, message="You can only delete your own posts")
-            PostService.delete_post(post_id, current_user.seller_account.id)
+            PostService.delete_post(post_id, current_user.id)
             return None
         except APIError as e:
             abort(e.status_code, message=e.message)
@@ -324,10 +321,10 @@ class PostStatusUpdate(MethodView):
         """Update post status (owner only)"""
         try:
             post = PostService.get_post(post_id)
-            if post.seller_id != current_user.seller_account.id:
+            if post.user_id != current_user.id:
                 abort(403, message="You can only update your own posts")
             return PostService.update_post_status(
-                post_id, current_user.seller_account.id, status_data["action"]
+                post_id, current_user.id, status_data["action"]
             )
         except APIError as e:
             abort(e.status_code, message=e.message)
@@ -400,44 +397,42 @@ class CommentDetail(MethodView):
             abort(e.status_code, message=e.message)
 
 
-# Seller Posts
+# User Posts
 # -----------------------------------------------
-@bp.route("/seller/<seller_id>/posts")
-class SellerPosts(MethodView):
+@bp.route("/user/<user_id>/posts")
+class UserPosts(MethodView):
     @bp.arguments(PaginationQueryArgs, location="query")
-    @bp.response(200, SellerPostsSchema)
-    def get(self, args, seller_id):
-        """Get seller's posts"""
-        return PostService.get_seller_posts(
-            seller_id, args.get("page", 1), args.get("per_page", 20)
+    @bp.response(200, SellerPostsSchema)  # Keep same schema for now
+    def get(self, args, user_id):
+        """Get user's posts"""
+        return PostService.get_user_posts(
+            user_id, args.get("page", 1), args.get("per_page", 20)
         )
 
 
-@bp.route("/seller/posts/drafts")
-class SellerDrafts(MethodView):
+@bp.route("/user/posts/drafts")
+class UserDrafts(MethodView):
     @login_required
-    @seller_required
     @bp.arguments(PaginationQueryArgs, location="query")
     @bp.response(200, PostDetailSchema(many=True))
     def get(self, args):
-        """Get seller's draft posts"""
-        return PostService.get_seller_drafts(
-            current_user.seller_account.id,
+        """Get user's draft posts"""
+        return PostService.get_user_drafts(
+            current_user.id,
             args.get("page", 1),
             args.get("per_page", 20),
         )
 
 
-@bp.route("/seller/posts/archived")
-class SellerArchived(MethodView):
+@bp.route("/user/posts/archived")
+class UserArchived(MethodView):
     @login_required
-    @seller_required
     @bp.arguments(PaginationQueryArgs, location="query")
     @bp.response(200, PostDetailSchema(many=True))
     def get(self, args):
-        """Get seller's archived posts"""
-        return PostService.get_seller_archived(
-            current_user.seller_account.id,
+        """Get user's archived posts"""
+        return PostService.get_user_archived(
+            current_user.id,
             args.get("page", 1),
             args.get("per_page", 20),
         )

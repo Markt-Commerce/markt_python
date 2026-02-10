@@ -7,12 +7,14 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 
 class OrderStatus(Enum):
-    PENDING = "pending"
-    PROCESSING = "processing"
+    PENDING_PAYMENT = "pending_payment"  # Order created, waiting for payment
+    PENDING = "pending"  # Deprecated: Use PENDING_PAYMENT instead
+    PROCESSING = "processing"  # Payment confirmed, order being processed
     SHIPPED = "shipped"
     DELIVERED = "delivered"
     CANCELLED = "cancelled"
     RETURNED = "returned"
+    FAILED = "failed"  # Payment failed or order failed
 
 
 class Order(BaseModel, UniqueIdMixin):
@@ -27,10 +29,13 @@ class Order(BaseModel, UniqueIdMixin):
     tax = db.Column(db.Float)
     discount = db.Column(db.Float)
     total = db.Column(db.Float)
-    status = db.Column(db.Enum(OrderStatus), default=OrderStatus.PENDING)
+    status = db.Column(db.Enum(OrderStatus), default=OrderStatus.PENDING_PAYMENT)
     shipping_address = db.Column(JSONB)
     billing_address = db.Column(JSONB)
     customer_note = db.Column(db.Text)
+    idempotency_key = db.Column(
+        db.String(100), unique=True, nullable=True
+    )  # Prevent duplicate orders
 
     # Relationships
     buyer = db.relationship("Buyer", back_populates="orders")

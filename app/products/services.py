@@ -69,7 +69,7 @@ class ProductService:
                 product = (
                     session.query(Product)
                     .options(
-                        joinedload(Product.seller),
+                        joinedload(Product.seller).joinedload(Seller.user),
                         joinedload(Product.variants),
                         joinedload(Product.images)
                         .joinedload(ProductImage.media)
@@ -94,7 +94,7 @@ class ProductService:
                 session.query(Product)
                 .filter_by(status=Product.Status.ACTIVE)
                 .options(
-                    joinedload(Product.seller),
+                    joinedload(Product.seller).joinedload(Seller.user),
                     joinedload(Product.images)
                     .joinedload(ProductImage.media)
                     .joinedload(Media.variants),
@@ -563,7 +563,7 @@ class ProductService:
                     Product.seller_id.in_(followed_seller_ids),
                 )
                 .options(
-                    joinedload(Product.seller),
+                    joinedload(Product.seller).joinedload(Seller.user),
                     joinedload(Product.images)
                     .joinedload(ProductImage.media)
                     .joinedload(Media.variants),
@@ -609,7 +609,7 @@ class ProductService:
                     ),
                 )
                 .options(
-                    joinedload(Product.seller),
+                    joinedload(Product.seller).joinedload(Seller.user),
                     joinedload(Product.images)
                     .joinedload(ProductImage.media)
                     .joinedload(Media.variants),
@@ -649,7 +649,7 @@ class ProductService:
                     Product.price.between(min_price, max_price),
                 )
                 .options(
-                    joinedload(Product.seller),
+                    joinedload(Product.seller).joinedload(Seller.user),
                     joinedload(Product.images)
                     .joinedload(ProductImage.media)
                     .joinedload(Media.variants),
@@ -674,7 +674,7 @@ class ProductService:
                     Product.average_rating > 0,
                 )
                 .options(
-                    joinedload(Product.seller),
+                    joinedload(Product.seller).joinedload(Seller.user),
                     joinedload(Product.images)
                     .joinedload(ProductImage.media)
                     .joinedload(Media.variants),
@@ -698,7 +698,7 @@ class ProductService:
                     Product.id.notin_(exclude_ids),
                 )
                 .options(
-                    joinedload(Product.seller),
+                    joinedload(Product.seller).joinedload(Seller.user),
                     joinedload(Product.images)
                     .joinedload(ProductImage.media)
                     .joinedload(Media.variants),
@@ -725,7 +725,7 @@ class ProductService:
                         session.query(Product)
                         .filter(Product.status == Product.Status.ACTIVE)
                         .options(
-                            joinedload(Product.seller),
+                            joinedload(Product.seller).joinedload(Seller.user),
                             joinedload(Product.images)
                             .joinedload(ProductImage.media)
                             .joinedload(Media.variants),
@@ -747,7 +747,7 @@ class ProductService:
                     session.query(Product)
                     .filter(Product.id.in_(product_ids))
                     .options(
-                        joinedload(Product.seller),
+                        joinedload(Product.seller).joinedload(Seller.user),
                         joinedload(Product.images)
                         .joinedload(ProductImage.media)
                         .joinedload(Media.variants),
@@ -803,7 +803,7 @@ class ProductService:
                     session.query(Product)
                     .filter(Product.status == Product.Status.ACTIVE)
                     .options(
-                        joinedload(Product.seller),
+                        joinedload(Product.seller).joinedload(Seller.user),
                         joinedload(Product.images)
                         .joinedload(ProductImage.media)
                         .joinedload(Media.variants),
@@ -1065,7 +1065,7 @@ class ProductService:
                     session.query(Product)
                     .filter(Product.seller_id == seller_id)
                     .options(
-                        joinedload(Product.seller),
+                        joinedload(Product.seller).joinedload(Seller.user),
                         joinedload(Product.images)
                         .joinedload(ProductImage.media)
                         .joinedload(Media.variants),

@@ -20,11 +20,11 @@ class SocketManager:
         return redis_client.exists(f"user_online:{user_id}") == 1
 
     @staticmethod
-    def mark_user_online(user_id: str, namespace: str = "general"):
-        """Mark user as online with namespace context"""
+    def mark_user_online(user_id: str):
+        """Mark user as online - application-level presence"""
         from external.redis import redis_client
 
-        redis_client.set(f"user_online:{user_id}", namespace, ex=300)
+        redis_client.set(f"user_online:{user_id}", "online", ex=300)  # 5 min TTL
         redis_client.sadd("online_users", user_id)
 
     @staticmethod

@@ -22,7 +22,7 @@ from .schemas import (
     ChatMessageReactionCreateSchema,
     ChatMessageReactionSummarySchema,
 )
-from .services import ChatService, ChatReactionService
+from .services import ChatService, ChatReactionService, DiscountService
 
 bp = Blueprint("chats", __name__, description="Chat operations", url_prefix="/chats")
 
@@ -49,13 +49,17 @@ class ChatRooms(MethodView):
     def post(self, room_data):
         """Create or get existing chat room"""
         try:
-            # Determine user roles
+            # Determine user roles and validate required fields
             if current_user.current_role == "buyer":
                 buyer_id = current_user.id
-                seller_id = room_data["seller_id"]
+                seller_id = room_data.get("seller_id")
+                if not seller_id:
+                    abort(400, message="seller_id is required when creating a chat room as a buyer")
             else:
-                buyer_id = room_data["buyer_id"]
+                buyer_id = room_data.get("buyer_id")
                 seller_id = current_user.id
+                if not buyer_id:
+                    abort(400, message="buyer_id is required when creating a chat room as a seller")
 
             room = ChatService.create_or_get_chat_room(
                 buyer_id=buyer_id,
@@ -70,7 +74,7 @@ class ChatRooms(MethodView):
                 "seller_id": room.seller_id,
                 "product_id": room.product_id,
                 "request_id": room.request_id,
-                "last_message_at": room.last_message_at.isoformat()
+                "last_message_at": room.last_message_at
                 if room.last_message_at
                 else None,
                 "unread_count_buyer": room.unread_count_buyer,
@@ -105,8 +109,8 @@ class ChatMessages(MethodView):
         """Send a message in a chat room"""
         try:
             message = ChatService.send_message(
+                user_id=current_user.id,
                 room_id=room_id,
-                sender_id=current_user.id,
                 content=message_data["content"],
                 message_type=message_data.get("message_type", "text"),
                 message_data=message_data.get("message_data"),
@@ -120,7 +124,7 @@ class ChatMessages(MethodView):
                 "message_type": message.message_type,
                 "message_data": message.message_data,
                 "is_read": message.is_read,
-                "created_at": message.created_at.isoformat(),
+                "created_at": message.created_at,
             }
         except APIError as e:
             abort(e.status_code, message=e.message)
@@ -165,7 +169,7 @@ class ChatOffers(MethodView):
                 "message_type": message.message_type,
                 "message_data": message.message_data,
                 "is_read": message.is_read,
-                "created_at": message.created_at.isoformat(),
+                "created_at": message.created_at,
             }
         except APIError as e:
             abort(e.status_code, message=e.message)
@@ -208,5 +212,134 @@ class ChatMessageReactionDetail(MethodView):
                 current_user.id, message_id, reaction_type
             )
             return "", 204
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+# Discount Routes for Chat
+# -----------------------------------------------
+@bp.route("/rooms/<int:room_id>/discounts")
+class ChatRoomDiscounts(MethodView):
+    @login_required
+    @bp.response(200)
+    def get(self, room_id):
+        """Get active discount offers for a chat room"""
+        try:
+            discounts = DiscountService.get_active_discounts_for_user(
+                current_user.id, room_id
+            )
+            return {"discounts": discounts}
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+    @login_required
+    @bp.arguments(
+        {
+            "discount_type": {
+                "type": "string",
+                "required": True,
+                "enum": ["percentage", "fixed_amount"],
+            },
+            "discount_value": {"type": "number", "required": True, "minimum": 0.01},
+            "minimum_order_amount": {"type": "number", "minimum": 0},
+            "maximum_discount_amount": {"type": "number", "minimum": 0},
+            "expires_at": {"type": "string", "required": True, "format": "date-time"},
+            "usage_limit": {"type": "integer", "minimum": 1, "default": 1},
+            "product_id": {"type": "string"},
+            "discount_message": {"type": "string"},
+            "discount_code": {"type": "string"},
+            "metadata": {"type": "object"},
+        }
+    )
+    @bp.response(201)
+    def post(self, discount_data, room_id):
+        """Create a new discount offer in a chat room (seller only)"""
+        try:
+            discount = DiscountService.create_discount_offer(
+                seller_id=current_user.id, room_id=room_id, discount_data=discount_data
+            )
+            return discount, 201
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/discounts/<int:discount_id>/respond")
+class DiscountResponse(MethodView):
+    @login_required
+    @bp.arguments(
+        {
+            "response": {
+                "type": "string",
+                "required": True,
+                "enum": ["accepted", "rejected"],
+            },
+            "response_message": {"type": "string"},
+        }
+    )
+    @bp.response(200)
+    def post(self, response_data, discount_id):
+        """Respond to a discount offer (buyer only)"""
+        try:
+            result = DiscountService.respond_to_discount(
+                buyer_id=current_user.id,
+                discount_id=discount_id,
+                response=response_data["response"],
+                response_message=response_data.get("response_message"),
+            )
+            return result
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/discounts/<int:discount_id>/apply")
+class DiscountApplication(MethodView):
+    @login_required
+    @bp.arguments(
+        {"order_amount": {"type": "number", "required": True, "minimum": 0.01}}
+    )
+    @bp.response(200)
+    def post(self, application_data, discount_id):
+        """Apply a discount to an order (validate and calculate discount amount)"""
+        try:
+            success, discount_amount, message = DiscountService.apply_discount_to_order(
+                user_id=current_user.id,
+                discount_id=discount_id,
+                order_amount=application_data["order_amount"],
+            )
+            return {
+                "success": success,
+                "discount_amount": discount_amount,
+                "message": message,
+                "order_amount": application_data["order_amount"],
+                "final_amount": application_data["order_amount"] - discount_amount,
+            }
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/discounts/<int:discount_id>/cancel")
+class DiscountCancellation(MethodView):
+    @login_required
+    @bp.response(200)
+    def post(self, discount_id):
+        """Cancel a discount offer (seller only)"""
+        try:
+            result = DiscountService.cancel_discount(
+                seller_id=current_user.id, discount_id=discount_id
+            )
+            return result
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/discounts/my-active")
+class MyActiveDiscounts(MethodView):
+    @login_required
+    @bp.response(200)
+    def get(self):
+        """Get all active discount offers for the current user"""
+        try:
+            discounts = DiscountService.get_active_discounts_for_user(current_user.id)
+            return {"discounts": discounts}
         except APIError as e:
             abort(e.status_code, message=e.message)

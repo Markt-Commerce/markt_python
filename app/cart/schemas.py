@@ -52,6 +52,9 @@ class CheckoutSchema(Schema):
     shipping_address = fields.Dict(required=True)
     billing_address = fields.Dict(required=True)
     notes = fields.Str(allow_none=True)
+    idempotency_key = fields.Str(
+        allow_none=True
+    )  # Optional idempotency key for retry safety
 
 
 class CartSummarySchema(Schema):

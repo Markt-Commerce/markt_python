@@ -29,6 +29,9 @@ class PaymentCreateSchema(Schema):
     currency = fields.Str(validate=validate.Length(equal=3), missing="NGN")
     method = fields.Str(missing="card")  # PaymentMethod.CARD.value
     metadata = fields.Dict(missing={})
+    idempotency_key = fields.Str(
+        allow_none=True
+    )  # Optional idempotency key for retry safety
 
 
 class PaymentVerifySchema(Schema):
@@ -52,8 +55,21 @@ class PaymentListSchema(Schema):
 class PaymentProcessSchema(Schema):
     """Payment processing schema"""
 
+    # For saved-card charges (existing behaviour)
     authorization_code = fields.Str()
     card_token = fields.Str()
+
+    # For bank transfer / direct‑debit style payments via Paystack Charge API.
+    # We keep this generic so the frontend can pass through the exact structure
+    # expected by Paystack, e.g.:
+    # {
+    #   "bank": {
+    #       "code": "057",
+    #       "account_number": "0000000000"
+    #   }
+    # }
+    bank = fields.Dict(required=False)
+
     metadata = fields.Dict(missing={})
 
 

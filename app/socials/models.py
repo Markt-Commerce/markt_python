@@ -256,7 +256,7 @@ class Post(BaseModel, UniqueIdMixin):
     id_prefix = "PST_"
 
     id = db.Column(db.String(12), primary_key=True)
-    seller_id = db.Column(db.Integer, db.ForeignKey("sellers.id"))
+    user_id = db.Column(db.String(12), db.ForeignKey("users.id"), nullable=False)
     caption = db.Column(db.Text)
     status = db.Column(db.Enum(PostStatus), default=PostStatus.DRAFT, nullable=False)
 
@@ -266,7 +266,7 @@ class Post(BaseModel, UniqueIdMixin):
     created_at = db.Column(db.DateTime, server_default=db.func.now())
 
     # Relationships
-    seller = db.relationship("Seller", back_populates="posts")
+    user = db.relationship("User", back_populates="posts")
     categories = db.relationship("PostCategory", back_populates="post")
     social_media = db.relationship(
         "SocialMediaPost", back_populates="post", cascade="all, delete-orphan"
@@ -285,8 +285,8 @@ class Post(BaseModel, UniqueIdMixin):
     )
 
     __table_args__ = (
-        # Seller post history
-        db.Index("idx_seller_posts", "seller_id", "created_at"),
+        # User post history
+        db.Index("idx_user_posts", "user_id", "created_at"),
         # Full-text search for captions - using text() to handle REGCONFIG
         db.Index(
             "idx_post_search",

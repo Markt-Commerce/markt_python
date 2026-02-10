@@ -25,6 +25,7 @@ class ChatMessageSchema(Schema):
     id = fields.Integer(required=True)
     room_id = fields.Integer(required=True)
     sender_id = fields.String(required=True)
+    sender = fields.Nested("UserBasicSchema", required=True)
     content = fields.String(required=True)
     message_type = fields.String(
         validate=validate.OneOf(["text", "image", "product", "offer"]), default="text"
@@ -38,7 +39,7 @@ class ChatMessageSchema(Schema):
 class ChatRoomListSchema(PaginationSchema):
     """Schema for paginated chat room list"""
 
-    rooms = fields.List(fields.Nested(ChatRoomSchema), required=True)
+    rooms = fields.List(fields.Nested("ChatRoomListItemSchema"), required=True)
 
 
 class ChatMessageListSchema(PaginationSchema):
@@ -116,6 +117,28 @@ class UserBasicSchema(Schema):
     username = fields.String(required=True)
     profile_picture = fields.String(allow_none=True)
     is_seller = fields.Boolean(required=True)
+
+
+class LastMessagePreviewSchema(Schema):
+    """Schema for last message preview in chat room list"""
+
+    id = fields.Integer(required=True)
+    sender_id = fields.String(required=True)
+    content = fields.String(required=True)
+    message_type = fields.String(required=True)
+    created_at = fields.DateTime(required=True)
+
+
+class ChatRoomListItemSchema(Schema):
+    """Schema for enriched chat room list item"""
+
+    id = fields.Integer(required=True)
+    other_user = fields.Nested("UserBasicSchema", required=True)
+    product = fields.Nested("ProductBasicSchema", allow_none=True)
+    request = fields.Nested("RequestBasicSchema", allow_none=True)
+    last_message = fields.Nested(LastMessagePreviewSchema, allow_none=True)
+    unread_count = fields.Integer(required=True)
+    last_message_at = fields.DateTime(allow_none=True)
 
 
 class ProductBasicSchema(Schema):

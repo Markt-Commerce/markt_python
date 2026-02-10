@@ -1,7 +1,6 @@
 import logging
 from datetime import datetime
 from flask_socketio import Namespace, emit, join_room, leave_room
-from flask_login import current_user
 from external.redis import redis_client
 
 logger = logging.getLogger(__name__)
@@ -51,27 +50,14 @@ class NotificationNamespace(Namespace):
         from main.sockets import SocketManager
 
         try:
-            if not current_user.is_authenticated:
-                logger.warning("Unauthorized notification connection attempt")
-                return emit("error", {"message": "Unauthorized"})
-
-            # Join user-specific room
-            user_room = f"user_{current_user.id}"
-            join_room(user_room)
-
-            # Mark user as online using centralized manager
-            SocketManager.mark_user_online(current_user.id, "notifications")
-
-            # Send current unread count
-            from .services import NotificationService
-
-            unread_count = NotificationService.get_unread_count(current_user.id)
             emit(
-                "unread_count_update",
-                {"count": unread_count, "timestamp": datetime.utcnow().isoformat()},
+                "connected",
+                {
+                    "status": "connected",
+                    "message": "Connected to notifications namespace",
+                },
             )
-
-            logger.info(f"User {current_user.id} connected to notifications namespace")
+            logger.info("Client connected to notifications namespace")
 
         except Exception as e:
             logger.error(f"Notification connection error: {e}")
@@ -82,32 +68,25 @@ class NotificationNamespace(Namespace):
         from main.sockets import SocketManager
 
         try:
-            if current_user.is_authenticated:
-                user_room = f"user_{current_user.id}"
-                leave_room(user_room)
-
-                # Remove online status using centralized manager
-                SocketManager.mark_user_offline(current_user.id)
-
-                logger.info(
-                    f"User {current_user.id} disconnected from notifications namespace"
-                )
-
+            logger.info("Client disconnected from notifications namespace")
         except Exception as e:
             logger.error(f"Notification disconnection error: {e}")
 
     def on_mark_as_read(self, data):
         """Handle mark as read request via socket with validation"""
         try:
-            if not current_user.is_authenticated:
-                return emit("error", {"message": "Unauthorized"})
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
 
             # Rate limiting
-            if not self._check_rate_limit("mark_as_read", current_user.id):
+            if not self._check_rate_limit("mark_as_read", user_id):
                 return emit("error", {"message": "Rate limit exceeded"})
 
             # Data validation
-            is_valid, error_msg = self._validate_data(data, ["notification_ids"])
+            is_valid, error_msg = self._validate_data(
+                data, ["notification_ids", "user_id"]
+            )
             if not is_valid:
                 return emit("error", {"message": error_msg})
 
@@ -124,9 +103,7 @@ class NotificationNamespace(Namespace):
 
             from .services import NotificationService
 
-            updated = NotificationService.mark_as_read(
-                current_user.id, notification_ids
-            )
+            updated = NotificationService.mark_as_read(user_id, notification_ids)
 
             emit(
                 "mark_read_response",
@@ -153,21 +130,21 @@ class NotificationNamespace(Namespace):
         from main.sockets import SocketManager
 
         try:
-            if not current_user.is_authenticated:
-                return emit("error", {"message": "Unauthorized"})
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
 
             # Rate limiting
-            if not self._check_rate_limit("ping", current_user.id):
+            if not self._check_rate_limit("ping", user_id):
                 return emit("error", {"message": "Rate limit exceeded"})
 
-            # Refresh online status using centralized manager
-            SocketManager.mark_user_online(current_user.id, "notifications")
+            SocketManager.mark_user_online(user_id)
 
             emit(
                 "pong",
                 {
                     "timestamp": datetime.utcnow().isoformat(),
-                    "user_id": current_user.id,
+                    "user_id": user_id,
                 },
             )
 
@@ -178,8 +155,9 @@ class NotificationNamespace(Namespace):
     def on_get_notifications(self, data):
         """Handle get notifications request"""
         try:
-            if not current_user.is_authenticated:
-                return emit("error", {"message": "Unauthorized"})
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
 
             # Parse pagination parameters
             page = data.get("page", 1)
@@ -189,7 +167,7 @@ class NotificationNamespace(Namespace):
             from .services import NotificationService
 
             notifications = NotificationService.get_user_notifications(
-                current_user.id, page=page, per_page=per_page, unread_only=unread_only
+                user_id, page=page, per_page=per_page, unread_only=unread_only
             )
 
             emit(
@@ -208,18 +186,17 @@ class NotificationNamespace(Namespace):
     def on_clear_all_read(self, data):
         """Handle clear all read notifications"""
         try:
-            if not current_user.is_authenticated:
-                return emit("error", {"message": "Unauthorized"})
+            user_id = data.get("user_id")
+            if not user_id:
+                return emit("error", {"message": "User ID required"})
 
             # Rate limiting
-            if not self._check_rate_limit("mark_as_read", current_user.id):
+            if not self._check_rate_limit("mark_as_read", user_id):
                 return emit("error", {"message": "Rate limit exceeded"})
 
             from .services import NotificationService
 
-            updated = NotificationService.mark_as_read(
-                current_user.id
-            )  # No IDs = mark all
+            updated = NotificationService.mark_as_read(user_id)  # No IDs = mark all
 
             emit(
                 "clear_all_response",

@@ -11,6 +11,7 @@ def register_blueprints(app, api):
     modules = [
         "users",
         "products",
+        "search",
         "orders",
         "chats",
         "cart",

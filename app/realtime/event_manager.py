@@ -35,6 +35,15 @@ class EventManager:
         "typing_update",
     }
 
+    # Discount events (immediate for important business actions)
+    DISCOUNT_EVENTS = {
+        "discount_offered",
+        "discount_responded",
+        "discount_applied",
+        "discount_cancelled",
+        "discount_expired",
+    }
+
     # Event namespace mapping
     EVENT_NAMESPACES = {
         # Social events
@@ -52,6 +61,11 @@ class EventManager:
         "delivery_update": "/orders",
         # Chat events
         "new_message": "/chat",
+        "discount_offered": "/chat",
+        "discount_responded": "/chat",
+        "discount_applied": "/chat",
+        "discount_cancelled": "/chat",
+        "discount_expired": "/chat",
         # Notification events
         "notification": "/notification",
     }
@@ -85,7 +99,10 @@ class EventManager:
                 data["timestamp"] = datetime.utcnow().isoformat()
 
             # Determine emission strategy based on event type
-            if event in EventManager.IMMEDIATE_EVENTS:
+            if (
+                event in EventManager.IMMEDIATE_EVENTS
+                or event in EventManager.DISCOUNT_EVENTS
+            ):
                 # Immediate events - no throttling, direct emission
                 return EventManager._emit_immediate(event, data, room, namespace)
 

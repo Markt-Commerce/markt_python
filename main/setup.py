@@ -29,11 +29,18 @@ def configure_app(app):
     login_manager = LoginManager(app)
     login_manager.login_view = "users.UserLogin"
 
+    # API-friendly unauthorized response (avoid redirects to GET /users/login)
+    @login_manager.unauthorized_handler
+    def _unauthorized():
+        from flask import jsonify
+
+        return jsonify({"message": "Unauthorized"}), 401
+
     from external.database import db, database
 
     database.init_app(app)
     Migrate(app, db)
-    CORS(app, supports_credentials=True, origins=["*"])
+    CORS(app, supports_credentials=True, origins=settings.ALLOWED_ORIGINS)
 
     # Initialize Flask-Smorest API
     api = Api(app)
@@ -41,7 +48,12 @@ def configure_app(app):
     from .extensions import socketio
 
     # Initialize socketio
-    socketio.init_app(app, logger=settings.DEBUG, engineio_logger=settings.DEBUG)
+    socketio.init_app(
+        app,
+        logger=settings.DEBUG,
+        engineio_logger=settings.DEBUG,
+        cors_allowed_origins=settings.ALLOWED_ORIGINS,
+    )
 
     # Register error handler
     app.register_error_handler(Exception, handle_error)

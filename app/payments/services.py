@@ -57,16 +57,32 @@ class PaymentService:
         currency: str = "NGN",
         method: PaymentMethod = PaymentMethod.CARD,
         metadata: Optional[Dict] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Payment:
         """Create a new payment record"""
+        import uuid
+
         with session_scope() as session:
+            # Check idempotency if key provided
+            if idempotency_key:
+                existing_payment = (
+                    session.query(Payment)
+                    .filter_by(idempotency_key=idempotency_key)
+                    .first()
+                )
+                if existing_payment:
+                    return existing_payment
+
             # Validate order
             order = session.query(Order).get(order_id)
             if not order:
                 raise NotFoundError("Order not found")
 
-            if order.status != OrderStatus.PENDING:
-                raise ValidationError("Order is not in pending status")
+            # Accept both PENDING and PENDING_PAYMENT for backward compatibility
+            if order.status not in (OrderStatus.PENDING, OrderStatus.PENDING_PAYMENT):
+                raise ValidationError(
+                    f"Order is not in pending payment status. Current status: {order.status.value}"
+                )
 
             # Convert string method to enum if needed
             if isinstance(method, str):
@@ -83,6 +99,7 @@ class PaymentService:
                 method=method,
                 status=PaymentStatus.PENDING,
                 gateway_response={},
+                idempotency_key=idempotency_key or str(uuid.uuid4()),
             )
 
             session.add(payment)
@@ -131,9 +148,14 @@ class PaymentService:
                 if result["status"] == PaymentStatus.COMPLETED:
                     payment.paid_at = datetime.utcnow()
 
-                    # Update order status to processing (since we don't have PAID status)
-                    order = session.query(Order).get(payment.order_id)
-                    if order:
+                # Update order status to processing after payment succeeds
+                order = session.query(Order).get(payment.order_id)
+                if order:
+                    # Move from PENDING_PAYMENT (or PENDING for backward compat) to PROCESSING
+                    if order.status in (
+                        OrderStatus.PENDING,
+                        OrderStatus.PENDING_PAYMENT,
+                    ):
                         order.status = OrderStatus.PROCESSING
 
                         # Reduce inventory for all order items
@@ -331,15 +353,31 @@ class PaymentService:
     ):
         """Initialize Paystack transaction"""
         try:
+            from main.config import settings
+
             order = payment.order
             buyer = order.buyer.user
+
+            # Build callback URL using configured base URL
+            base_url = settings.API_BASE_URL
+            if not base_url:
+                # Fallback: try to construct from request if available
+                try:
+                    from flask import request
+
+                    if request:
+                        base_url = f"{request.scheme}://{request.host}"
+                except:
+                    base_url = "http://localhost:8000"  # Final fallback
+
+            callback_url = f"{base_url}/api/v1/payments/callback/{payment.id}"
 
             payload = {
                 "amount": int(payment.amount * 100),  # Convert to kobo
                 "email": buyer.email,
                 "currency": payment.currency,
                 "reference": f"PAY_{payment.id}",
-                "callback_url": f"https://yourdomain.com/payment/callback/{payment.id}",
+                "callback_url": callback_url,
                 "metadata": {
                     "payment_id": payment.id,
                     "order_id": payment.order_id,
@@ -412,13 +450,88 @@ class PaymentService:
     def _process_bank_transfer(
         payment: Payment, payment_data: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Process bank transfer payment"""
-        # For bank transfers, we typically wait for webhook confirmation
-        # This is a simplified implementation
-        return {
-            "status": PaymentStatus.PENDING,
-            "gateway_response": {"method": "bank_transfer", "pending": True},
-        }
+        """
+        Process bank transfer payment using Paystack's Charge API.
+
+        The typical flow is:
+        1. Frontend collects bank details securely (e.g. account number + bank code).
+        2. Frontend sends a `bank` object in `payment_data` to this endpoint.
+        3. We call Paystack `/charge` with those details and mark the payment as
+           PENDING while we wait for webhook confirmation (`charge.success`).
+        """
+        try:
+            bank_details = payment_data.get("bank")
+            if not bank_details:
+                raise ValidationError(
+                    "Bank details are required for bank transfer payments"
+                )
+
+            order = payment.order
+            if not order or not order.buyer or not order.buyer.user:
+                raise ValidationError("Associated order/buyer information is missing")
+
+            payload: Dict[str, Any] = {
+                "amount": int(payment.amount * 100),  # Convert to kobo
+                "email": order.buyer.user.email,
+                "currency": payment.currency,
+                "bank": bank_details,
+                "metadata": {
+                    "payment_id": payment.id,
+                    "order_id": payment.order_id,
+                    "buyer_id": order.buyer.user.id,
+                    "method": "bank_transfer",
+                },
+            }
+
+            # Reuse the same reference style used elsewhere so we can match
+            # incoming webhooks back to this payment.
+            payload["reference"] = payment.transaction_id or f"PAY_{payment.id}"
+
+            response = requests.post(
+                f"{PaymentService.PAYSTACK_BASE_URL}/charge",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {PaymentService.PAYSTACK_SECRET_KEY}"
+                },
+            )
+
+            if response.status_code != 200:
+                logger.error(
+                    "Paystack bank transfer charge failed with status %s: %s",
+                    response.status_code,
+                    response.text,
+                )
+                raise APIError("Bank transfer initialization failed", 500)
+
+            data = response.json()
+
+            # For bank payments Paystack typically returns a pending status while
+            # waiting for customer action/OTP. We keep our Payment in PENDING and
+            # rely on the webhook (`charge.success`) to mark it COMPLETED.
+            if not data.get("status"):
+                return {
+                    "status": PaymentStatus.FAILED,
+                    "gateway_response": data,
+                }
+
+            reference = (
+                data.get("data", {}).get("reference")
+                or data.get("data", {}).get("id")
+                or payload["reference"]
+            )
+
+            return {
+                "status": PaymentStatus.PENDING,
+                "transaction_id": reference,
+                "gateway_response": data,
+            }
+
+        except APIError:
+            # Already logged / wrapped, just bubble up
+            raise
+        except Exception as e:
+            logger.error(f"Bank transfer processing failed: {str(e)}")
+            raise APIError("Bank transfer processing failed", 500)
 
     @staticmethod
     def _verify_webhook_signature(payload: Dict[str, Any], signature: str) -> bool:
@@ -455,10 +568,15 @@ class PaymentService:
                 payment.paid_at = datetime.utcnow()
                 payment.gateway_response = data
 
-                # Update order status to processing
+                # Update order status to processing after payment succeeds
                 order = session.query(Order).get(payment.order_id)
                 if order:
-                    order.status = OrderStatus.PROCESSING
+                    # Move from PENDING_PAYMENT (or PENDING for backward compat) to PROCESSING
+                    if order.status in (
+                        OrderStatus.PENDING,
+                        OrderStatus.PENDING_PAYMENT,
+                    ):
+                        order.status = OrderStatus.PROCESSING
 
                     # Reduce inventory for all order items
                     from app.products.services import ProductService

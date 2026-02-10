@@ -16,6 +16,7 @@ from .schemas import (
     PaymentCreateSchema,
     PaymentVerifySchema,
     PaymentListSchema,
+    PaymentProcessSchema,
 )
 
 bp = Blueprint(
@@ -49,6 +50,7 @@ class PaymentCreate(MethodView):
             currency=payment_data.get("currency", "NGN"),
             method=payment_data.get("method", "card"),
             metadata=payment_data.get("metadata"),
+            idempotency_key=payment_data.get("idempotency_key"),
         )
 
 
@@ -56,10 +58,16 @@ class PaymentCreate(MethodView):
 class PaymentProcess(MethodView):
     @login_required
     @buyer_required
-    @bp.arguments(PaymentSchema)
+    @bp.arguments(PaymentProcessSchema)
     @bp.response(200, PaymentSchema)
     def post(self, payment_data, payment_id):
-        """Process payment with Paystack"""
+        """Process payment with Paystack.
+
+        - For card payments, expects an `authorization_code` or `card_token`
+          (see `PaymentProcessSchema`).
+        - For bank transfers, expects a `bank` object which is forwarded to
+          Paystack's Charge API.
+        """
         return PaymentService.process_payment(payment_id, payment_data)
 
 
@@ -125,63 +133,84 @@ class PaymentInitialize(MethodView):
                 currency=payment_data.get("currency", "NGN"),
                 method=payment_data.get("method", "card"),
                 metadata=payment_data.get("metadata"),
+                idempotency_key=payment_data.get("idempotency_key"),
             )
 
             # Return Paystack initialization data
-            if payment.gateway_response and "data" in payment.gateway_response:
+            # Note: gateway_response is only set for CARD payments
+            # Bank transfers don't get authorization_url (they use /process endpoint)
+            if payment.method.value == "card":
+                if payment.gateway_response and "data" in payment.gateway_response:
+                    gateway_data = payment.gateway_response["data"]
+                    return {
+                        "payment_id": payment.id,
+                        "authorization_url": gateway_data.get("authorization_url"),
+                        "reference": gateway_data.get("reference"),
+                        "access_code": gateway_data.get("access_code"),
+                    }
+                else:
+                    raise APIError(
+                        "Failed to initialize payment: No gateway response from Paystack",
+                        500,
+                    )
+            else:
+                # For bank_transfer or other methods, return payment info
+                # Bank transfer uses /process endpoint with bank details
                 return {
                     "payment_id": payment.id,
-                    "authorization_url": payment.gateway_response["data"][
-                        "authorization_url"
-                    ],
-                    "reference": payment.gateway_response["data"]["reference"],
-                    "access_code": payment.gateway_response["data"]["access_code"],
+                    "reference": payment.transaction_id or f"PAY_{payment.id}",
+                    "message": "Payment created. For bank transfers, use /process endpoint with bank details.",
                 }
-            else:
-                raise APIError("Failed to initialize payment", 500)
 
+        except APIError as e:
+            current_app.logger.error(f"Payment initialization API error: {str(e)}")
+            abort(e.status_code, message=e.message)
         except Exception as e:
-            abort(500, message=str(e))
+            current_app.logger.error(
+                f"Payment initialization error: {str(e)}", exc_info=True
+            )
+            abort(500, message=f"Failed to initialize payment: {str(e)}")
 
 
 @bp.route("/callback/<payment_id>")
 class PaymentCallback(MethodView):
     def get(self, payment_id):
-        """Handle payment callback from Paystack"""
+        """Handle payment callback from Paystack and redirect to frontend"""
+        from flask import redirect
+        from main.config import settings
+
         try:
             # Get reference from query params
             reference = request.args.get("reference")
             if not reference:
-                abort(400, message="Missing reference")
+                # Redirect to frontend error page
+                frontend_url = settings.FRONTEND_BASE_URL or "http://localhost:3000"
+                return redirect(
+                    f"{frontend_url}/payment/failed?error=missing_reference"
+                )
 
             # Verify payment
             verification_result = PaymentService.verify_payment(payment_id)
 
+            # Get frontend URL from config
+            frontend_url = settings.FRONTEND_BASE_URL or "http://localhost:3000"
+
             if verification_result["verified"]:
-                return (
-                    jsonify(
-                        {
-                            "status": "success",
-                            "message": "Payment verified successfully",
-                            "payment_id": payment_id,
-                        }
-                    ),
-                    200,
+                # Redirect to frontend success page
+                return redirect(
+                    f"{frontend_url}/payment/success?payment_id={payment_id}&reference={reference}"
                 )
             else:
-                return (
-                    jsonify(
-                        {
-                            "status": "failed",
-                            "message": "Payment verification failed",
-                            "payment_id": payment_id,
-                        }
-                    ),
-                    400,
+                # Redirect to frontend failure page
+                return redirect(
+                    f"{frontend_url}/payment/failed?payment_id={payment_id}&reference={reference}"
                 )
 
         except Exception as e:
-            abort(500, message=str(e))
+            current_app.logger.error(f"Payment callback error: {str(e)}")
+            # Redirect to frontend error page
+            frontend_url = settings.FRONTEND_BASE_URL or "http://localhost:3000"
+            return redirect(f"{frontend_url}/payment/failed?error=server_error")
 
 
 # Admin routes for payment management

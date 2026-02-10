@@ -63,7 +63,13 @@ class Database:
                 SocialMediaPost,
                 RequestImage,
             )
-            from app.chats.models import ChatRoom, ChatMessage, ChatOffer, ChatMessageReaction
+            from app.chats.models import (
+                ChatRoom,
+                ChatMessage,
+                ChatOffer,
+                ChatMessageReaction,
+                ChatDiscount,
+            )
             from app.cart.models import Cart, CartItem
 
         # Import other models as needed
