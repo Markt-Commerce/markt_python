@@ -16,7 +16,7 @@ from app.libs.errors import NotFoundError, ValidationError
 from app.libs.email_service import email_service
 
 # app imports
-from .models import DeliveryUser, DeliveryLastLocation, DeliveryOrderAssignment, DeliveryStatus, AssignmentStatus
+from .models import DeliveryUser, DeliveryLastLocation, DeliveryOrderAssignment, DeliveryStatus, AssignmentStatus, LocationUpdateRoom, OrderLocationMapping
 from .schemas import DeliveryStatus
 
 from app.orders.models import Order, OrderStatus
@@ -185,6 +185,9 @@ class DeliveryService:
                     logger.warning(f"No delivery partner found for user ID {user_id}")
                     raise NotFoundError("Delivery partner not found")
 
+
+                """ SELECT longtitude, latitude FROM """
+
                 # Fetch available orders for the delivery user
                 available_orders = session.query(Order).filter_by(delivery_user_id=delivery_user.id, status=OrderStatus.AVAILABLE).all()
 
@@ -338,3 +341,17 @@ class DeliveryService:
             session.commit()
 
             return {"status": "success", "message": "Order marked as delivered"}
+        
+
+    @staticmethod
+    def find_delivery_order_buyer(user_id: str, delivery_user_id: str) -> bool:
+        #user_id is for buyers or sellers
+        """ Checks if the user passed is one of the buyers the delivery is assigned to """
+        with session_scope() as session:
+            room = session.query(LocationUpdateRoom).filter_by(delivery_user_id=delivery_user_id).first()
+            if not room:
+                return False
+            order_mapping = session.query(OrderLocationMapping).filter_by(room_id=room.room_id).first()
+            if not order_mapping:
+                return False
+            return True

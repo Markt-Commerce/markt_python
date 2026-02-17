@@ -67,3 +67,25 @@ class DeliveryOrderAssignment(BaseModel):
     escrow_qr_code = db.Column(db.String(255), nullable=False)  # QR code for escrow release, if applicable
 
     delivery_user = db.relationship("DeliveryUser", backref="order_assignments")
+
+# there is the possibility that this would not be stored permanently
+# this would be because at the end of the 
+class LocationUpdateRoom(BaseModel):
+    __tablename__ = "location_update_rooms"
+
+    id = db.Column(db.Integer, primary_key=True)
+    room_id = db.Column(db.String(36), unique=True, nullable=False)  # UUID for room identification
+    delivery_user_id = db.Column(db.Integer, db.ForeignKey("delivery_users.id"))
+    #several buyers and sellers can join this room as long as they are in the same order, we can have a mapping table between orders and rooms, this way we can easily find the room for a specific order and also find all the orders related to a specific room 
+    #a delivery could take on diffferent orders at a time, so we need to have a mapping table between orders and rooms
+    orders = db.relationship("OrderLocationMapping", backref="location_update_room", cascade="all, delete-orphan")
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+
+class OrderLocationMapping(BaseModel):
+    __tablename__ = "order_location_mappings"
+
+    id = db.Column(db.Integer, primary_key=True)
+    order_id = db.Column(db.Integer, nullable=False)  # Assuming order_id is an integer
+    room_id = db.Column(db.String(36), db.ForeignKey("location_update_rooms.room_id"), nullable=False)
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
