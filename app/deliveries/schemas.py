@@ -10,6 +10,18 @@ class DeliveryLoginResponseSchema(Schema):
     partner = fields.Nested("PartnerSchema")
 
 
+class DeliveryRegisterRequestSchema(Schema):
+    phone_number = fields.String(required=True, validate=validate.Regexp(r"^\+?\d{10,15}$"))
+    name = fields.String(required=True)
+    vehicle_type = fields.String(validate=validate.OneOf(["BIKE", "CAR", "VAN", "TRUCK"]))
+    email = fields.String(required=True, validate=validate.Email())
+
+class DeliveryRegisterResponseSchema(Schema):
+    id = fields.String()
+    name = fields.String()
+    vehicleType = fields.String()
+    status = fields.String()
+
 class PartnerSchema(Schema):
     id = fields.String()
     name = fields.String()
@@ -71,7 +83,7 @@ class DeliveryActiveAssignmentsResponseSchema(Schema):
 class ActiveAssignmentSchema(Schema):
     assignmentId = fields.String()
     orderId = fields.String()
-    pickup = fields.Nested("LocationSchema")
+    pickup = fields.List(fields.Nested("LocationSchema"))
     dropoff = fields.Nested("LocationSchema")
     status = fields.String(validate=validate.OneOf(["EN_ROUTE_TO_PICKUP", "PICKED_UP", "DELIVERED"]))
     assignedAt = fields.DateTime()

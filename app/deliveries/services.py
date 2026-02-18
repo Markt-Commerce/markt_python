@@ -98,7 +98,44 @@ class DeliveryService:
         except Exception as e:
             logger.error(f"Error sending OTP: {str(e)}")
             return {"status": "error", "message": "Failed to send OTP"}
+        
+    @staticmethod
+    def register_delivery_partner(data: Dict) -> Dict:
+        """Register a new delivery partner"""
+        try:
+            #validate the input data
+            if not data.get("phone_number") or not data["phone_number"].isdigit() or len(data["phone_number"]) != 10:
+                logger.warning(f"Invalid phone number format: {data.get('phone_number')}")
+                raise ValidationError("Invalid phone number format")
+            
+            if not data.get("email") or "@" not in data["email"]:
+                logger.warning(f"Invalid email format: {data.get('email')}")
+                raise ValidationError("Invalid email format")
+            
+            if not data.get("name"):
+                logger.warning("Name is required for registration")
+                raise ValidationError("Name is required")
 
+            with session_scope() as session:
+                new_partner = DeliveryUser(
+                    phone_number=data["phone_number"],
+                    email=data.get("email"),
+                    name=data["name"],
+                    status=DeliveryStatus.INACTIVE,  # New partners start as INACTIVE until they complete onboarding
+                    vehicle_type=data.get("vehicle_type") if data.get("vehicle_type") in [DeliveryStatus.BIKE, DeliveryStatus.CAR, DeliveryStatus.VAN, DeliveryStatus.TRUCK] else "BiKE"
+                )
+                session.add(new_partner)
+                session.commit()
+
+                return {
+                    "id": new_partner.id,
+                    "name": new_partner.name,
+                    "status": new_partner.status,
+                    "vehicleType": new_partner.vehicle_type,
+                }
+        except Exception as e:
+            logger.error(f"Error registering delivery partner: {str(e)}")
+            raise ValidationError("Failed to register delivery partner")
 
 
     @staticmethod
@@ -176,7 +213,9 @@ class DeliveryService:
         return {"status": "success", "message": "Location updated"}
     
     #slightly complex functionality
-    #TODO: work on this tomorrow properly, getting all the required data
+    #we would need, after the MVP, to optimize this
+    #either by using postGIS to calculate the distance properly,
+    #or by pre-calculating the distance between the delivery partner and the sellers and caching that in Redis, and then just fetching the available orders based on the cached distances
     @staticmethod
     def get_available_orders(user_id: str, search_radius: int = 3000) -> Dict:
         """Get available orders for the delivery partner"""
@@ -217,6 +256,9 @@ class DeliveryService:
 
                 for order in orders:
 
+                    seller_pickups = []
+                    total_distance = 0
+
                     dropoff = order.shipping_address
 
                     if not dropoff or dropoff.latitude is None:
@@ -224,38 +266,46 @@ class DeliveryService:
 
                     # Assuming first seller for MVP
                     #TODO: We would need to handle multiple sellers for an order later on, we can calculate the pickup location for each seller and return that in the response, for now we are just using the first seller's location as the pickup point
-                    first_item = order.items[0]
-                    seller = first_item.seller
-                    seller_address = seller.user.address
+                    #order_tolerance_limit = 3 #meaning if some orders have ranges longer than the search radius, we can still include them
+                    
+                    for item in order.items:
+                        seller = item.seller
+                        seller_address = seller.user.address
 
-                    if not seller_address:
+                        if not seller_address:
+                            continue
+
+                        pickup_lat = seller_address.latitude
+                        pickup_lng = seller_address.longitude
+
+                        seller_pickups.append({
+                            "lat": pickup_lat,
+                            "lng": pickup_lng
+                        })
+
+                        distance = DeliveryService.haversine_distance(
+                            delivery_lat,
+                            delivery_lng,
+                            pickup_lat,
+                            pickup_lng
+                        )
+
+                        total_distance += distance
+                    
+                    average_distance = total_distance / len(order.items) if order.items else 0
+
+                    if average_distance > search_radius:
                         continue
-
-                    pickup_lat = seller_address.latitude
-                    pickup_lng = seller_address.longitude
 
                     drop_lat = dropoff.latitude
                     drop_lng = dropoff.longitude
-
-                    distance = DeliveryService.haversine_distance(
-                        delivery_lat,
-                        delivery_lng,
-                        pickup_lat,
-                        pickup_lng
-                    )
-
-                    if distance > search_radius:
-                        continue
 
                     #Will need to calculate the estimated earnings based on the delivery fee for the order, for now I am just using the shipping fee as the estimated earnings, but we would need to have a more complex calculation later on based on the distance and other factors
                     estimated_earnings = order.shipping_fee or 0
 
                     available_orders.append({
                         "order_id": order.id,
-                        "pickup": {
-                            "lat": pickup_lat,
-                            "lng": pickup_lng
-                        },
+                        "pickup": seller_pickups,
                         "dropoff": {
                             "lat": drop_lat,
                             "lng": drop_lng
@@ -345,7 +395,16 @@ class DeliveryService:
     @staticmethod
     def get_active_assignments(user_id: str) -> Dict:
         with session_scope() as session:
-            active_assignments = session.query(DeliveryOrderAssignment).filter_by(delivery_user_id=user_id, status="ACCEPTED").all()
+            active_assignments = (
+                session.query(DeliveryOrderAssignment)
+                .join(Order, DeliveryOrderAssignment.order_id == Order.id)
+                .join(OrderItem)
+                .join(Seller)
+                .join(User, Seller.user_id == User.id)
+                .join(UserAddress, User.id == UserAddress.user_id)
+                .filter_by(delivery_user_id=user_id, status="ACCEPTED")
+                .distinct()
+                .all())
             #TODO: We would need to include the location details of the pickup point and drop off points, we can get that from the Order model using the order_id in the assignment
             #NOTE: pickup and dropoff location details are not included in the current implementation of the Order model, we would need to add that in order to return the required data for the active assignments endpoint
             return {
@@ -355,19 +414,35 @@ class DeliveryService:
                         "orderId": assignment.order_id,
                         "assignedAt": assignment.assigned_at.isoformat(),
                         "status": assignment.status,
-                        "pickup": {
-                            "lat": assignment.pickup_location.lat,
-                            "lng": assignment.pickup_location.lng
-                        },
+                        "pickup": [{
+                            "lat": assignment_pickup.lat,
+                            "lng": assignment_pickup.lng
+                        } for assignment_pickup in DeliveryService.get_assignment_pickups_from_order_item(assignment.order)],
                         "dropoff": {
-                            "lat": assignment.dropoff_location.lat,
-                            "lng": assignment.dropoff_location.lng
+                            "lat": assignment.order.shipping_address.latitude,
+                            "lng": assignment.order.shipping_address.longitude
                         }
                     }
                     for assignment in active_assignments
                 ]
             }
         
+    @staticmethod
+    def get_assignment_pickups_from_order_item(order: Order) -> List[Dict[str, float]]:
+        pickups = []
+        for item in order.items:
+            seller = item.seller
+            seller_address = seller.user.address
+
+            if not seller_address:
+                continue
+
+            pickups.append({
+                "lat": seller_address.latitude,
+                "lng": seller_address.longitude
+            })
+        return pickups
+
     @staticmethod
     def update_assignment_status(user_id: str, assignment_id: str, new_status: str) -> Dict:
         with session_scope() as session:

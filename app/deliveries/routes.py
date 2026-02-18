@@ -14,6 +14,8 @@ from .schemas import (
     DeliveryOTPRequestSchema,
     DeliveryOTPResponseSchema,
     DeliveryDataResponseSchema,
+    DeliveryRegisterRequestSchema,
+    DeliveryRegisterResponseSchema,
     DeliveryStatusUpdateSchema,
     DeliveryLocationRequestSchema,
     DeliveryLocationResponseSchema,
@@ -46,6 +48,13 @@ class DeliveryLogin(MethodView):
         #TODO: Will need to implement session management and token generation for delivery partners.
         return DeliveryService.login_delivery_partner(data["phone_number"], data["otp"])
 
+@bp.route("/auth/register")
+class DeliveryRegister(MethodView):
+    @bp.arguments(DeliveryRegisterRequestSchema, location="json")
+    @bp.response(201, DeliveryRegisterResponseSchema)
+    def post(self, data):
+        """Register a new delivery partner"""
+        return DeliveryService.register_delivery_partner(data)
 
 @bp.route("/auth/otp")
 class DeliveryOTP(MethodView):
