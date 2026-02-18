@@ -78,10 +78,13 @@ class LocationUpdateRoom(BaseModel):
     delivery_user_id = db.Column(db.Integer, db.ForeignKey("delivery_users.id"))
     #several buyers and sellers can join this room as long as they are in the same order, we can have a mapping table between orders and rooms, this way we can easily find the room for a specific order and also find all the orders related to a specific room 
     #a delivery could take on diffferent orders at a time, so we need to have a mapping table between orders and rooms
+    assignments = db.relationship("DeliveryOrderAssignment", backref="location_update_room", cascade="all, delete-orphan")
     orders = db.relationship("OrderLocationMapping", backref="location_update_room", cascade="all, delete-orphan")
     created_at = db.Column(db.DateTime, server_default=db.func.now())
 
 
+# might be redundant
+# we might end up removing this table
 class OrderLocationMapping(BaseModel):
     __tablename__ = "order_location_mappings"
 

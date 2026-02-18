@@ -501,10 +501,16 @@ class DeliveryService:
         #user_id is for buyers or sellers
         """ Checks if the user passed is one of the buyers the delivery is assigned to """
         with session_scope() as session:
-            room = session.query(LocationUpdateRoom).filter_by(delivery_user_id=delivery_user_id).first()
-            if not room:
+            assignment = (
+                session.query(DeliveryOrderAssignment)
+                .join(Order, DeliveryOrderAssignment.order_id == Order.id)
+                .filter_by(delivery_user_id=delivery_user_id)
+                .filter(Order.buyer_id == user_id)
+                .first()
+            )
+            if not assignment:
                 return False
-            order_mapping = session.query(OrderLocationMapping).filter_by(room_id=room.room_id).first()
-            if not order_mapping:
-                return False
+            #order_mapping = session.query(OrderLocationMapping).filter_by(room_id=assignment.room_id).first()
+            """ if not order_mapping:
+                return False """
             return True

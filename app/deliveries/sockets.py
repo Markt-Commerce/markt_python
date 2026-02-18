@@ -20,15 +20,16 @@ class DeliveryLocationSharing(Namespace):
             room = data.get("room")
             user_id = data.get("user_id")
             if room and user_id:
-                #the only user able to join a room is a user 
-                #TODO: 
-                DeliveryService.find_delivery_order_buyer(user_id, room) #check if the user is part of the delivery order, this is for security purposes
-                join_room(room)
-                logger.info(f"User {user_id} joined room {room}")
+                #the only user able to join a room is a user associated with the delivery order
+                found_user = DeliveryService.find_delivery_order_buyer(user_id, room) #check if the user is part of the delivery order, this is for security purposes
+                if found_user:
+                    join_room(room)
+                    logger.info(f"User {user_id} joined room {room}")
+                else:
+                    emit("error", "User not authorized to join this room.")
         except Exception as e:
-            emit("error", "cannot join room. {e}")
-            logger.error("could not join room. Reason: {e}")
-        
+            emit("error", f"cannot join room. {e}")
+            logger.error(f"could not join room. Reason: {e}")
 
     def on_leave(self, data):
         """Leave a delivery location sharing room"""
@@ -39,8 +40,8 @@ class DeliveryLocationSharing(Namespace):
                 leave_room(room)
                 logger.info(f"User {user_id} left room {room}")
         except Exception as e:
-            emit("error", "cannot leave room. {e}")
-            logger.error("could not leave room. Reason: {e}")
+            emit("error", f"cannot leave room. {e}")
+            logger.error(f"could not leave room. Reason: {e}")
         
 
     def on_location_update(self, data):
@@ -50,8 +51,8 @@ class DeliveryLocationSharing(Namespace):
             user_id = data.get("user_id")
             location = data.get("location")
             # validate data
-            if room and user_id and self.validate_location_data():
+            if room and user_id and self.validate_location_data(location):
                 logger.info(f"User {user_id} updated location in room {room}: {location}")
-                emit("location_update", {"user_id": user_id, "location": location}, room=room)
+                emit("LOCATION_UPDATE", {"user_id": user_id, "location": location}, room=room)
         except Exception as e:
-            logger.error("cannot send location update. Reason {e}")
+            logger.error(f"cannot send location update. Reason {e}")
