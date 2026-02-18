@@ -4,9 +4,14 @@ from random import random
 from typing import Optional, Dict, Any, List
 from enum import Enum
 import uuid
+import math
 
 # package imports
+from app.users.models import User, UserAd, UserAddress, UserAddressdress
+from app.users.models import Seller
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import func
+from sqlalchemy.orm import joinedload
 
 # project imports
 from external.redis import redis_client
@@ -19,7 +24,7 @@ from app.libs.email_service import email_service
 from .models import DeliveryUser, DeliveryLastLocation, DeliveryOrderAssignment, DeliveryStatus, AssignmentStatus, LocationUpdateRoom, OrderLocationMapping
 from .schemas import DeliveryStatus
 
-from app.orders.models import Order, OrderStatus
+from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
 from app.orders.schemas import OrderSchema
 from app.orders.services import OrderService
 
@@ -173,46 +178,119 @@ class DeliveryService:
     #slightly complex functionality
     #TODO: work on this tomorrow properly, getting all the required data
     @staticmethod
-    def get_available_orders(user_id: str) -> Dict:
+    def get_available_orders(user_id: str, search_radius: int = 3000) -> Dict:
         """Get available orders for the delivery partner"""
-
-        # constant search radius.
-        search_radius = 3000
         try:
             with session_scope() as session:
-                delivery_user = session.query(DeliveryUser).filter_by(user_id=user_id).first()
-                if not delivery_user:
-                    logger.warning(f"No delivery partner found for user ID {user_id}")
-                    raise NotFoundError("Delivery partner not found")
 
+                delivery_user = (
+                    session.query(DeliveryUser)
+                    .filter(DeliveryUser.id == user_id)
+                    .first()
+                )
 
-                """ SELECT longtitude, latitude FROM """
+                if not delivery_user or not delivery_user.last_location:
+                    raise NotFoundError("Delivery partner location not found")
 
-                # Fetch available orders for the delivery user
-                available_orders = session.query(Order).filter_by(delivery_user_id=delivery_user.id, status=OrderStatus.AVAILABLE).all()
+                delivery_lat = delivery_user.last_location.latitude
+                delivery_lng = delivery_user.last_location.longitude
+
+                orders = (
+                    session.query(Order)
+                    .join(ShippingAddress)
+                    .join(OrderItem)
+                    .join(Seller)
+                    .join(User, Seller.user_id == User.id)
+                    .join(UserAddress, User.id == UserAddress.user_id)
+                    .filter(Order.status == OrderStatus.PROCESSING)
+                    .options(
+                        joinedload(Order.shipping_address),
+                        joinedload(Order.items).joinedload(OrderItem.seller)
+                    )
+                    .distinct()
+                    .all()
+                )
+                #Note: This is just a simplified way to find the orders within a radius, we would shift to using PostGIS for production later
+                #We would need to paginate this result 
+
+                available_orders = []
+
+                for order in orders:
+
+                    dropoff = order.shipping_address
+
+                    if not dropoff or dropoff.latitude is None:
+                        continue
+
+                    # Assuming first seller for MVP
+                    #TODO: We would need to handle multiple sellers for an order later on, we can calculate the pickup location for each seller and return that in the response, for now we are just using the first seller's location as the pickup point
+                    first_item = order.items[0]
+                    seller = first_item.seller
+                    seller_address = seller.user.address
+
+                    if not seller_address:
+                        continue
+
+                    pickup_lat = seller_address.latitude
+                    pickup_lng = seller_address.longitude
+
+                    drop_lat = dropoff.latitude
+                    drop_lng = dropoff.longitude
+
+                    distance = DeliveryService.haversine_distance(
+                        delivery_lat,
+                        delivery_lng,
+                        pickup_lat,
+                        pickup_lng
+                    )
+
+                    if distance > search_radius:
+                        continue
+
+                    #Will need to calculate the estimated earnings based on the delivery fee for the order, for now I am just using the shipping fee as the estimated earnings, but we would need to have a more complex calculation later on based on the distance and other factors
+                    estimated_earnings = order.shipping_fee or 0
+
+                    available_orders.append({
+                        "order_id": order.id,
+                        "pickup": {
+                            "lat": pickup_lat,
+                            "lng": pickup_lng
+                        },
+                        "dropoff": {
+                            "lat": drop_lat,
+                            "lng": drop_lng
+                        },
+                        "distance_meters": round(distance, 2),
+                        "estimated_earnings": estimated_earnings
+                    })
 
                 return {
-                    "range_meters": 3000,
-                    "orders": [
-                        {
-                            "order_id": order.id,
-                            "pickup": {
-                                "lat": order.pickup_location.lat,
-                                "lng": order.pickup_location.lng
-                            },
-                            "dropoff": {
-                                "lat": order.dropoff_location.lat,
-                                "lng": order.dropoff_location.lng
-                            },
-                            "distance_meters": order.distance_meters,
-                            "estimated_earnings": order.estimated_earnings
-                        }
-                        for order in available_orders
-                    ]
+                    "range_meters": search_radius,
+                    "orders": available_orders
                 }
         except Exception as e:
             logger.error(f"Error fetching available orders: {str(e)}")
             raise NotFoundError("Failed to fetch available orders")
+        
+    @staticmethod
+    def haversine_distance(lat1, lng1, lat2, lng2):
+        R = 6371000  # Earth radius in meters
+
+        phi1 = math.radians(lat1)
+        phi2 = math.radians(lat2)
+        delta_phi = math.radians(lat2 - lat1)
+        delta_lambda = math.radians(lng2 - lng1)
+
+        a = (
+            math.sin(delta_phi / 2) ** 2
+            + math.cos(phi1)
+            * math.cos(phi2)
+            * math.sin(delta_lambda / 2) ** 2
+        )
+
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return R * c
+
 
     @staticmethod
     def accept_order(user_id: str, order_id: str) -> Dict:
