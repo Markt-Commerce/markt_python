@@ -95,6 +95,41 @@ class EmailService:
             html_content=html_content,
             text_content=text_content,
         )
+    
+    def send_otp_email(self, email: str, otp_code: str) -> bool:
+        """Send OTP code for delivery partner login"""
+        subject = "Your OTP Code for Markt Delivery Login"
+
+        html_content = f"""
+        <p>Hi,</p>
+        <p>Your OTP code for logging into the Markt Delivery Partner app is:</p>
+        <h2>{otp_code}</h2>
+        <p>This code is valid for 10 minutes.</p>
+        <p>If you didn't request this, please ignore this email.</p>
+        <p>Best regards,<br>The Markt Team</p>
+        """
+
+        text_content = f"""
+        Hi,
+
+        Your OTP code for logging into the Markt Delivery Partner app is:
+
+        {otp_code}
+
+        This code is valid for 10 minutes.
+
+        If you didn't request this, please ignore this email.
+
+        Best regards,
+        The Markt Team
+        """
+
+        return self.send_email(
+            to_email=email,
+            subject=subject,
+            html_content=html_content,
+            text_content=text_content,
+        )
 
     def send_password_reset_email(
         self, email: str, reset_code: str, username: str
