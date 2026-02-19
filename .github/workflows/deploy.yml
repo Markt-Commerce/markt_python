@@ -1,0 +1,42 @@
+name: Deploy to Markt Server
+
+on:
+  push:
+    branches:
+      - develop
+
+jobs:
+  deploy:
+    name: Deploy over SSH
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/markt.pem
+          chmod 600 ~/.ssh/markt.pem
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy Application
+        run: |
+          ssh -i ~/.ssh/markt.pem ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
+          
+          sudo -i -u ubuntu bash <<'INNER_EOF'
+          cd /home/ubuntu/markt/apps/markt_python/
+          source .venv/bin/activate
+          git pull origin develop
+          
+          # Uncomment this if migrations are needed
+          export FLASK_APP=main.setup:create_flask_app
+          flask db upgrade
+          
+          INNER_EOF
+
+          sudo systemctl daemon-reload
+          sudo systemctl restart markt markt-celery
+          
+          EOF
