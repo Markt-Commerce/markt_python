@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any, List
 from enum import Enum
 
 # flask imports
-from flask_login import current_user
+from flask_login import current_user, login_user
 
 # package imports
 from app.users.models import User, Seller, UserAddress
@@ -62,7 +62,8 @@ class DeliveryService:
                     logger.warning(f"No delivery partner found with phone number {phone_number}")
                     raise NotFoundError("Delivery partner not found")
                 
-
+                # attempt to login the user here 
+                login_user(delivery_user)
                 return {
                     "partner": {
                         "id": delivery_user.id,

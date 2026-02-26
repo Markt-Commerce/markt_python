@@ -1,7 +1,10 @@
 from enum import Enum
 from external.database import db
+from flask_login import UserMixin
 from sqlalchemy.dialects.postgresql import JSONB
 from app.libs.models import BaseModel
+
+from app.libs.helpers import UniqueIdMixin
 
 class DeliveryStatus(Enum):
     ACTIVE = "ACTIVE"
@@ -26,19 +29,27 @@ class LogisticalStatus(Enum):
     EN_ROUTE_TO_DROPOFF = "EN_ROUTE_TO_DROPOFF"
     DELIVERED_PENDING_QR = "DELIVERED_PENDING_QR"
 
-class DeliveryUser(BaseModel):
+class DeliveryUser(BaseModel, UserMixin, UniqueIdMixin):
     __tablename__ = "delivery_users"
+    id_prefix = "DEL_"
 
-    id = db.Column(db.Integer, primary_key=True)
-    phone_number = db.Column(db.String(15), nullable=False)
-    email = db.Column(db.String(100), nullable=True) #we might have to use email for otp as having a phone number message service might be expensive for an MVP
+    id = db.Column(db.String(12), primary_key=True)
+    phone_number = db.Column(db.String(15), nullable=False, unique=True)
+    email = db.Column(db.String(100), nullable=True, unique=True) #we might have to use email for otp as having a phone number message service might be expensive for an MVP
     name = db.Column(db.String(100), nullable=False)
     status = db.Column(db.Enum(DeliveryStatus), nullable=False)
     vehicle_type = db.Column(db.Enum(DeliveryVehicleType), nullable=True)
     created_at = db.Column(db.DateTime, server_default=db.func.now())
     rating = db.Column(db.Float, nullable=True)
 
-    last_location = db.relationship("DeliveryLastLocation", back_populates="delivery_user")
+    last_location = db.relationship("DeliveryLastLocation", back_populates="delivery_user", cascade="all, delete-orphan")
+
+    def __repr__(self):
+        return f"<DeliveryUser {self.id}>"
+
+    @property
+    def is_active(self):
+        return self.status == DeliveryStatus.ACTIVE
 
 
 class DeliveryLastLocation(BaseModel):
