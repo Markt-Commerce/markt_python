@@ -25,6 +25,12 @@ class Config:
         self.SECRET_KEY = config("SECRET_KEY", default="dev-secret-key")
         self.SESSION_COOKIE_NAME = "markt_session"
 
+        # Session/Cookie settings
+        self.SESSION_COOKIE_SAMESITE = config("SESSION_COOKIE_SAMESITE", default="Lax")
+        self.SESSION_COOKIE_SECURE = config(
+            "SESSION_COOKIE_SECURE", default=False, cast=bool
+        )
+
         # App
         self.BIND = config("BIND", default="127.0.0.1:8000")
         self.DEBUG = config("DEBUG", default=True, cast=bool)
@@ -57,6 +63,23 @@ class Config:
         self.PAYSTACK_PUBLIC_KEY = config("PAYSTACK_PUBLIC_KEY", default="")
         self.PAYMENT_CURRENCY = config("PAYMENT_CURRENCY", default="NGN")
         self.PAYMENT_GATEWAY = config("PAYMENT_GATEWAY", default="paystack")
+
+        # API Base URL for callbacks and redirects
+        # For production: https://api.yourdomain.com
+        # For development: http://localhost:8000
+        # For staging: https://staging-api.yourdomain.com
+        self.API_BASE_URL = config(
+            "API_BASE_URL",
+            default="http://localhost:8000" if self.ENV == "development" else "",
+        )
+
+        # Frontend Base URL for payment redirects
+        # For production: https://yourdomain.com or https://app.yourdomain.com
+        # For development: http://localhost:3000
+        self.FRONTEND_BASE_URL = config(
+            "FRONTEND_BASE_URL",
+            default="http://localhost:3000" if self.ENV == "development" else "",
+        )
 
         # AWS Configuration
         self.AWS_ACCESS_KEY = config("AWS_ACCESS_KEY", default="")

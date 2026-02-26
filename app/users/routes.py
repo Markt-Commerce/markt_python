@@ -8,10 +8,11 @@ from flask_login import login_user, logout_user, login_required, current_user
 from sqlalchemy import or_
 
 # project imports
-from app.libs.errors import AuthError, NotFoundError
+from app.libs.errors import AuthError, NotFoundError, UnverifiedEmailError
 from app.libs.pagination import Paginator
 from app.libs.schemas import PaginationQueryArgs
 from app.media.schemas import MediaSchema
+from app.libs.decorators import login_required, seller_required
 
 # app imports
 from .schemas import (
@@ -36,8 +37,19 @@ from .schemas import (
     SettingsSchema,
     SettingsUpdateSchema,
     RoleSwitchSchema,
+    StartCardsResponseSchema,
+    AnalyticsOverviewSchema,
+    AnalyticsTimeseriesResponseSchema,
+    AnalyticsTimeseriesQuerySchema,
+    AnalyticsOverviewQuerySchema,
 )
-from .services import AuthService, UserService, AccountService
+from .services import (
+    AuthService,
+    UserService,
+    AccountService,
+    SellerStartCardsService,
+    SellerAnalyticsService,
+)
 from .models import User
 
 logger = logging.getLogger(__name__)
@@ -76,6 +88,9 @@ class UserLogin(MethodView):
             )
             login_user(user)
             return user
+        except UnverifiedEmailError as e:
+            # Return structured payload that frontend can detect easily
+            abort(e.status_code, **e.to_dict())
         except AuthError as e:
             abort(e.status_code, message=e.message)
 
@@ -404,6 +419,67 @@ class ShopDetail(MethodView):
             abort(404, message=str(e))
         except Exception as e:
             abort(500, message=str(e))
+
+
+# -----------------------------------------------
+
+
+# Seller Dashboard Endpoints
+@bp.route("/sellers/start-cards")
+class SellerStartCards(MethodView):
+    @login_required
+    @seller_required
+    @bp.response(200, StartCardsResponseSchema)
+    def get(self):
+        """Get seller onboarding/start cards with completion status"""
+        try:
+            seller_id = current_user.seller_account.id
+            return SellerStartCardsService.get_seller_start_cards(seller_id)
+        except Exception as e:
+            logger.error(f"Failed to get seller start cards: {str(e)}")
+            abort(500, message="Failed to get seller start cards")
+
+
+@bp.route("/sellers/analytics/overview")
+class SellerAnalyticsOverview(MethodView):
+    @login_required
+    @seller_required
+    @bp.arguments(AnalyticsOverviewQuerySchema, location="query")
+    @bp.response(200, AnalyticsOverviewSchema)
+    def get(self, args):
+        """Get seller analytics overview for dashboard header"""
+        try:
+            seller_id = current_user.seller_account.id
+            window_days = args.get("window_days", 30)
+            return SellerAnalyticsService.get_seller_analytics_overview(
+                seller_id, window_days
+            )
+        except Exception as e:
+            logger.error(f"Failed to get seller analytics overview: {str(e)}")
+            abort(500, message="Failed to get seller analytics overview")
+
+
+@bp.route("/sellers/analytics/timeseries")
+class SellerAnalyticsTimeseries(MethodView):
+    @login_required
+    @seller_required
+    @bp.arguments(AnalyticsTimeseriesQuerySchema, location="query")
+    @bp.response(200, AnalyticsTimeseriesResponseSchema)
+    def get(self, args):
+        """Get time-bucketed seller analytics data for graphs"""
+        try:
+            seller_id = current_user.seller_account.id
+            metric = args["metric"]
+            bucket = args["bucket"]
+            start_date = args["start_date"]
+            end_date = args["end_date"]
+
+            return SellerAnalyticsService.get_seller_analytics_timeseries(
+                seller_id, metric, bucket, start_date, end_date
+            )
+        except Exception as e:
+            logger.error(f"Failed to get seller analytics timeseries: {str(e)}")
+            abort(500, message="Failed to get seller analytics timeseries")
 
 
 # -----------------------------------------------

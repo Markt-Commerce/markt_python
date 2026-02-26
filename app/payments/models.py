@@ -32,6 +32,9 @@ class Payment(BaseModel, UniqueIdMixin):
     transaction_id = db.Column(db.String(100))
     gateway_response = db.Column(db.JSON)
     paid_at = db.Column(db.DateTime)
+    idempotency_key = db.Column(
+        db.String(100), unique=True, nullable=True
+    )  # Prevent duplicate payments
 
     order = db.relationship("Order", back_populates="payments")
 
