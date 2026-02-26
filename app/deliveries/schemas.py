@@ -1,6 +1,5 @@
 from marshmallow import Schema, fields, validate
 from app.libs.schemas import PaginationSchema
-from .models import DeliveryStatus
 
 class DeliveryLoginRequestSchema(Schema):
     phone_number = fields.String(required=True, validate=validate.Regexp(r"^\+?\d{10,15}$"))
@@ -25,7 +24,7 @@ class DeliveryRegisterResponseSchema(Schema):
 class PartnerSchema(Schema):
     id = fields.String()
     name = fields.String()
-    status = fields.String(validate=validate.OneOf([DeliveryStatus.ACTIVE, DeliveryStatus.INACTIVE, DeliveryStatus.SUSPENDED]))
+    status = fields.String(validate=validate.OneOf(["ACTIVE", "INACTIVE", "SUSPENDED"]))
 
 class DeliveryOTPRequestSchema(Schema):
     phone_number = fields.String(required=True, validate=validate.Regexp(r"^\+?\d{10,15}$"))
@@ -37,12 +36,12 @@ class DeliveryOTPResponseSchema(Schema):
 class DeliveryDataResponseSchema(Schema):
     id = fields.String()
     name = fields.String()
-    status = fields.String(validate=validate.OneOf([DeliveryStatus.ACTIVE, DeliveryStatus.INACTIVE, DeliveryStatus.SUSPENDED]))
+    status = fields.String(validate=validate.OneOf(["ACTIVE", "INACTIVE", "SUSPENDED"]))
     vehicle_type = fields.String()
     rating = fields.Float()
 
 class DeliveryStatusUpdateSchema(Schema):
-    status = fields.String(validate=validate.OneOf([DeliveryStatus.ACTIVE, DeliveryStatus.INACTIVE, DeliveryStatus.SUSPENDED]))
+    status = fields.String(validate=validate.OneOf(["ACTIVE", "INACTIVE", "SUSPENDED"]))
 
 class DeliveryLocationRequestSchema(Schema):
     lat = fields.Float(required=True)

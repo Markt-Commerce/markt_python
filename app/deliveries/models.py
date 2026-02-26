@@ -3,24 +3,24 @@ from external.database import db
 from sqlalchemy.dialects.postgresql import JSONB
 from app.libs.models import BaseModel
 
-class DeliveryStatus:
+class DeliveryStatus(Enum):
     ACTIVE = "ACTIVE"
     INACTIVE = "INACTIVE"
     SUSPENDED = "SUSPENDED"
 
 
-class DeliveryVehicleType:
+class DeliveryVehicleType(Enum):
     BIKE = "BIKE"
     CAR = "CAR"
     VAN = "VAN"
     TRUCK = "TRUCK"
 
-class AssignmentStatus:
+class AssignmentStatus(Enum):
     ASSIGNED = "ASSIGNED"
     ACCEPTED = "ACCEPTED"
     REJECTED = "REJECTED"
 
-class LogisticalStatus:
+class LogisticalStatus(Enum):
     ARRIVED_PICKUP = "ARRIVED_PICKUP"
     PICKED_UP = "PICKED_UP"
     EN_ROUTE_TO_DROPOFF = "EN_ROUTE_TO_DROPOFF"
@@ -61,26 +61,29 @@ class DeliveryOrderAssignment(BaseModel):
     assignment_id = db.Column(db.String(36), unique=True, nullable=False)  # UUID for idempotency
     delivery_user_id = db.Column(db.Integer, db.ForeignKey("delivery_users.id"), nullable=False)
     order_id = db.Column(db.Integer, nullable=False)  # Assuming order_id is an integer
+    room_id = db.Column(db.String(36), db.ForeignKey("location_update_rooms.room_id"), nullable=True)  # Link to location room
     assigned_at = db.Column(db.DateTime, server_default=db.func.now())
-    status = db.Column(db.String(20), nullable=False)  # e.g., ASSIGNED, ACCEPTED, REJECTED
-    logistical_status = db.Column(db.String(20), nullable=True)  # e.g., ARRIVED_PICKUP, PICKED_UP, EN_ROUTE_TO_DROPOFF, DELIVERED_PENDING_QR
+    status = db.Column(db.Enum(AssignmentStatus), nullable=False)  # ASSIGNED, ACCEPTED, REJECTED
+    logistical_status = db.Column(db.Enum(LogisticalStatus), nullable=True)  # ARRIVED_PICKUP, PICKED_UP, EN_ROUTE_TO_DROPOFF, DELIVERED_PENDING_QR
     escrow_qr_code = db.Column(db.String(255), nullable=False)  # QR code for escrow release, if applicable
 
     delivery_user = db.relationship("DeliveryUser", backref="order_assignments")
+    location_room = db.relationship("LocationUpdateRoom", back_populates="assignments")
 
 # there is the possibility that this would not be stored permanently
-# this would be because at the end of the 
+# this would be because at the end of the delivery, the room can be cleaned up
 class LocationUpdateRoom(BaseModel):
     __tablename__ = "location_update_rooms"
 
     id = db.Column(db.Integer, primary_key=True)
     room_id = db.Column(db.String(36), unique=True, nullable=False)  # UUID for room identification
-    delivery_user_id = db.Column(db.Integer, db.ForeignKey("delivery_users.id"))
-    #several buyers and sellers can join this room as long as they are in the same order, we can have a mapping table between orders and rooms, this way we can easily find the room for a specific order and also find all the orders related to a specific room 
-    #a delivery could take on diffferent orders at a time, so we need to have a mapping table between orders and rooms
-    assignments = db.relationship("DeliveryOrderAssignment", backref="location_update_room", cascade="all, delete-orphan")
-    orders = db.relationship("OrderLocationMapping", backref="location_update_room", cascade="all, delete-orphan")
+    delivery_user_id = db.Column(db.Integer, db.ForeignKey("delivery_users.id"), nullable=True)
     created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+    # Relationships
+    delivery_user = db.relationship("DeliveryUser", backref="location_rooms")
+    assignments = db.relationship("DeliveryOrderAssignment", back_populates="location_room", cascade="all, delete-orphan")
+    orders = db.relationship("OrderLocationMapping", back_populates="location_room", cascade="all, delete-orphan")
 
 
 # might be redundant
@@ -92,3 +95,6 @@ class OrderLocationMapping(BaseModel):
     order_id = db.Column(db.Integer, nullable=False)  # Assuming order_id is an integer
     room_id = db.Column(db.String(36), db.ForeignKey("location_update_rooms.room_id"), nullable=False)
     created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+    # Relationship
+    location_room = db.relationship("LocationUpdateRoom", back_populates="orders")

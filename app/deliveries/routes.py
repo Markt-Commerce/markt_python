@@ -40,7 +40,6 @@ bp = Blueprint(
 
 @bp.route("/auth/login")
 class DeliveryLogin(MethodView):
-    @login_required
     @bp.arguments(DeliveryLoginRequestSchema, location="json")
     @bp.response(200, DeliveryLoginResponseSchema)
     def post(self, data):

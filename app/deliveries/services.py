@@ -1,14 +1,16 @@
 # python imports
 import logging
-from random import random
-from typing import Optional, Dict, Any, List
-from enum import Enum
 import uuid
 import math
+from random import randint
+from typing import Optional, Dict, Any, List
+from enum import Enum
+
+# flask imports
+from flask_login import current_user
 
 # package imports
-from app.users.models import User, UserAd, UserAddress, UserAddressdress
-from app.users.models import Seller
+from app.users.models import User, Seller, UserAddress
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import func
 from sqlalchemy.orm import joinedload
@@ -21,11 +23,12 @@ from app.libs.errors import NotFoundError, ValidationError
 from app.libs.email_service import email_service
 
 # app imports
-from .models import DeliveryUser, DeliveryLastLocation, DeliveryOrderAssignment, DeliveryStatus, AssignmentStatus, LocationUpdateRoom, OrderLocationMapping
-from .schemas import DeliveryStatus
-
+from .models import (
+    DeliveryUser, DeliveryLastLocation, DeliveryOrderAssignment, 
+    DeliveryStatus, DeliveryVehicleType, AssignmentStatus, LogisticalStatus,
+    LocationUpdateRoom, OrderLocationMapping
+)
 from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
-from app.orders.schemas import OrderSchema
 from app.orders.services import OrderService
 
 logger = logging.getLogger(__name__)
@@ -41,7 +44,7 @@ class DeliveryService:
         """Authenticate delivery partner and return partner details"""
 
         """ Validate that the phone number exists, and it is in the correct format. """
-        if not phone_number or not phone_number.isdigit() or len(phone_number) != 10:
+        if not phone_number or not phone_number.isdigit() or len(phone_number) <= 10:
             logger.warning(f"Invalid phone number format: {phone_number}")
             raise NotFoundError("Invalid phone number format")
         try:
@@ -58,12 +61,13 @@ class DeliveryService:
                 if not delivery_user:
                     logger.warning(f"No delivery partner found with phone number {phone_number}")
                     raise NotFoundError("Delivery partner not found")
+                
 
                 return {
                     "partner": {
                         "id": delivery_user.id,
                         "name": delivery_user.name,
-                        "status": delivery_user.status,
+                        "status": delivery_user.status.value,
                     }
                 }
         except Exception as e:
@@ -75,36 +79,36 @@ class DeliveryService:
         """Generate and send OTP to delivery partner's email (phone number would be used later when we integrate SMS service)"""
         try:
             # Generate a random 6-digit OTP
-            otp = f"{random.randint(100000, 999999)}"
+            otp = f"{randint(100000, 999999)}"
 
             #attempt to get delivery partner's email from database using phone number
             with session_scope() as session:
                 delivery_user = session.query(DeliveryUser).filter_by(phone_number=phone_number).first()
                 if not delivery_user:
                     logger.warning(f"No delivery partner found with phone number {phone_number}")
-                    return False
+                    raise NotFoundError("Delivery partner not found")
 
                 email = delivery_user.email
                 if not email:
                     logger.warning(f"No email found for delivery partner with phone number {phone_number}")
-                    return False
+                    raise NotFoundError("Email not found")
             cache_key = f"{DeliveryService.CACHE_KEY_PREFIX}{phone_number}"
             redis_client.setex(cache_key, DeliveryService.CACHE_EXPIRE_SECONDS, otp)
 
-            # Send OTP via email (mocked)
+            #future versions would be made to send through phone number using an SMS service
             logger.info(f"Sending OTP {otp} to {email}")
             email_service.send_otp_email(email, otp)
             return {"status": "success", "message": f"OTP sent to {email}"}
         except Exception as e:
             logger.error(f"Error sending OTP: {str(e)}")
-            return {"status": "error", "message": "Failed to send OTP"}
+            return {"status": "error", "message": "Failed to send OTP", "error": str(e)}
         
     @staticmethod
     def register_delivery_partner(data: Dict) -> Dict:
         """Register a new delivery partner"""
         try:
             #validate the input data
-            if not data.get("phone_number") or not data["phone_number"].isdigit() or len(data["phone_number"]) != 10:
+            if not data.get("phone_number") or not data["phone_number"].isdigit() or len(data["phone_number"]) <= 10:
                 logger.warning(f"Invalid phone number format: {data.get('phone_number')}")
                 raise ValidationError("Invalid phone number format")
             
@@ -122,7 +126,7 @@ class DeliveryService:
                     email=data.get("email"),
                     name=data["name"],
                     status=DeliveryStatus.INACTIVE,  # New partners start as INACTIVE until they complete onboarding
-                    vehicle_type=data.get("vehicle_type") if data.get("vehicle_type") in [DeliveryStatus.BIKE, DeliveryStatus.CAR, DeliveryStatus.VAN, DeliveryStatus.TRUCK] else "BiKE"
+                    vehicle_type=DeliveryVehicleType[data.get("vehicle_type").upper()] if data.get("vehicle_type") and data.get("vehicle_type").upper() in [e.name for e in DeliveryVehicleType] else DeliveryVehicleType.BIKE
                 )
                 session.add(new_partner)
                 session.commit()
@@ -130,12 +134,20 @@ class DeliveryService:
                 return {
                     "id": new_partner.id,
                     "name": new_partner.name,
-                    "status": new_partner.status,
-                    "vehicleType": new_partner.vehicle_type,
+                    "status": new_partner.status.value,
+                    "vehicleType": new_partner.vehicle_type.value if new_partner.vehicle_type else None,
                 }
         except Exception as e:
             logger.error(f"Error registering delivery partner: {str(e)}")
-            raise ValidationError("Failed to register delivery partner")
+            # we need to check that the error is not due to duplicate phone number or email
+            if "duplicate key value violates unique constraint" in str(e):
+                if "phone_number" in str(e):
+                    logger.warning(f"Phone number {data.get('phone_number')} already exists")
+                    raise ValidationError("Phone number already registered")
+                elif "email" in str(e):
+                    logger.warning(f"Email {data.get('email')} already exists")
+                    raise ValidationError("Email already registered")
+            raise ValidationError(f"Failed to register delivery partner")
 
 
     @staticmethod
@@ -152,8 +164,8 @@ class DeliveryService:
                     
                     "id": delivery_user.id,
                     "name": delivery_user.name,
-                    "status": delivery_user.status,
-                    "vehicleType": delivery_user.vehicle_type,
+                    "status": delivery_user.status.value,
+                    "vehicleType": delivery_user.vehicle_type.value if delivery_user.vehicle_type else None,
                     "rating": delivery_user.rating,
                 }
         except Exception as e:
@@ -178,7 +190,7 @@ class DeliveryService:
                 session.add(delivery_user)
                 session.commit()
 
-                return {"status": delivery_user.status}
+                return {"status": delivery_user.status.value}
         except Exception as e:
             logger.error(f"Error updating delivery partner status: {str(e)}")
             raise NotFoundError("Failed to update status")
@@ -236,9 +248,9 @@ class DeliveryService:
 
                 orders = (
                     session.query(Order)
-                    .join(ShippingAddress)
-                    .join(OrderItem)
-                    .join(Seller)
+                    .join(ShippingAddress, Order.id == ShippingAddress.order_id)
+                    .join(OrderItem, Order.id == OrderItem.order_id)
+                    .join(Seller, OrderItem.seller_id == Seller.id)
                     .join(User, Seller.user_id == User.id)
                     .join(UserAddress, User.id == UserAddress.user_id)
                     .filter(Order.status == OrderStatus.PROCESSING)
@@ -346,11 +358,11 @@ class DeliveryService:
     def accept_order(user_id: str, order_id: str) -> Dict:
         with session_scope() as session:
             assignments = session.query(DeliveryOrderAssignment).filter_by(order_id=order_id).all()
-            if any(a.status == "ACCEPTED" for a in assignments):
+            if any(a.status == AssignmentStatus.ACCEPTED for a in assignments):
                 logger.warning(f"Order {order_id} has already been accepted by another delivery partner")
                 raise NotFoundError("Order already accepted")
 
-            if any(a.delivery_user_id == user_id and a.status == "REJECTED" for a in assignments):
+            if any(a.delivery_user_id == user_id and a.status == AssignmentStatus.REJECTED for a in assignments):
                 logger.warning(f"Delivery partner {user_id} has already rejected order {order_id}")
                 raise NotFoundError("You have already rejected this order")
 
@@ -358,24 +370,24 @@ class DeliveryService:
             new_assignment = DeliveryOrderAssignment(
                 delivery_user_id=user_id,
                 order_id=order_id,
-                status="ACCEPTED",
+                status=AssignmentStatus.ACCEPTED,
                 assignment_id=str(uuid.uuid4()),
                 escrow_qr_code=str(uuid.uuid4())
             )
             session.add(new_assignment)
             session.commit()
 
-            return {"status": AssignmentStatus.ASSIGNED, "assignmentId": new_assignment.assignment_id}
+            return {"status": AssignmentStatus.ASSIGNED.value, "assignmentId": new_assignment.assignment_id}
         
     @staticmethod
     def reject_order(user_id: str, order_id: str) -> Dict:
         with session_scope() as session:
             assignments = session.query(DeliveryOrderAssignment).filter_by(order_id=order_id).all()
-            if any(a.status == "ACCEPTED" for a in assignments):
+            if any(a.status == AssignmentStatus.ACCEPTED for a in assignments):
                 logger.warning(f"Order {order_id} has already been accepted by another delivery partner")
                 raise NotFoundError("Order already accepted")
 
-            if any(a.delivery_user_id == user_id and a.status == "REJECTED" for a in assignments):
+            if any(a.delivery_user_id == user_id and a.status == AssignmentStatus.REJECTED for a in assignments):
                 logger.warning(f"Delivery partner {user_id} has already rejected order {order_id}")
                 raise NotFoundError("You have already rejected this order")
 
@@ -383,13 +395,13 @@ class DeliveryService:
             new_assignment = DeliveryOrderAssignment(
                 delivery_user_id=user_id,
                 order_id=order_id,
-                status="REJECTED",
+                status=AssignmentStatus.REJECTED,
                 assignment_id=str(uuid.uuid4())
             )
             session.add(new_assignment)
             session.commit()
 
-            return {"status": AssignmentStatus.ASSIGNED, "assignmentId": new_assignment.assignment_id}
+            return {"status": AssignmentStatus.ASSIGNED.value, "assignmentId": new_assignment.assignment_id}
     
     #TODO: We would need to include the location details of the pickup point and drop off points
     @staticmethod
@@ -397,13 +409,7 @@ class DeliveryService:
         with session_scope() as session:
             active_assignments = (
                 session.query(DeliveryOrderAssignment)
-                .join(Order, DeliveryOrderAssignment.order_id == Order.id)
-                .join(OrderItem)
-                .join(Seller)
-                .join(User, Seller.user_id == User.id)
-                .join(UserAddress, User.id == UserAddress.user_id)
-                .filter_by(delivery_user_id=user_id, status="ACCEPTED")
-                .distinct()
+                .filter_by(delivery_user_id=user_id, status=AssignmentStatus.ACCEPTED)
                 .all())
             #TODO: We would need to include the location details of the pickup point and drop off points, we can get that from the Order model using the order_id in the assignment
             #NOTE: pickup and dropoff location details are not included in the current implementation of the Order model, we would need to add that in order to return the required data for the active assignments endpoint
@@ -413,7 +419,7 @@ class DeliveryService:
                         "assignmentId": assignment.assignment_id,
                         "orderId": assignment.order_id,
                         "assignedAt": assignment.assigned_at.isoformat(),
-                        "status": assignment.status,
+                        "status": assignment.status.value,
                         "pickup": [{
                             "lat": assignment_pickup.lat,
                             "lng": assignment_pickup.lng
@@ -451,20 +457,27 @@ class DeliveryService:
                 logger.warning(f"No active assignment found with ID {assignment_id} for user {user_id}")
                 raise NotFoundError("Active assignment not found")
 
+            # Parse new_status string to LogisticalStatus Enum
+            try:
+                logistical_status = LogisticalStatus[new_status.upper()]
+            except KeyError:
+                logger.warning(f"Invalid status transition: {new_status} is not a valid LogisticalStatus for assignment {assignment_id}")
+                raise ValidationError("Invalid status value")
+
             # Validate status transition
-            if assignment.status == "DELIVERED" and new_status != "DELIVERED_PENDING_QR":
-                logger.warning(f"Invalid status transition from {assignment.status} to {new_status} for assignment {assignment_id}")
+            if assignment.logistical_status == LogisticalStatus.DELIVERED_PENDING_QR and logistical_status != LogisticalStatus.DELIVERED_PENDING_QR:
+                logger.warning(f"Invalid status transition from {assignment.logistical_status} to {logistical_status} for assignment {assignment_id}")
                 raise ValidationError("Invalid status transition")
 
-            assignment.status = new_status
+            assignment.logistical_status = logistical_status
             session.commit()
 
-            return {"status": assignment.status}
+            return {"status": assignment.logistical_status.value}
         
     @staticmethod
     def get_order_qr_code(user_id: str, order_id: str) -> Dict:
         with session_scope() as session:
-            assignment = session.query(DeliveryOrderAssignment).filter_by(order_id=order_id, delivery_user_id=user_id, status="ACCEPTED").first()
+            assignment = session.query(DeliveryOrderAssignment).filter_by(order_id=order_id, delivery_user_id=user_id, status=AssignmentStatus.ACCEPTED).first()
             if not assignment:
                 logger.warning(f"No accepted assignment found for order {order_id} and user {user_id}")
                 raise NotFoundError("Accepted assignment not found")
@@ -474,8 +487,8 @@ class DeliveryService:
     @staticmethod
     def confirm_order_qr_code(user_id: str, order_id: str, qr_code: str) -> Dict:
         with session_scope() as session:
-            # query the order from the db, join the assignment where the order ids are alike, and filter by accepted status
-            assignment = session.query(Order).join(DeliveryOrderAssignment, Order.id == DeliveryOrderAssignment.order_id).filter(DeliveryOrderAssignment.delivery_user_id == user_id, DeliveryOrderAssignment.status == "ACCEPTED", Order.id == order_id).first()
+            # query the assignment to get the escrow QR code
+            assignment = session.query(DeliveryOrderAssignment).filter_by(order_id=order_id, delivery_user_id=user_id, status=AssignmentStatus.ACCEPTED).first()
             if not assignment:
                 logger.warning(f"No accepted assignment found for order {order_id} and user {user_id}")
                 raise NotFoundError("Accepted assignment not found")
@@ -497,20 +510,25 @@ class DeliveryService:
         
 
     @staticmethod
-    def find_delivery_order_buyer(user_id: str, delivery_user_id: str) -> bool:
-        #user_id is for buyers or sellers
-        """ Checks if the user passed is one of the buyers the delivery is assigned to """
+    def find_delivery_order_buyer(user_id: str, room_id: str) -> bool:
+        """Checks if the user passed is one of the buyers in a delivery order associated with the room"""
         with session_scope() as session:
+            # First, get the location room and its associated assignments
+            location_room = session.query(LocationUpdateRoom).filter_by(room_id=room_id).first()
+            if not location_room:
+                logger.warning(f"Room {room_id} not found")
+                return False
+            
+            # Check if the user is a buyer for any order in this room
             assignment = (
                 session.query(DeliveryOrderAssignment)
                 .join(Order, DeliveryOrderAssignment.order_id == Order.id)
-                .filter_by(delivery_user_id=delivery_user_id)
+                .filter_by(room_id=room_id)
                 .filter(Order.buyer_id == user_id)
                 .first()
             )
             if not assignment:
+                logger.warning(f"User {user_id} is not authorized for room {room_id}")
                 return False
-            #order_mapping = session.query(OrderLocationMapping).filter_by(room_id=assignment.room_id).first()
-            """ if not order_mapping:
-                return False """
+            
             return True
