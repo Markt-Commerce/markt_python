@@ -22,6 +22,7 @@ from app.products.models import Product
 from app.requests.models import BuyerRequest
 
 # app imports
+from app.libs.models import ReactionType
 from .models import (
     ChatRoom,
     ChatMessage,
@@ -75,13 +76,19 @@ class ChatService:
 
             # Validate product_id if provided
             if product_id:
-                product = session.query(Product).filter(Product.id == product_id).first()
+                product = (
+                    session.query(Product).filter(Product.id == product_id).first()
+                )
                 if not product:
                     raise NotFoundError(f"Product with ID {product_id} not found")
 
             # Validate request_id if provided
             if request_id:
-                request_obj = session.query(BuyerRequest).filter(BuyerRequest.id == request_id).first()
+                request_obj = (
+                    session.query(BuyerRequest)
+                    .filter(BuyerRequest.id == request_id)
+                    .first()
+                )
                 if not request_obj:
                     raise NotFoundError(f"Request with ID {request_id} not found")
 
@@ -517,8 +524,6 @@ class ChatService:
             logger.error(f"Failed to send message: {str(e)}")
             raise APIError("Failed to send message")
 
-
-
     @staticmethod
     def send_offer(
         user_id: str, room_id: int, product_id: str, amount: float, message: str = ""
@@ -877,9 +882,24 @@ class ChatReactionService:
                     # User already has this reaction, return existing
                     return existing_reaction
 
+                # Coerce string to enum (DB column is Enum(ReactionType))
+                try:
+                    reaction_type_enum = (
+                        ReactionType(reaction_type)
+                        if isinstance(reaction_type, str)
+                        else reaction_type
+                    )
+                except ValueError:
+                    raise ValidationError(
+                        f"Invalid reaction_type: {reaction_type}",
+                        status_code=400,
+                    )
+
                 # Create new reaction
                 reaction = ChatMessageReaction(
-                    message_id=message_id, user_id=user_id, reaction_type=reaction_type
+                    message_id=message_id,
+                    user_id=user_id,
+                    reaction_type=reaction_type_enum,
                 )
                 session.add(reaction)
                 session.commit()
@@ -903,9 +923,15 @@ class ChatReactionService:
 
                 return reaction
 
+        except (NotFoundError, ValidationError):
+            raise
         except Exception as e:
-            logger.error(f"Failed to add message reaction: {str(e)}")
-            raise APIError("Failed to add reaction")
+            logger.error(
+                "Failed to add message reaction: %s",
+                str(e),
+                exc_info=True,
+            )
+            raise APIError("Failed to add reaction", status_code=400)
 
     @staticmethod
     def remove_message_reaction(user_id: str, message_id: int, reaction_type: str):
