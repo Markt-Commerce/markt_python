@@ -71,6 +71,12 @@ class Database:
                 ChatDiscount,
             )
             from app.cart.models import Cart, CartItem
+            from app.deliveries.models import (
+                DeliveryUser, 
+                DeliveryLastLocation, 
+                DeliveryOrderAssignment, 
+                LocationUpdateRoom, 
+                )
 
         # Import other models as needed
 
