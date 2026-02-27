@@ -49,6 +49,101 @@ class ChatService:
     }
 
     @staticmethod
+    def _build_product_snapshot(product_id: str, session) -> Optional[Dict[str, Any]]:
+        """Build a product snapshot for chat message display (name, price, image_url).
+
+        Returns None if product not found or unavailable. Used to enrich product/offer
+        messages so the frontend can render product cards without an extra API call.
+        """
+        if not product_id:
+            return None
+        product = (
+            session.query(Product)
+            .options(joinedload(Product.images))
+            .filter(Product.id == product_id)
+            .first()
+        )
+        if not product:
+            return None
+        image_url = None
+        if product.images and len(product.images) > 0:
+            first_image = product.images[0]
+            if first_image.media:
+                try:
+                    image_url = first_image.media.get_url()
+                except Exception:
+                    pass
+        return {
+            "id": product.id,
+            "name": product.name,
+            "price": float(product.price),
+            "currency": "NGN",
+            "image_url": image_url,
+        }
+
+    @staticmethod
+    def _format_room_messages(messages_iter, session) -> List[Dict[str, Any]]:
+        """Format messages for room_data (socket join), with enriched product/offer."""
+        formatted = []
+        for msg in messages_iter:
+            msg_dict = {
+                "id": msg.id,
+                "content": msg.content,
+                "message_type": msg.message_type,
+                "message_data": ChatService._enrich_message_data(
+                    msg.message_type, msg.message_data, msg.id, session
+                ),
+                "sender_id": msg.sender_id,
+                "sender_username": msg.sender.username,
+                "is_read": msg.is_read,
+                "created_at": msg.created_at.isoformat(),
+            }
+            if msg.message_type == "offer":
+                offer = (
+                    session.query(ChatOffer)
+                    .filter(ChatOffer.message_id == msg.id)
+                    .first()
+                )
+                if offer:
+                    offer_payload = {
+                        "id": offer.id,
+                        "product_id": offer.product_id,
+                        "price": float(offer.price),
+                        "status": offer.status,
+                    }
+                    product_snapshot = ChatService._build_product_snapshot(
+                        offer.product_id, session
+                    )
+                    if product_snapshot:
+                        offer_payload["product"] = product_snapshot
+                    msg_dict["offer"] = offer_payload
+            formatted.append(msg_dict)
+        return formatted
+
+    @staticmethod
+    def _enrich_message_data(
+        message_type: str,
+        message_data: Optional[Dict[str, Any]],
+        message_id: int,
+        session,
+    ) -> Optional[Dict[str, Any]]:
+        """Enrich message_data with product snapshot for product messages.
+
+        For backward compatibility, old messages may have only product_id.
+        This adds a product snapshot (name, price, image_url) when missing.
+        """
+        if message_data is None:
+            return None
+        result = dict(message_data)
+        if message_type == "product":
+            pid = result.get("product_id")
+            if pid and "product" not in result:
+                snapshot = ChatService._build_product_snapshot(pid, session)
+                if snapshot:
+                    result["product"] = snapshot
+        return result
+
+    @staticmethod
     def create_or_get_chat_room(
         buyer_id: str,
         seller_id: str,
@@ -297,7 +392,12 @@ class ChatService:
                         },
                         "content": message.content,
                         "message_type": message.message_type,
-                        "message_data": message.message_data,
+                        "message_data": ChatService._enrich_message_data(
+                            message.message_type,
+                            message.message_data,
+                            message.id,
+                            session,
+                        ),
                         "is_read": message.is_read,
                         "read_at": message.read_at if message.read_at else None,
                         "created_at": message.created_at,
@@ -311,12 +411,19 @@ class ChatService:
                             .first()
                         )
                         if offer:
-                            message_data["offer"] = {
+                            offer_payload = {
                                 "id": offer.id,
                                 "product_id": offer.product_id,
                                 "price": float(offer.price),
                                 "status": offer.status,
                             }
+                            # Add product snapshot for frontend product card
+                            product_snapshot = ChatService._build_product_snapshot(
+                                offer.product_id, session
+                            )
+                            if product_snapshot:
+                                offer_payload["product"] = product_snapshot
+                            message_data["offer"] = offer_payload
 
                     formatted_messages.append(message_data)
 
@@ -427,21 +534,9 @@ class ChatService:
                     }
                     if room.request
                     else None,
-                    "messages": [
-                        {
-                            "id": msg.id,
-                            "content": msg.content,
-                            "message_type": msg.message_type,
-                            "message_data": msg.message_data,
-                            "sender_id": msg.sender_id,
-                            "sender_username": msg.sender.username,
-                            "is_read": msg.is_read,
-                            "created_at": msg.created_at.isoformat(),
-                        }
-                        for msg in reversed(
-                            messages
-                        )  # Reverse to get chronological order
-                    ],
+                    "messages": ChatService._format_room_messages(
+                        reversed(messages), session
+                    ),
                     "unread_count": ChatService._get_unread_count(room.id, user_id),
                 }
 
@@ -489,11 +584,18 @@ class ChatService:
                 if not room:
                     raise ForbiddenError("Access denied to this chat room")
 
-                # Prepare message_data
+                # Prepare message_data with product snapshot for product messages
                 final_message_data = message_data or {}
-                # For backward compatibility, if product_id is provided, add it to message_data
-                if product_id and "product_id" not in final_message_data:
-                    final_message_data["product_id"] = product_id
+                pid = product_id or final_message_data.get("product_id")
+                if pid and "product_id" not in final_message_data:
+                    final_message_data["product_id"] = pid
+
+                # Enrich product messages with product snapshot (name, price, image_url)
+                # so the frontend can render product cards without an extra API call
+                if message_type == "product" and pid:
+                    product_snapshot = ChatService._build_product_snapshot(pid, session)
+                    if product_snapshot:
+                        final_message_data["product"] = product_snapshot
 
                 # Create message
                 message = ChatMessage(
@@ -501,7 +603,7 @@ class ChatService:
                     sender_id=user_id,
                     content=content,
                     message_type=message_type,
-                    message_data={"product_id": product_id} if product_id else None,
+                    message_data=final_message_data if final_message_data else None,
                 )
 
                 session.add(message)
