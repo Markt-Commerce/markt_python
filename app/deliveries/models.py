@@ -28,6 +28,7 @@ class LogisticalStatus(Enum):
     PICKED_UP = "PICKED_UP"
     EN_ROUTE_TO_DROPOFF = "EN_ROUTE_TO_DROPOFF"
     DELIVERED_PENDING_QR = "DELIVERED_PENDING_QR"
+    COMPLETED = "COMPLETED"
 
 class DeliveryUser(BaseModel, UserMixin, UniqueIdMixin):
     __tablename__ = "delivery_users"

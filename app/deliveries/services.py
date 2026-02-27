@@ -38,6 +38,16 @@ class DeliveryService:
 
     CACHE_EXPIRE_SECONDS = 300  # Cache OTP for 5 minutes
     CACHE_KEY_PREFIX = "otp_cache:"
+    
+    # defined valid status transitions for LogisticalStatus
+    VALID_STATUS_TRANSITIONS = {
+        None: [LogisticalStatus.ARRIVED_PICKUP],  #initial status can only be ARRIVED_PICKUP
+        LogisticalStatus.ARRIVED_PICKUP: [LogisticalStatus.PICKED_UP],
+        LogisticalStatus.PICKED_UP: [LogisticalStatus.EN_ROUTE_TO_DROPOFF],
+        LogisticalStatus.EN_ROUTE_TO_DROPOFF: [LogisticalStatus.DELIVERED_PENDING_QR],
+        LogisticalStatus.DELIVERED_PENDING_QR: [LogisticalStatus.COMPLETED],
+        LogisticalStatus.COMPLETED: [],  #final state
+    }
 
     @staticmethod
     def login_delivery_partner(phone_number: str, otp: str) -> Dict:
@@ -46,14 +56,14 @@ class DeliveryService:
         """ Validate that the phone number exists, and it is in the correct format. """
         if not phone_number or not phone_number.isdigit() or len(phone_number) <= 10:
             logger.warning(f"Invalid phone number format: {phone_number}")
-            raise NotFoundError("Invalid phone number format")
+            raise ValidationError("Invalid phone number format")
+        # Validate OTP from cache
+        cache_key = f"{DeliveryService.CACHE_KEY_PREFIX}{phone_number}"
+        cached_otp = redis_client.get(cache_key)
+        if not cached_otp or cached_otp.decode() != otp:
+            logger.warning(f"Invalid OTP for phone number {phone_number}")
+            raise ValidationError("Invalid OTP")
         try:
-            # Validate OTP from cache
-            cache_key = f"{DeliveryService.CACHE_KEY_PREFIX}{phone_number}"
-            cached_otp = redis_client.get(cache_key)
-            if not cached_otp or cached_otp.decode() != otp:
-                logger.warning(f"Invalid OTP for phone number {phone_number}")
-                raise NotFoundError("Invalid OTP")
 
             # OTP is valid, fetch delivery partner details
             with session_scope() as session:
@@ -73,7 +83,7 @@ class DeliveryService:
                 }
         except Exception as e:
             logger.error(f"Error during login: {str(e)}")
-            raise NotFoundError("Login failed")
+            raise NotFoundError("Login failed due to invalid credentials or server error")
 
     @staticmethod
     def send_otp(phone_number: str) -> bool:
@@ -93,13 +103,16 @@ class DeliveryService:
                 if not email:
                     logger.warning(f"No email found for delivery partner with phone number {phone_number}")
                     raise NotFoundError("Email not found")
-            cache_key = f"{DeliveryService.CACHE_KEY_PREFIX}{phone_number}"
-            redis_client.setex(cache_key, DeliveryService.CACHE_EXPIRE_SECONDS, otp)
 
             #future versions would be made to send through phone number using an SMS service
             logger.info(f"Sending OTP {otp} to {email}")
-            email_service.send_otp_email(email, otp)
-            return {"status": "success", "message": f"OTP sent to {email}"}
+            if email_service.send_otp_email(email, otp):
+                cache_key = f"{DeliveryService.CACHE_KEY_PREFIX}{phone_number}"
+                redis_client.setex(cache_key, DeliveryService.CACHE_EXPIRE_SECONDS, otp)
+                return {"status": "success", "message": f"OTP sent to {email}"}
+            else:
+                logger.error(f"Failed to send OTP email to {email}")
+                return {"status": "error", "message": f"Failed to send OTP to {email}"}
         except Exception as e:
             logger.error(f"Error sending OTP: {str(e)}")
             return {"status": "error", "message": "Failed to send OTP", "error": str(e)}
@@ -323,7 +336,7 @@ class DeliveryService:
                             "lat": drop_lat,
                             "lng": drop_lng
                         },
-                        "distance_meters": round(distance, 2),
+                        "distance_meters": round(average_distance, 2),
                         "estimated_earnings": estimated_earnings
                     })
 
@@ -402,7 +415,7 @@ class DeliveryService:
             session.add(new_assignment)
             session.commit()
 
-            return {"status": AssignmentStatus.ASSIGNED.value, "assignmentId": new_assignment.assignment_id}
+            return {"status": AssignmentStatus.REJECTED.value, "assignmentId": new_assignment.assignment_id}
     
     #TODO: We would need to include the location details of the pickup point and drop off points
     @staticmethod
@@ -451,6 +464,23 @@ class DeliveryService:
         return pickups
 
     @staticmethod
+    def is_valid_status_transition(current_status: Optional[LogisticalStatus], new_status: LogisticalStatus) -> bool:
+        """
+        Validates if a status transition is allowed.
+        
+        Status must follow this sequence:
+        None -> ARRIVED_PICKUP -> PICKED_UP -> EN_ROUTE_TO_DROPOFF -> DELIVERED_PENDING_QR -> COMPLETED
+        
+        Args:
+            current_status: The current LogisticalStatus (can be None for initial assignment)
+            new_status: The desired LogisticalStatus
+            
+        Returns:
+            bool: True if transition is valid, False otherwise
+        """
+        return new_status in DeliveryService.VALID_STATUS_TRANSITIONS.get(current_status, [])
+
+    @staticmethod
     def update_assignment_status(user_id: str, assignment_id: str, new_status: str) -> Dict:
         with session_scope() as session:
             assignment = session.query(DeliveryOrderAssignment).filter_by(assignment_id=assignment_id, delivery_user_id=user_id).first()
@@ -462,13 +492,16 @@ class DeliveryService:
             try:
                 logistical_status = LogisticalStatus[new_status.upper()]
             except KeyError:
-                logger.warning(f"Invalid status transition: {new_status} is not a valid LogisticalStatus for assignment {assignment_id}")
+                logger.warning(f"Invalid status value: {new_status} is not a valid LogisticalStatus for assignment {assignment_id}")
                 raise ValidationError("Invalid status value")
 
             # Validate status transition
-            if assignment.logistical_status == LogisticalStatus.DELIVERED_PENDING_QR and logistical_status != LogisticalStatus.DELIVERED_PENDING_QR:
-                logger.warning(f"Invalid status transition from {assignment.logistical_status} to {logistical_status} for assignment {assignment_id}")
-                raise ValidationError("Invalid status transition")
+            current_status = assignment.logistical_status
+            if not DeliveryService.is_valid_status_transition(current_status, logistical_status):
+                valid_transitions = DeliveryService.VALID_STATUS_TRANSITIONS.get(current_status, [])
+                valid_status_names = [s.value for s in valid_transitions] if valid_transitions else []
+                logger.warning(f"Invalid status transition from {current_status.value if current_status else 'None'} to {logistical_status.value} for assignment {assignment_id}. Valid next statuses: {valid_status_names}")
+                raise ValidationError(f"Cannot transition from {current_status.value if current_status else 'unassigned'} to {logistical_status.value}. Valid statuses: {', '.join(valid_status_names) if valid_status_names else 'None'}")
 
             assignment.logistical_status = logistical_status
             session.commit()
@@ -505,6 +538,7 @@ class DeliveryService:
                 raise NotFoundError("Order not found")
 
             order.status = OrderStatus.DELIVERED
+            assignment.logistical_status = LogisticalStatus.COMPLETED
             session.commit()
 
             return {"status": "success", "message": "Order marked as delivered"}
