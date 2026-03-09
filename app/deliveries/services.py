@@ -135,6 +135,15 @@ class DeliveryService:
                 raise ValidationError("Name is required")
 
             with session_scope() as session:
+                # check if phone number or email already exists
+                existing_partner = session.query(DeliveryUser).filter(
+                    (DeliveryUser.phone_number == data["phone_number"]) |
+                    (DeliveryUser.email == data["email"])
+                ).first()
+                if existing_partner:
+                    logger.warning(f"Delivery partner with phone number {data['phone_number']} or email {data['email']} already exists")
+                    raise ValidationError("Delivery partner already registered, Delivery partner with this phone number or email already exists")
+
                 new_partner = DeliveryUser(
                     phone_number=data["phone_number"],
                     email=data.get("email"),
@@ -153,14 +162,6 @@ class DeliveryService:
                 }
         except Exception as e:
             logger.error(f"Error registering delivery partner: {str(e)}")
-            # we need to check that the error is not due to duplicate phone number or email
-            if "duplicate key value violates unique constraint" in str(e):
-                if "phone_number" in str(e):
-                    logger.warning(f"Phone number {data.get('phone_number')} already exists")
-                    raise ValidationError("Phone number already registered")
-                elif "email" in str(e):
-                    logger.warning(f"Email {data.get('email')} already exists")
-                    raise ValidationError("Email already registered")
             raise ValidationError(f"Failed to register delivery partner")
 
 
@@ -424,9 +425,16 @@ class DeliveryService:
             active_assignments = (
                 session.query(DeliveryOrderAssignment)
                 .filter_by(delivery_user_id=user_id, status=AssignmentStatus.ACCEPTED)
-                .all())
-            #TODO: We would need to include the location details of the pickup point and drop off points, we can get that from the Order model using the order_id in the assignment
-            #NOTE: pickup and dropoff location details are not included in the current implementation of the Order model, we would need to add that in order to return the required data for the active assignments endpoint
+                # Eagerly load the order and its nested relationships
+                .options(
+                    joinedload(DeliveryOrderAssignment.order)
+                    .joinedload(Order.shipping_address),
+                    joinedload(DeliveryOrderAssignment.order)
+                    .joinedload(Order.items)
+                )
+                .all()
+            )
+
             return {
                 "assignments": [
                     {
@@ -434,10 +442,12 @@ class DeliveryService:
                         "orderId": assignment.order_id,
                         "assignedAt": assignment.assigned_at.isoformat(),
                         "status": assignment.status.value,
-                        "pickup": [{
-                            "lat": assignment_pickup.lat,
-                            "lng": assignment_pickup.lng
-                        } for assignment_pickup in DeliveryService.get_assignment_pickups_from_order_item(assignment.order)],
+                        "pickup": [
+                            {
+                                "lat": pickup.lat,
+                                "lng": pickup.lng
+                            } for pickup in DeliveryService.get_assignment_pickups_from_order_item(assignment.order)
+                        ],
                         "dropoff": {
                             "lat": assignment.order.shipping_address.latitude,
                             "lng": assignment.order.shipping_address.longitude
@@ -556,8 +566,8 @@ class DeliveryService:
             
             # Check if the user is a buyer for any order in this room
             assignment = (
-                session.query(DeliveryOrderAssignment)
-                .join(Order, DeliveryOrderAssignment.order_id == Order.id)
+                session.query(OrderLocationMapping)
+                .join(Order, OrderLocationMapping.order_id == Order.id)
                 .filter_by(room_id=room_id)
                 .filter(Order.buyer_id == user_id)
                 .first()
