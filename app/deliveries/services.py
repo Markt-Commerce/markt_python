@@ -217,26 +217,40 @@ class DeliveryService:
         try:
             with session_scope() as session:
                 delivery_user = session.query(DeliveryUser).filter_by(user_id=user_id).first()
+
                 if not delivery_user:
                     logger.warning(f"No delivery partner found for user ID {user_id}")
                     raise NotFoundError("Delivery partner not found")
 
-                # Update the delivery user's last known location
-                delivery_user.last_location = DeliveryLastLocation(
-                    delivery_user_id=delivery_user.id,
-                    latitude=location["lat"],
-                    longitude=location["lng"],
-                    accuracy=location.get("accuracy"),
-                    speed=location.get("speed"),
+                last_location = (
+                    session.query(DeliveryLastLocation)
+                    .filter_by(delivery_user_id=delivery_user.id)
+                    .first()
                 )
 
-                session.add(delivery_user)
+                if last_location:
+                    # UPDATE existing row
+                    last_location.latitude = location["lat"]
+                    last_location.longitude = location["lng"]
+                    last_location.accuracy = location.get("accuracy")
+                    last_location.speed = location.get("speed")
+                else:
+                    # CREATE row
+                    last_location = DeliveryLastLocation(
+                        delivery_user_id=delivery_user.id,
+                        latitude=location["lat"],
+                        longitude=location["lng"],
+                        accuracy=location.get("accuracy"),
+                        speed=location.get("speed"),
+                    )
+                    session.add(last_location)
+
                 session.commit()
 
-                # In a real implementation, we would also broadcast this location update to any relevant clients (e.g. via WebSocket)
         except Exception as e:
             logger.error(f"Error updating delivery partner location: {str(e)}")
             raise NotFoundError("Failed to update location")
+
         return {"status": "success", "message": "Location updated"}
     
     #slightly complex functionality

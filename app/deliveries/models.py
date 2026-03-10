@@ -43,7 +43,7 @@ class DeliveryUser(BaseModel, UserMixin, UniqueIdMixin):
     created_at = db.Column(db.DateTime, server_default=db.func.now())
     rating = db.Column(db.Float, nullable=True)
 
-    last_location = db.relationship("DeliveryLastLocation", back_populates="delivery_user", cascade="all, delete-orphan")
+    last_location = db.relationship("DeliveryLastLocation", back_populates="delivery_user", cascade="all, delete-orphan", uselist=False)
 
     def __repr__(self):
         return f"<DeliveryUser {self.id}>"
@@ -57,7 +57,7 @@ class DeliveryLastLocation(BaseModel):
     __tablename__ = "delivery_last_locations"
 
     id = db.Column(db.Integer, primary_key=True)
-    delivery_user_id = db.Column(db.Integer, db.ForeignKey("delivery_users.id"), nullable=False)
+    delivery_user_id = db.Column(db.Integer, db.ForeignKey("delivery_users.id"), nullable=False, unique=True, ondelete="CASCADE")
     latitude = db.Column(db.Float, nullable=False)
     longitude = db.Column(db.Float, nullable=False)
     timestamp = db.Column(db.DateTime, server_default=db.func.now())
