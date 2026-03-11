@@ -44,8 +44,9 @@ class DeliveryLogin(MethodView):
     @bp.response(200, DeliveryLoginResponseSchema)
     def post(self, data):
         """Login delivery partner and return partner details"""
-        #TODO: Will need to implement session management and token generation for delivery partners.
+        # TODO: Will need to implement session management and token generation for delivery partners.
         return DeliveryService.login_delivery_partner(data["phone_number"], data["otp"])
+
 
 @bp.route("/auth/register")
 class DeliveryRegister(MethodView):
@@ -55,6 +56,7 @@ class DeliveryRegister(MethodView):
         """Register a new delivery partner"""
         return DeliveryService.register_delivery_partner(data)
 
+
 @bp.route("/auth/otp")
 class DeliveryOTP(MethodView):
     @bp.arguments(DeliveryOTPRequestSchema, location="json")
@@ -63,13 +65,17 @@ class DeliveryOTP(MethodView):
         """Send OTP to delivery partner"""
         return DeliveryService.send_otp(data["phone_number"])
 
+
 @bp.route("/partners/me")
 class DeliveryPartnerMe(MethodView):
     @login_required
     @bp.response(200, DeliveryDataResponseSchema)
     def get(self):
         """Get current delivery partner details"""
-        return DeliveryService.get_current_delivery_partner(current_user.id) #TODO: This will require session management to link delivery partner to user session.
+        return DeliveryService.get_current_delivery_partner(
+            current_user.id
+        )  # TODO: This will require session management to link delivery partner to user session.
+
 
 @bp.route("/partners/me/status")
 class DeliveryPartnerStatus(MethodView):
@@ -77,16 +83,22 @@ class DeliveryPartnerStatus(MethodView):
     @bp.response(200, DeliveryStatusUpdateSchema)
     def patch(self):
         """Update current delivery partner status"""
-        return DeliveryService.update_delivery_partner_status(current_user.id) #TODO: This will require session management to link delivery partner to user session.
+        return DeliveryService.update_delivery_partner_status(
+            current_user.id
+        )  # TODO: This will require session management to link delivery partner to user session.
+
 
 @bp.route("/partners/me/location")
 class DeliveryLocation(MethodView):
+    @login_required
     @bp.arguments(DeliveryLocationRequestSchema, location="json")
     @bp.response(200, DeliveryLocationResponseSchema)
     def post(self, data):
         """Update delivery partner location"""
-        return DeliveryService.update_delivery_partner_location(current_user.id, data["location"])
-    
+        return DeliveryService.update_delivery_partner_location(
+            current_user.id, data["location"]
+        )
+
 
 @bp.route("/orders/available")
 class DeliveryAvailableOrders(MethodView):
@@ -96,6 +108,7 @@ class DeliveryAvailableOrders(MethodView):
         """Get available orders for the delivery partner"""
         return DeliveryService.get_available_orders(current_user.id)
 
+
 @bp.route("/orders/<string:order_id>/accept")
 class DeliveryAcceptOrder(MethodView):
     @login_required
@@ -104,7 +117,8 @@ class DeliveryAcceptOrder(MethodView):
     def post(self, order_id, data):
         """Accept an available order"""
         return DeliveryService.accept_order(current_user.id, order_id)
-    
+
+
 @bp.route("/orders/<string:order_id>/reject")
 class DeliveryRejectOrder(MethodView):
     @login_required
@@ -114,6 +128,7 @@ class DeliveryRejectOrder(MethodView):
         """Reject an available order"""
         return DeliveryService.reject_order(current_user.id, order_id)
 
+
 @bp.route("/assignments/active")
 class DeliveryActiveAssignments(MethodView):
     @login_required
@@ -121,7 +136,8 @@ class DeliveryActiveAssignments(MethodView):
     def get(self):
         """Get active assignments for the delivery partner"""
         return DeliveryService.get_active_assignments(current_user.id)
-    
+
+
 @bp.route("/assignments/<string:assignment_id>/status")
 class DeliveryAssignmentStatus(MethodView):
     @login_required
@@ -129,8 +145,11 @@ class DeliveryAssignmentStatus(MethodView):
     @bp.response(200, LogisticStatusUpdateSchema)
     def patch(self, assignment_id, data):
         """Update status of an active assignment (e.g., mark as completed)"""
-        return DeliveryService.update_assignment_status(current_user.id, assignment_id, data["status"])
-    
+        return DeliveryService.update_assignment_status(
+            current_user.id, assignment_id, data["status"]
+        )
+
+
 @bp.route("/orders/<string:order_id>/qr")
 class DeliveryOrderQR(MethodView):
     @login_required
@@ -138,7 +157,7 @@ class DeliveryOrderQR(MethodView):
     def get(self, order_id):
         """Get QR code for order escrow release"""
         return DeliveryService.get_order_qr_code(current_user.id, order_id)
-    
+
 
 @bp.route("/orders/<string:order_id>/qr/confirm")
 class DeliveryOrderQRConfirm(MethodView):
@@ -147,4 +166,6 @@ class DeliveryOrderQRConfirm(MethodView):
     @bp.response(200, DeliveryOrderQRConfirmResponseSchema)
     def post(self, order_id, data):
         """Confirm QR code for order escrow release"""
-        return DeliveryService.confirm_order_qr_code(current_user.id, order_id, data["qrCode"])
+        return DeliveryService.confirm_order_qr_code(
+            current_user.id, order_id, data["qrCode"]
+        )
