@@ -39,10 +39,19 @@ from app.orders.services import OrderService
 logger = logging.getLogger(__name__)
 
 
+def _normalize_phone(raw: str) -> str:
+    """Strip leading + and return digits-only; empty if invalid."""
+    if not raw:
+        return ""
+    return (raw or "").lstrip("+").strip()
+
+
 class DeliveryService:
 
     CACHE_EXPIRE_SECONDS = 300  # Cache OTP for 5 minutes
     CACHE_KEY_PREFIX = "otp_cache:"
+    PHONE_MIN_LEN = 10
+    PHONE_MAX_LEN = 15
 
     # defined valid status transitions for LogisticalStatus
     VALID_STATUS_TRANSITIONS = {
@@ -60,24 +69,24 @@ class DeliveryService:
     def login_delivery_partner(phone_number: str, otp: str) -> Dict:
         """Authenticate delivery partner and return partner details"""
 
-        """ Validate that the phone number exists, and it is in the correct format. """
-        if not phone_number or not phone_number.isdigit() or len(phone_number) <= 10:
+        phone = _normalize_phone(phone_number)
+        if (
+            not phone
+            or not phone.isdigit()
+            or len(phone) < DeliveryService.PHONE_MIN_LEN
+            or len(phone) > DeliveryService.PHONE_MAX_LEN
+        ):
             logger.warning(f"Invalid phone number format: {phone_number}")
             raise ValidationError("Invalid phone number format")
-        # Validate OTP from cache
-        cache_key = f"{DeliveryService.CACHE_KEY_PREFIX}{phone_number}"
+        cache_key = f"{DeliveryService.CACHE_KEY_PREFIX}{phone}"
         cached_otp = redis_client.get(cache_key)
         if not cached_otp or cached_otp.decode() != otp:
             logger.warning(f"Invalid OTP for phone number {phone_number}")
             raise ValidationError("Invalid OTP")
         try:
-
-            # OTP is valid, fetch delivery partner details
             with session_scope() as session:
                 delivery_user = (
-                    session.query(DeliveryUser)
-                    .filter_by(phone_number=phone_number)
-                    .first()
+                    session.query(DeliveryUser).filter_by(phone_number=phone).first()
                 )
                 if not delivery_user:
                     logger.warning(
@@ -104,15 +113,20 @@ class DeliveryService:
     def send_otp(phone_number: str) -> bool:
         """Generate and send OTP to delivery partner's email (phone number would be used later when we integrate SMS service)"""
         try:
-            # Generate a random 6-digit OTP
+            phone = _normalize_phone(phone_number)
+            if (
+                not phone
+                or not phone.isdigit()
+                or len(phone) < DeliveryService.PHONE_MIN_LEN
+                or len(phone) > DeliveryService.PHONE_MAX_LEN
+            ):
+                raise ValidationError("Invalid phone number format")
+
             otp = f"{randint(100000, 999999)}"
 
-            # attempt to get delivery partner's email from database using phone number
             with session_scope() as session:
                 delivery_user = (
-                    session.query(DeliveryUser)
-                    .filter_by(phone_number=phone_number)
-                    .first()
+                    session.query(DeliveryUser).filter_by(phone_number=phone).first()
                 )
                 if not delivery_user:
                     logger.warning(
@@ -127,10 +141,9 @@ class DeliveryService:
                     )
                     raise NotFoundError("Email not found")
 
-            # future versions would be made to send through phone number using an SMS service
             logger.info(f"Sending OTP {otp} to {email}")
             if email_service.send_otp_email(email, otp):
-                cache_key = f"{DeliveryService.CACHE_KEY_PREFIX}{phone_number}"
+                cache_key = f"{DeliveryService.CACHE_KEY_PREFIX}{phone}"
                 redis_client.setex(cache_key, DeliveryService.CACHE_EXPIRE_SECONDS, otp)
                 return {"status": "success", "message": f"OTP sent to {email}"}
             else:
@@ -142,13 +155,14 @@ class DeliveryService:
 
     @staticmethod
     def register_delivery_partner(data: Dict) -> Dict:
-        """Register a new delivery partner"""
+        """Register a new delivery partner. Phone stored normalized (digits only)."""
         try:
-            # validate the input data
+            phone = _normalize_phone(data.get("phone_number") or "")
             if (
-                not data.get("phone_number")
-                or not data["phone_number"].isdigit()
-                or len(data["phone_number"]) <= 10
+                not phone
+                or not phone.isdigit()
+                or len(phone) < DeliveryService.PHONE_MIN_LEN
+                or len(phone) > DeliveryService.PHONE_MAX_LEN
             ):
                 logger.warning(
                     f"Invalid phone number format: {data.get('phone_number')}"
@@ -164,25 +178,24 @@ class DeliveryService:
                 raise ValidationError("Name is required")
 
             with session_scope() as session:
-                # check if phone number or email already exists
                 existing_partner = (
                     session.query(DeliveryUser)
                     .filter(
-                        (DeliveryUser.phone_number == data["phone_number"])
+                        (DeliveryUser.phone_number == phone)
                         | (DeliveryUser.email == data["email"])
                     )
                     .first()
                 )
                 if existing_partner:
                     logger.warning(
-                        f"Delivery partner with phone number {data['phone_number']} or email {data['email']} already exists"
+                        f"Delivery partner with phone number or email already exists"
                     )
                     raise ValidationError(
                         "Delivery partner already registered, Delivery partner with this phone number or email already exists"
                     )
 
                 new_partner = DeliveryUser(
-                    phone_number=data["phone_number"],
+                    phone_number=phone,
                     email=data.get("email"),
                     name=data["name"],
                     status=DeliveryStatus.INACTIVE,  # New partners start as INACTIVE until they complete onboarding
@@ -308,8 +321,17 @@ class DeliveryService:
     # either by using postGIS to calculate the distance properly,
     # or by pre-calculating the distance between the delivery partner and the sellers and caching that in Redis, and then just fetching the available orders based on the cached distances
     @staticmethod
-    def get_available_orders(user_id: str, search_radius: int = 3000) -> Dict:
-        """Get available orders for the delivery partner"""
+    def get_available_orders(
+        user_id: str,
+        search_radius: int = 3000,
+        page: int = 1,
+        per_page: int = 20,
+    ) -> Dict:
+        """Get available orders for the delivery partner with pagination.
+        per_page is capped at 50.
+        """
+        per_page = min(max(1, per_page), 50)
+        page = max(1, page)
         try:
             with session_scope() as session:
 
@@ -340,9 +362,7 @@ class DeliveryService:
                     .distinct()
                     .all()
                 )
-                # Note: This is just a simplified way to find the orders within a radius, we would shift to using PostGIS for production later
-                # We would need to paginate this result
-
+                # Filter by radius in Python (PostGIS can replace this later)
                 available_orders = []
 
                 for order in orders:
@@ -355,15 +375,19 @@ class DeliveryService:
                     if not dropoff or dropoff.latitude is None:
                         continue
 
-                    # Assuming first seller for MVP
-                    # TODO: We would need to handle multiple sellers for an order later on, we can calculate the pickup location for each seller and return that in the response, for now we are just using the first seller's location as the pickup point
-                    # order_tolerance_limit = 3 #meaning if some orders have ranges longer than the search radius, we can still include them
+                    if not order.items:
+                        continue
 
                     for item in order.items:
                         seller = item.seller
-                        seller_address = seller.user.address
-
-                        if not seller_address:
+                        seller_address = (
+                            getattr(seller.user, "address", None) if seller else None
+                        )
+                        if (
+                            not seller_address
+                            or seller_address.latitude is None
+                            or seller_address.longitude is None
+                        ):
                             continue
 
                         pickup_lat = seller_address.latitude
@@ -377,9 +401,10 @@ class DeliveryService:
 
                         total_distance += distance
 
-                    average_distance = (
-                        total_distance / len(order.items) if order.items else 0
-                    )
+                    if not seller_pickups:
+                        continue
+
+                    average_distance = total_distance / len(seller_pickups)
 
                     if average_distance > search_radius:
                         continue
@@ -387,7 +412,6 @@ class DeliveryService:
                     drop_lat = dropoff.latitude
                     drop_lng = dropoff.longitude
 
-                    # Will need to calculate the estimated earnings based on the delivery fee for the order, for now I am just using the shipping fee as the estimated earnings, but we would need to have a more complex calculation later on based on the distance and other factors
                     estimated_earnings = order.shipping_fee or 0
 
                     available_orders.append(
@@ -400,7 +424,19 @@ class DeliveryService:
                         }
                     )
 
-                return {"range_meters": search_radius, "orders": available_orders}
+                total = len(available_orders)
+                start = (page - 1) * per_page
+                end = start + per_page
+                page_orders = available_orders[start:end]
+
+                return {
+                    "range_meters": search_radius,
+                    "orders": page_orders,
+                    "page": page,
+                    "per_page": per_page,
+                    "total": total,
+                    "total_pages": (total + per_page - 1) // per_page if total else 0,
+                }
         except Exception as e:
             logger.error(f"Error fetching available orders: {str(e)}")
             raise NotFoundError("Failed to fetch available orders")
@@ -484,12 +520,13 @@ class DeliveryService:
                 )
                 raise NotFoundError("You have already rejected this order")
 
-            # Create a new assignment for the delivery user
+            # Create a new assignment for the delivery user (no escrow QR for rejected)
             new_assignment = DeliveryOrderAssignment(
                 delivery_user_id=user_id,
                 order_id=order_id,
                 status=AssignmentStatus.REJECTED,
                 assignment_id=str(uuid.uuid4()),
+                escrow_qr_code=None,
             )
             session.add(new_assignment)
             session.commit()
@@ -543,11 +580,15 @@ class DeliveryService:
         pickups = []
         for item in order.items:
             seller = item.seller
-            seller_address = seller.user.address
-
-            if not seller_address:
+            if not seller or not getattr(seller, "user", None):
                 continue
-
+            seller_address = getattr(seller.user, "address", None)
+            if (
+                not seller_address
+                or seller_address.latitude is None
+                or seller_address.longitude is None
+            ):
+                continue
             pickups.append(
                 {"lat": seller_address.latitude, "lng": seller_address.longitude}
             )
@@ -640,7 +681,7 @@ class DeliveryService:
                 )
                 raise NotFoundError("Accepted assignment not found")
 
-            return {"qrCode": assignment.escrow_qr_code, "orderId": order_id}
+            return {"qrCode": assignment.escrow_qr_code or "", "orderId": order_id}
 
     @staticmethod
     def confirm_order_qr_code(user_id: str, order_id: str, qr_code: str) -> Dict:
@@ -661,7 +702,7 @@ class DeliveryService:
                 )
                 raise NotFoundError("Accepted assignment not found")
 
-            if assignment.escrow_qr_code != qr_code:
+            if not assignment.escrow_qr_code or assignment.escrow_qr_code != qr_code:
                 logger.warning(
                     f"Invalid QR code provided for order {order_id} by user {user_id}"
                 )
@@ -710,3 +751,26 @@ class DeliveryService:
                 return False
 
             return True
+
+    @staticmethod
+    def is_delivery_partner_for_room(delivery_user_id: str, room_id: str) -> bool:
+        """True if this delivery partner is assigned to the given location room (e.g. can send location updates)."""
+        with session_scope() as session:
+            room = (
+                session.query(LocationUpdateRoom)
+                .filter_by(room_id=room_id, delivery_user_id=delivery_user_id)
+                .first()
+            )
+            if room:
+                return True
+            # Also allow if they have an accepted assignment linked to this room
+            assignment = (
+                session.query(DeliveryOrderAssignment)
+                .filter_by(
+                    delivery_user_id=delivery_user_id,
+                    room_id=room_id,
+                    status=AssignmentStatus.ACCEPTED,
+                )
+                .first()
+            )
+            return assignment is not None

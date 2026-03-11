@@ -19,6 +19,7 @@ from .schemas import (
     DeliveryStatusUpdateSchema,
     DeliveryLocationRequestSchema,
     DeliveryLocationResponseSchema,
+    DeliveryAvailableOrdersQuerySchema,
     DeliveryAvailableOrdersResponseSchema,
     DeliveryOrderAcceptRequestSchema,
     DeliveryOrderAcceptResponseSchema,
@@ -103,10 +104,16 @@ class DeliveryLocation(MethodView):
 @bp.route("/orders/available")
 class DeliveryAvailableOrders(MethodView):
     @login_required
+    @bp.arguments(DeliveryAvailableOrdersQuerySchema, location="query")
     @bp.response(200, DeliveryAvailableOrdersResponseSchema)
-    def get(self):
-        """Get available orders for the delivery partner"""
-        return DeliveryService.get_available_orders(current_user.id)
+    def get(self, args):
+        """Get available orders for the delivery partner (paginated)."""
+        return DeliveryService.get_available_orders(
+            current_user.id,
+            search_radius=args.get("search_radius", 3000),
+            page=args.get("page", 1),
+            per_page=args.get("per_page", 20),
+        )
 
 
 @bp.route("/orders/<string:order_id>/accept")
