@@ -61,7 +61,9 @@ class DeliveryUser(BaseModel, UserMixin, UniqueIdMixin):
 
     @property
     def is_active(self):
-        return self.status == DeliveryStatus.ACTIVE
+        # Flask-Login uses this to decide if login is allowed at all.
+        # Treat SUSPENDED as blocked; ACTIVE/INACTIVE are allowed to authenticate.
+        return self.status != DeliveryStatus.SUSPENDED
 
 
 class DeliveryLastLocation(BaseModel):

@@ -1,7 +1,7 @@
 # package imports
 from flask_smorest import Blueprint
 from flask.views import MethodView
-from flask_login import login_required, current_user
+from flask_login import login_required, login_user, current_user
 from marshmallow import fields
 
 # project imports
@@ -44,9 +44,18 @@ class DeliveryLogin(MethodView):
     @bp.arguments(DeliveryLoginRequestSchema, location="json")
     @bp.response(200, DeliveryLoginResponseSchema)
     def post(self, data):
-        """Login delivery partner and return partner details"""
-        # TODO: Will need to implement session management and token generation for delivery partners.
-        return DeliveryService.login_delivery_partner(data["phone_number"], data["otp"])
+        """Login delivery partner; return partner (same pattern as users/login so session cookie is set)"""
+        delivery_user = DeliveryService.login_delivery_partner(
+            data["phone_number"], data["otp"]
+        )
+        login_user(delivery_user)
+        return {
+            "partner": {
+                "id": delivery_user.id,
+                "name": delivery_user.name,
+                "status": delivery_user.status.value,
+            }
+        }  # return dict, let flask-smorest build response (same flow as users/login → session cookie set)
 
 
 @bp.route("/auth/register")
@@ -96,9 +105,7 @@ class DeliveryLocation(MethodView):
     @bp.response(200, DeliveryLocationResponseSchema)
     def post(self, data):
         """Update delivery partner location"""
-        return DeliveryService.update_delivery_partner_location(
-            current_user.id, data["location"]
-        )
+        return DeliveryService.update_delivery_partner_location(current_user.id, data)
 
 
 @bp.route("/orders/available")

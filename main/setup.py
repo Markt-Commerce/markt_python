@@ -3,7 +3,6 @@ import logging
 import time
 
 # package imports
-from app.deliveries.models import DeliveryUser
 from flask import Flask
 from flask_login import LoginManager
 from flask_migrate import Migrate
@@ -29,7 +28,7 @@ def configure_app(app):
     # Setup extensions
     login_manager = LoginManager(app)
 
-    #Since we are having two points of auth entry now, would we need this? @Adebowale-Morakinyo
+    # Since we are having two points of auth entry now, would we need this? @Adebowale-Morakinyo
     login_manager.login_view = "users.UserLogin"
 
     # API-friendly unauthorized response (avoid redirects to GET /users/login)
@@ -84,6 +83,7 @@ def create_app():
 
         # Setup user loader
         from app.users.models import User
+        from app.deliveries.models import DeliveryUser
 
         @login_manager.user_loader
         def load_user(user_id):
