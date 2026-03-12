@@ -42,12 +42,34 @@ class Order(BaseModel, UniqueIdMixin):
         "OrderItem", back_populates="order", cascade="all, delete-orphan"
     )
     payments = db.relationship("Payment", back_populates="order")
-    shipping_address = db.relationship("ShippingAddress", uselist=False, back_populates="order", cascade="all, delete-orphan")
+    shipping_address = db.relationship(
+        "ShippingAddress",
+        uselist=False,
+        back_populates="order",
+        cascade="all, delete-orphan",
+    )
     shipments = db.relationship("Shipment", back_populates="order")
 
     def generate_order_number(self):
         # Implement your order number generation logic
         return f"ORD-{datetime.now().strftime('%Y%m%d')}-{self.id.split('_')[1]}"
+
+    @property
+    def shipping_address_dict(self):
+        """Expose shipping address as a plain dict for schemas that expect a mapping."""
+        addr = self.shipping_address
+        if not addr:
+            return None
+        return {
+            "recipient_name": addr.recipient_name,
+            "street_address": addr.street_address,
+            "city": addr.city,
+            "state": addr.state,
+            "postal_code": addr.postal_code,
+            "country": addr.country,
+            "latitude": addr.latitude,
+            "longitude": addr.longitude,
+        }
 
 
 class OrderItem(BaseModel, StatusMixin):
@@ -76,6 +98,7 @@ class OrderItem(BaseModel, StatusMixin):
     variant = db.relationship("ProductVariant")
     seller = db.relationship("Seller")
 
+
 class ShippingAddress(BaseModel):
     __tablename__ = "shipping_addresses"
 
@@ -93,6 +116,7 @@ class ShippingAddress(BaseModel):
     latitude = db.Column(db.Float)
 
     order = db.relationship("Order", back_populates="shipping_address")
+
 
 class Shipment(BaseModel):
     __tablename__ = "shipments"
