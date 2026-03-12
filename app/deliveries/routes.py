@@ -126,9 +126,8 @@ class DeliveryAvailableOrders(MethodView):
 @bp.route("/orders/<string:order_id>/accept")
 class DeliveryAcceptOrder(MethodView):
     @login_required
-    @bp.arguments(DeliveryOrderAcceptRequestSchema, location="query")
     @bp.response(200, DeliveryOrderAcceptResponseSchema)
-    def post(self, order_id, data):
+    def post(self, order_id):
         """Accept an available order"""
         return DeliveryService.accept_order(current_user.id, order_id)
 
@@ -136,9 +135,8 @@ class DeliveryAcceptOrder(MethodView):
 @bp.route("/orders/<string:order_id>/reject")
 class DeliveryRejectOrder(MethodView):
     @login_required
-    @bp.arguments(DeliveryOrderAcceptRequestSchema, location="query")
     @bp.response(200, DeliveryOrderAcceptResponseSchema)
-    def post(self, order_id, data):
+    def post(self, order_id):
         """Reject an available order"""
         return DeliveryService.reject_order(current_user.id, order_id)
 
@@ -157,7 +155,7 @@ class DeliveryAssignmentStatus(MethodView):
     @login_required
     @bp.arguments(LogisticStatusUpdateSchema, location="json")
     @bp.response(200, LogisticStatusUpdateSchema)
-    def patch(self, assignment_id, data):
+    def patch(self, data, assignment_id):
         """Update status of an active assignment (e.g., mark as completed)"""
         return DeliveryService.update_assignment_status(
             current_user.id, assignment_id, data["status"]
@@ -178,8 +176,8 @@ class DeliveryOrderQRConfirm(MethodView):
     @login_required
     @bp.arguments(DeliveryOrderQRConfirmRequestSchema, location="json")
     @bp.response(200, DeliveryOrderQRConfirmResponseSchema)
-    def post(self, order_id, data):
+    def post(self, data, order_id):
         """Confirm QR code for order escrow release"""
         return DeliveryService.confirm_order_qr_code(
-            current_user.id, order_id, data["qrCode"]
+            current_user.id, order_id, data["qr_code"]
         )

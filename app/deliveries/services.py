@@ -208,7 +208,7 @@ class DeliveryService:
                     "id": new_partner.id,
                     "name": new_partner.name,
                     "status": new_partner.status.value,
-                    "vehicleType": new_partner.vehicle_type.value
+                    "vehicle_type": new_partner.vehicle_type.value
                     if new_partner.vehicle_type
                     else None,
                 }
@@ -232,7 +232,7 @@ class DeliveryService:
                     "id": delivery_user.id,
                     "name": delivery_user.name,
                     "status": delivery_user.status.value,
-                    "vehicleType": delivery_user.vehicle_type.value
+                    "vehicle_type": delivery_user.vehicle_type.value
                     if delivery_user.vehicle_type
                     else None,
                     "rating": delivery_user.rating,
@@ -490,7 +490,7 @@ class DeliveryService:
 
             return {
                 "status": AssignmentStatus.ASSIGNED.value,
-                "assignmentId": new_assignment.assignment_id,
+                "assignment_id": new_assignment.assignment_id,
             }
 
     @staticmethod
@@ -529,7 +529,7 @@ class DeliveryService:
 
             return {
                 "status": AssignmentStatus.REJECTED.value,
-                "assignmentId": new_assignment.assignment_id,
+                "assignment_id": new_assignment.assignment_id,
             }
 
     # TODO: We would need to include the location details of the pickup point and drop off points
@@ -552,16 +552,13 @@ class DeliveryService:
             return {
                 "assignments": [
                     {
-                        "assignmentId": assignment.assignment_id,
-                        "orderId": assignment.order_id,
-                        "assignedAt": assignment.assigned_at.isoformat(),
+                        "assignment_id": assignment.assignment_id,
+                        "order_id": assignment.order_id,
+                        "assigned_at": assignment.assigned_at,
                         "status": assignment.status.value,
-                        "pickup": [
-                            {"lat": pickup.lat, "lng": pickup.lng}
-                            for pickup in DeliveryService.get_assignment_pickups_from_order_item(
-                                assignment.order
-                            )
-                        ],
+                        "pickup": DeliveryService.get_assignment_pickups_from_order_item(
+                            assignment.order
+                        ),
                         "dropoff": {
                             "lat": assignment.order.shipping_address.latitude,
                             "lng": assignment.order.shipping_address.longitude,
@@ -677,7 +674,10 @@ class DeliveryService:
                 )
                 raise NotFoundError("Accepted assignment not found")
 
-            return {"qrCode": assignment.escrow_qr_code or "", "orderId": order_id}
+            return {
+                "qr_code": assignment.escrow_qr_code or "",
+                "order_id": order_id,
+            }
 
     @staticmethod
     def confirm_order_qr_code(user_id: str, order_id: str, qr_code: str) -> Dict:

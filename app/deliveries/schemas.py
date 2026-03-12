@@ -27,7 +27,7 @@ class DeliveryRegisterRequestSchema(Schema):
 class DeliveryRegisterResponseSchema(Schema):
     id = fields.String()
     name = fields.String()
-    vehicleType = fields.String()
+    vehicle_type = fields.String()
     status = fields.String()
 
 
@@ -107,7 +107,7 @@ class DeliveryOrderAcceptRequestSchema(Schema):
 
 
 class DeliveryOrderAcceptResponseSchema(Schema):
-    assignmentId = fields.String()
+    assignment_id = fields.String()
     status = fields.String(validate=validate.OneOf(["ASSIGNED", "REJECTED"]))
 
 
@@ -116,8 +116,8 @@ class DeliveryActiveAssignmentsResponseSchema(Schema):
 
 
 class ActiveAssignmentSchema(Schema):
-    assignmentId = fields.String()
-    orderId = fields.String()
+    assignment_id = fields.String()
+    order_id = fields.String()
     pickup = fields.List(fields.Nested("LocationSchema"))
     dropoff = fields.Nested("LocationSchema")
     status = fields.String(
@@ -142,13 +142,13 @@ class LogisticStatusUpdateSchema(Schema):
 
 
 class DeliveryOrderQRResponseSchema(Schema):
-    orderId = fields.String()
-    qrCode = fields.String()
+    order_id = fields.String()
+    qr_code = fields.String()
 
 
 class DeliveryOrderQRConfirmRequestSchema(Schema):
-    orderId = fields.String()
-    qrCode = fields.String()
+    order_id = fields.String()
+    qr_code = fields.String()
 
 
 class DeliveryOrderQRConfirmResponseSchema(Schema):
