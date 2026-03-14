@@ -33,6 +33,8 @@ class OrderSchema(OrderCreateSchema):
     discount = fields.Float(dump_only=True)
     total = fields.Float(dump_only=True)
     created_at = fields.DateTime(dump_only=True)
+    # For responses, serialize ORM relationship via helper dict on model
+    shipping_address = fields.Dict(dump_only=True, attribute="shipping_address_dict")
 
 
 class OrderPaginationSchema(Schema):

@@ -24,7 +24,7 @@ from app.libs.errors import (
 from .models import Cart, CartItem
 from app.users.models import User, Buyer
 from app.products.models import Product, ProductVariant
-from app.orders.models import Order, OrderItem, OrderStatus
+from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
 from app.notifications.services import NotificationService
 from app.notifications.models import NotificationType
 
@@ -338,7 +338,24 @@ class CartService:
             order.tax = tax
             order.discount = discount
             order.total = total
-            order.shipping_address = checkout_data.get("shipping_address")
+
+            # shipping_address is a relationship; map dict payload to ShippingAddress ORM
+            shipping_data = checkout_data.get("shipping_address") or {}
+            shipping_address = ShippingAddress(
+                recipient_name=shipping_data.get("recipient_name"),
+                street_address=shipping_data.get("street_address")
+                or shipping_data.get("street"),
+                city=shipping_data.get("city"),
+                state=shipping_data.get("state"),
+                postal_code=shipping_data.get("postal_code")
+                or shipping_data.get("zip"),
+                country=shipping_data.get("country"),
+                latitude=shipping_data.get("latitude"),
+                longitude=shipping_data.get("longitude"),
+            )
+            order.shipping_address = shipping_address
+
+            # billing_address is JSONB on Order, so we can store the dict directly
             order.billing_address = checkout_data.get("billing_address")
             order.customer_note = checkout_data.get("notes")
             order.idempotency_key = idempotency_key or str(uuid.uuid4())

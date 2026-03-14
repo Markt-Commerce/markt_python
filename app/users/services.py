@@ -599,6 +599,26 @@ class UserService:
             logger.error(f"Failed to upload profile picture: {e}")
             raise AuthError(f"Failed to upload profile picture: {str(e)}")
 
+    @staticmethod
+    def upsert_user_address(user_id: str, address_data: Dict[str, Any]) -> UserAddress:
+        """Create or update the current user's address (used for logistics pickup locations)."""
+        with session_scope() as session:
+            user = session.query(User).get(user_id)
+            if not user:
+                raise NotFoundError("User not found")
+
+            address = session.query(UserAddress).filter_by(user_id=user.id).first()
+            if not address:
+                address = UserAddress(user_id=user.id)
+                session.add(address)
+
+            for field, value in address_data.items():
+                if hasattr(address, field):
+                    setattr(address, field, value)
+
+            session.flush()
+            return address
+
 
 class AccountService:
     @staticmethod

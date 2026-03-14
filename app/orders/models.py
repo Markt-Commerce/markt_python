@@ -8,6 +8,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 class OrderStatus(Enum):
     PENDING_PAYMENT = "pending_payment"  # Order created, waiting for payment
+    READY_FOR_DELIVERY = "ready_for_delivery"
     PENDING = "pending"  # Deprecated: Use PENDING_PAYMENT instead
     PROCESSING = "processing"  # Payment confirmed, order being processed
     SHIPPED = "shipped"
@@ -30,24 +31,45 @@ class Order(BaseModel, UniqueIdMixin):
     discount = db.Column(db.Float)
     total = db.Column(db.Float)
     status = db.Column(db.Enum(OrderStatus), default=OrderStatus.PENDING_PAYMENT)
-    shipping_address = db.Column(JSONB)
     billing_address = db.Column(JSONB)
     customer_note = db.Column(db.Text)
     idempotency_key = db.Column(
         db.String(100), unique=True, nullable=True
     )  # Prevent duplicate orders
-
     # Relationships
     buyer = db.relationship("Buyer", back_populates="orders")
     items = db.relationship(
         "OrderItem", back_populates="order", cascade="all, delete-orphan"
     )
     payments = db.relationship("Payment", back_populates="order")
+    shipping_address = db.relationship(
+        "ShippingAddress",
+        uselist=False,
+        back_populates="order",
+        cascade="all, delete-orphan",
+    )
     shipments = db.relationship("Shipment", back_populates="order")
 
     def generate_order_number(self):
         # Implement your order number generation logic
         return f"ORD-{datetime.now().strftime('%Y%m%d')}-{self.id.split('_')[1]}"
+
+    @property
+    def shipping_address_dict(self):
+        """Expose shipping address as a plain dict for schemas that expect a mapping."""
+        addr = self.shipping_address
+        if not addr:
+            return None
+        return {
+            "recipient_name": addr.recipient_name,
+            "street_address": addr.street_address,
+            "city": addr.city,
+            "state": addr.state,
+            "postal_code": addr.postal_code,
+            "country": addr.country,
+            "latitude": addr.latitude,
+            "longitude": addr.longitude,
+        }
 
 
 class OrderItem(BaseModel, StatusMixin):
@@ -75,6 +97,25 @@ class OrderItem(BaseModel, StatusMixin):
     product = db.relationship("Product")
     variant = db.relationship("ProductVariant")
     seller = db.relationship("Seller")
+
+
+class ShippingAddress(BaseModel):
+    __tablename__ = "shipping_addresses"
+
+    id = db.Column(db.Integer, primary_key=True)
+    order_id = db.Column(db.String(12), db.ForeignKey("orders.id"))
+    recipient_name = db.Column(db.String(100))
+    street_address = db.Column(db.String(255))
+    city = db.Column(db.String(100))
+    state = db.Column(db.String(100))
+    postal_code = db.Column(db.String(20))
+    country = db.Column(db.String(100))
+    # These two are essential for delivery charge calculation and logistics
+    # if the longtitude and latitude are not provided, we can use a geocoding service to get them from the address
+    longitude = db.Column(db.Float)
+    latitude = db.Column(db.Float)
+
+    order = db.relationship("Order", back_populates="shipping_address")
 
 
 class Shipment(BaseModel):

@@ -1,0 +1,772 @@
+# python imports
+import logging
+import uuid
+import math
+from random import randint
+from typing import Dict, List, Optional
+
+# flask imports
+from flask_login import current_user
+
+# package imports
+from app.users.models import User, Seller, UserAddress, Buyer
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import func
+from sqlalchemy.orm import joinedload
+
+# project imports
+from external.redis import redis_client
+from app.libs.session import session_scope
+from app.libs.pagination import Paginator
+from app.libs.errors import NotFoundError, ValidationError
+from app.libs.email_service import email_service
+
+# app imports
+from .models import (
+    DeliveryUser,
+    DeliveryLastLocation,
+    DeliveryOrderAssignment,
+    DeliveryStatus,
+    DeliveryVehicleType,
+    AssignmentStatus,
+    LogisticalStatus,
+    LocationUpdateRoom,
+    OrderLocationMapping,
+)
+from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
+from app.orders.services import OrderService
+
+logger = logging.getLogger(__name__)
+
+
+def _normalize_phone(raw: str) -> str:
+    """Strip leading + and return digits-only; empty if invalid."""
+    if not raw:
+        return ""
+    return (raw or "").lstrip("+").strip()
+
+
+class DeliveryService:
+
+    CACHE_EXPIRE_SECONDS = 3600  # 1 hour (relaxed for tests; was 5 min)
+    CACHE_KEY_PREFIX = "otp_cache:"
+    PHONE_MIN_LEN = 10
+    PHONE_MAX_LEN = 15
+
+    # defined valid status transitions for LogisticalStatus
+    VALID_STATUS_TRANSITIONS = {
+        None: [
+            LogisticalStatus.ARRIVED_PICKUP
+        ],  # initial status can only be ARRIVED_PICKUP
+        LogisticalStatus.ARRIVED_PICKUP: [LogisticalStatus.PICKED_UP],
+        LogisticalStatus.PICKED_UP: [LogisticalStatus.EN_ROUTE_TO_DROPOFF],
+        LogisticalStatus.EN_ROUTE_TO_DROPOFF: [LogisticalStatus.DELIVERED_PENDING_QR],
+        LogisticalStatus.DELIVERED_PENDING_QR: [LogisticalStatus.COMPLETED],
+        LogisticalStatus.COMPLETED: [],  # final state
+    }
+
+    @staticmethod
+    def login_delivery_partner(phone_number: str, otp: str) -> Dict:
+        """Authenticate delivery partner and return partner details"""
+
+        phone = _normalize_phone(phone_number)
+        if (
+            not phone
+            or not phone.isdigit()
+            or len(phone) < DeliveryService.PHONE_MIN_LEN
+            or len(phone) > DeliveryService.PHONE_MAX_LEN
+        ):
+            logger.warning(f"Invalid phone number format: {phone_number}")
+            raise ValidationError("Invalid phone number format")
+        cache_key = f"{DeliveryService.CACHE_KEY_PREFIX}{phone}"
+        cached_otp = redis_client.get(cache_key)
+        cached_str = (
+            cached_otp.decode() if isinstance(cached_otp, bytes) else cached_otp
+        )
+        if not cached_otp or cached_str != otp:
+            logger.warning(f"Invalid OTP for phone number {phone_number}")
+            raise ValidationError("Invalid OTP")
+        try:
+            with session_scope() as session:
+                delivery_user = (
+                    session.query(DeliveryUser).filter_by(phone_number=phone).first()
+                )
+                if not delivery_user:
+                    logger.warning(
+                        f"No delivery partner found with phone number {phone_number}"
+                    )
+                    raise NotFoundError("Delivery partner not found")
+
+                # Return user for route to call login_user (same pattern as users/login)
+                return delivery_user
+        except Exception as e:
+            logger.error(f"Error during login: {str(e)}")
+            raise NotFoundError(
+                "Login failed due to invalid credentials or server error"
+            )
+
+    @staticmethod
+    def send_otp(phone_number: str) -> bool:
+        """Generate and send OTP to delivery partner's email (phone number would be used later when we integrate SMS service)"""
+        try:
+            phone = _normalize_phone(phone_number)
+            if (
+                not phone
+                or not phone.isdigit()
+                or len(phone) < DeliveryService.PHONE_MIN_LEN
+                or len(phone) > DeliveryService.PHONE_MAX_LEN
+            ):
+                raise ValidationError("Invalid phone number format")
+
+            otp = f"{randint(100000, 999999)}"
+
+            with session_scope() as session:
+                delivery_user = (
+                    session.query(DeliveryUser).filter_by(phone_number=phone).first()
+                )
+                if not delivery_user:
+                    logger.warning(
+                        f"No delivery partner found with phone number {phone_number}"
+                    )
+                    raise NotFoundError("Delivery partner not found")
+
+                email = delivery_user.email
+                if not email:
+                    logger.warning(
+                        f"No email found for delivery partner with phone number {phone_number}"
+                    )
+                    raise NotFoundError("Email not found")
+
+            logger.info(f"Sending OTP {otp} to {email}")
+            if email_service.send_otp_email(email, otp):
+                cache_key = f"{DeliveryService.CACHE_KEY_PREFIX}{phone}"
+                redis_client.setex(cache_key, DeliveryService.CACHE_EXPIRE_SECONDS, otp)
+                return {"status": "success", "message": f"OTP sent to {email}"}
+            else:
+                logger.error(f"Failed to send OTP email to {email}")
+                return {"status": "error", "message": f"Failed to send OTP to {email}"}
+        except Exception as e:
+            logger.error(f"Error sending OTP: {str(e)}")
+            return {"status": "error", "message": "Failed to send OTP", "error": str(e)}
+
+    @staticmethod
+    def register_delivery_partner(data: Dict) -> Dict:
+        """Register a new delivery partner. Phone stored normalized (digits only)."""
+        try:
+            phone = _normalize_phone(data.get("phone_number") or "")
+            if (
+                not phone
+                or not phone.isdigit()
+                or len(phone) < DeliveryService.PHONE_MIN_LEN
+                or len(phone) > DeliveryService.PHONE_MAX_LEN
+            ):
+                logger.warning(
+                    f"Invalid phone number format: {data.get('phone_number')}"
+                )
+                raise ValidationError("Invalid phone number format")
+
+            if not data.get("email") or "@" not in data["email"]:
+                logger.warning(f"Invalid email format: {data.get('email')}")
+                raise ValidationError("Invalid email format")
+
+            if not data.get("name"):
+                logger.warning("Name is required for registration")
+                raise ValidationError("Name is required")
+
+            with session_scope() as session:
+                existing_partner = (
+                    session.query(DeliveryUser)
+                    .filter(
+                        (DeliveryUser.phone_number == phone)
+                        | (DeliveryUser.email == data["email"])
+                    )
+                    .first()
+                )
+                if existing_partner:
+                    logger.warning(
+                        f"Delivery partner with phone number or email already exists"
+                    )
+                    raise ValidationError(
+                        "Delivery partner already registered, Delivery partner with this phone number or email already exists"
+                    )
+
+                new_partner = DeliveryUser(
+                    phone_number=phone,
+                    email=data.get("email"),
+                    name=data["name"],
+                    status=DeliveryStatus.INACTIVE,  # New partners start as INACTIVE until they complete onboarding
+                    vehicle_type=DeliveryVehicleType[data.get("vehicle_type").upper()]
+                    if data.get("vehicle_type")
+                    and data.get("vehicle_type").upper()
+                    in [e.name for e in DeliveryVehicleType]
+                    else DeliveryVehicleType.BIKE,
+                )
+                session.add(new_partner)
+                session.commit()
+
+                return {
+                    "id": new_partner.id,
+                    "name": new_partner.name,
+                    "status": new_partner.status.value,
+                    "vehicle_type": new_partner.vehicle_type.value
+                    if new_partner.vehicle_type
+                    else None,
+                }
+        except Exception as e:
+            logger.error(f"Error registering delivery partner: {str(e)}")
+            raise ValidationError(f"Failed to register delivery partner")
+
+    @staticmethod
+    def get_current_delivery_partner(user_id: str) -> Dict:
+        """Get current delivery partner details. user_id is the DeliveryUser.id from session."""
+        try:
+            with session_scope() as session:
+                delivery_user = (
+                    session.query(DeliveryUser).filter_by(id=user_id).first()
+                )
+                if not delivery_user:
+                    logger.warning(f"No delivery partner found for user ID {user_id}")
+                    raise NotFoundError("Delivery partner not found")
+
+                return {
+                    "id": delivery_user.id,
+                    "name": delivery_user.name,
+                    "status": delivery_user.status.value,
+                    "vehicle_type": delivery_user.vehicle_type.value
+                    if delivery_user.vehicle_type
+                    else None,
+                    "rating": delivery_user.rating,
+                }
+        except Exception as e:
+            logger.error(f"Error fetching current delivery partner: {str(e)}")
+            raise NotFoundError("Failed to fetch delivery partner")
+
+    @staticmethod
+    def update_delivery_partner_status(user_id: str) -> Dict:
+        """Update current delivery partner status. user_id is the DeliveryUser.id from session."""
+        try:
+            with session_scope() as session:
+                delivery_user = (
+                    session.query(DeliveryUser).filter_by(id=user_id).first()
+                )
+                if not delivery_user:
+                    logger.warning(f"No delivery partner found for user ID {user_id}")
+                    raise NotFoundError("Delivery partner not found")
+
+                if delivery_user.status == DeliveryStatus.ACTIVE:
+                    delivery_user.status = DeliveryStatus.INACTIVE
+                elif delivery_user.status == DeliveryStatus.INACTIVE:
+                    delivery_user.status = DeliveryStatus.ACTIVE
+
+                session.add(delivery_user)
+                session.commit()
+
+                return {"status": delivery_user.status.value}
+        except Exception as e:
+            logger.error(f"Error updating delivery partner status: {str(e)}")
+            raise NotFoundError("Failed to update status")
+
+    @staticmethod
+    def update_delivery_partner_location(
+        user_id: str, location: Dict[str, float]
+    ) -> Dict:
+        """Update delivery partner location. user_id is the DeliveryUser.id from session."""
+        try:
+            with session_scope() as session:
+                delivery_user = (
+                    session.query(DeliveryUser).filter_by(id=user_id).first()
+                )
+
+                if not delivery_user:
+                    logger.warning(f"No delivery partner found for user ID {user_id}")
+                    raise NotFoundError("Delivery partner not found")
+
+                last_location = (
+                    session.query(DeliveryLastLocation)
+                    .filter_by(delivery_user_id=delivery_user.id)
+                    .first()
+                )
+
+                if last_location:
+                    # UPDATE existing row
+                    last_location.latitude = location["lat"]
+                    last_location.longitude = location["lng"]
+                    last_location.accuracy = location.get("accuracy")
+                    last_location.speed = location.get("speed")
+                else:
+                    # CREATE row
+                    last_location = DeliveryLastLocation(
+                        delivery_user_id=delivery_user.id,
+                        latitude=location["lat"],
+                        longitude=location["lng"],
+                        accuracy=location.get("accuracy"),
+                        speed=location.get("speed"),
+                    )
+                    session.add(last_location)
+
+                session.commit()
+
+        except Exception as e:
+            logger.error(f"Error updating delivery partner location: {str(e)}")
+            raise NotFoundError("Failed to update location")
+
+        return {"status": "success", "message": "Location updated"}
+
+    # slightly complex functionality
+    # we would need, after the MVP, to optimize this
+    # either by using postGIS to calculate the distance properly,
+    # or by pre-calculating the distance between the delivery partner and the sellers and caching that in Redis, and then just fetching the available orders based on the cached distances
+    @staticmethod
+    def get_available_orders(
+        user_id: str,
+        search_radius: int = 3000,
+        page: int = 1,
+        per_page: int = 20,
+    ) -> Dict:
+        """Get available orders for the delivery partner with pagination.
+        per_page is capped at 50.
+        """
+        per_page = min(max(1, per_page), 50)
+        page = max(1, page)
+        try:
+            with session_scope() as session:
+
+                delivery_user = (
+                    session.query(DeliveryUser)
+                    .filter(DeliveryUser.id == user_id)
+                    .first()
+                )
+
+                if not delivery_user or not delivery_user.last_location:
+                    raise NotFoundError("Delivery partner location not found")
+
+                delivery_lat = delivery_user.last_location.latitude
+                delivery_lng = delivery_user.last_location.longitude
+
+                orders = (
+                    session.query(Order)
+                    .join(ShippingAddress, Order.id == ShippingAddress.order_id)
+                    .join(OrderItem, Order.id == OrderItem.order_id)
+                    .join(Seller, OrderItem.seller_id == Seller.id)
+                    .join(User, Seller.user_id == User.id)
+                    .join(UserAddress, User.id == UserAddress.user_id)
+                    .filter(Order.status == OrderStatus.PROCESSING)
+                    .options(
+                        joinedload(Order.shipping_address),
+                        joinedload(Order.items).joinedload(OrderItem.seller),
+                    )
+                    .distinct()
+                    .all()
+                )
+                # Filter by radius in Python (PostGIS can replace this later)
+                available_orders = []
+
+                for order in orders:
+
+                    seller_pickups = []
+                    total_distance = 0
+
+                    dropoff = order.shipping_address
+
+                    if not dropoff or dropoff.latitude is None:
+                        continue
+
+                    if not order.items:
+                        continue
+
+                    for item in order.items:
+                        seller = item.seller
+                        seller_address = (
+                            getattr(seller.user, "address", None) if seller else None
+                        )
+                        if (
+                            not seller_address
+                            or seller_address.latitude is None
+                            or seller_address.longitude is None
+                        ):
+                            continue
+
+                        pickup_lat = seller_address.latitude
+                        pickup_lng = seller_address.longitude
+
+                        seller_pickups.append({"lat": pickup_lat, "lng": pickup_lng})
+
+                        distance = DeliveryService.haversine_distance(
+                            delivery_lat, delivery_lng, pickup_lat, pickup_lng
+                        )
+
+                        total_distance += distance
+
+                    if not seller_pickups:
+                        continue
+
+                    average_distance = total_distance / len(seller_pickups)
+
+                    if average_distance > search_radius:
+                        continue
+
+                    drop_lat = dropoff.latitude
+                    drop_lng = dropoff.longitude
+
+                    estimated_earnings = order.shipping_fee or 0
+
+                    available_orders.append(
+                        {
+                            "order_id": order.id,
+                            "pickup": seller_pickups,
+                            "dropoff": {"lat": drop_lat, "lng": drop_lng},
+                            "distance_meters": round(average_distance, 2),
+                            "estimated_earnings": estimated_earnings,
+                        }
+                    )
+
+                total = len(available_orders)
+                start = (page - 1) * per_page
+                end = start + per_page
+                page_orders = available_orders[start:end]
+
+                return {
+                    "range_meters": search_radius,
+                    "orders": page_orders,
+                    "page": page,
+                    "per_page": per_page,
+                    "total": total,
+                    "total_pages": (total + per_page - 1) // per_page if total else 0,
+                }
+        except Exception as e:
+            logger.error(f"Error fetching available orders: {str(e)}")
+            raise NotFoundError("Failed to fetch available orders")
+
+    @staticmethod
+    def haversine_distance(lat1, lng1, lat2, lng2):
+        R = 6371000  # Earth radius in meters
+
+        phi1 = math.radians(lat1)
+        phi2 = math.radians(lat2)
+        delta_phi = math.radians(lat2 - lat1)
+        delta_lambda = math.radians(lng2 - lng1)
+
+        a = (
+            math.sin(delta_phi / 2) ** 2
+            + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+        )
+
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return R * c
+
+    @staticmethod
+    def accept_order(user_id: str, order_id: str) -> Dict:
+        with session_scope() as session:
+            assignments = (
+                session.query(DeliveryOrderAssignment)
+                .filter_by(order_id=order_id)
+                .all()
+            )
+            if any(a.status == AssignmentStatus.ACCEPTED for a in assignments):
+                logger.warning(
+                    f"Order {order_id} has already been accepted by another delivery partner"
+                )
+                raise NotFoundError("Order already accepted")
+
+            if any(
+                a.delivery_user_id == user_id and a.status == AssignmentStatus.REJECTED
+                for a in assignments
+            ):
+                logger.warning(
+                    f"Delivery partner {user_id} has already rejected order {order_id}"
+                )
+                raise NotFoundError("You have already rejected this order")
+
+            # Create a new assignment for the delivery user
+            new_assignment = DeliveryOrderAssignment(
+                delivery_user_id=user_id,
+                order_id=order_id,
+                status=AssignmentStatus.ACCEPTED,
+                assignment_id=str(uuid.uuid4()),
+                escrow_qr_code=str(uuid.uuid4()),
+            )
+            session.add(new_assignment)
+            session.commit()
+
+            return {
+                "status": AssignmentStatus.ASSIGNED.value,
+                "assignment_id": new_assignment.assignment_id,
+            }
+
+    @staticmethod
+    def reject_order(user_id: str, order_id: str) -> Dict:
+        with session_scope() as session:
+            assignments = (
+                session.query(DeliveryOrderAssignment)
+                .filter_by(order_id=order_id)
+                .all()
+            )
+            if any(a.status == AssignmentStatus.ACCEPTED for a in assignments):
+                logger.warning(
+                    f"Order {order_id} has already been accepted by another delivery partner"
+                )
+                raise NotFoundError("Order already accepted")
+
+            if any(
+                a.delivery_user_id == user_id and a.status == AssignmentStatus.REJECTED
+                for a in assignments
+            ):
+                logger.warning(
+                    f"Delivery partner {user_id} has already rejected order {order_id}"
+                )
+                raise NotFoundError("You have already rejected this order")
+
+            # Create a new assignment for the delivery user (no escrow QR for rejected)
+            new_assignment = DeliveryOrderAssignment(
+                delivery_user_id=user_id,
+                order_id=order_id,
+                status=AssignmentStatus.REJECTED,
+                assignment_id=str(uuid.uuid4()),
+                escrow_qr_code=None,
+            )
+            session.add(new_assignment)
+            session.commit()
+
+            return {
+                "status": AssignmentStatus.REJECTED.value,
+                "assignment_id": new_assignment.assignment_id,
+            }
+
+    # TODO: We would need to include the location details of the pickup point and drop off points
+    @staticmethod
+    def get_active_assignments(user_id: str) -> Dict:
+        with session_scope() as session:
+            active_assignments = (
+                session.query(DeliveryOrderAssignment)
+                .filter_by(delivery_user_id=user_id, status=AssignmentStatus.ACCEPTED)
+                # Eagerly load the order and its nested relationships
+                .options(
+                    joinedload(DeliveryOrderAssignment.order).joinedload(
+                        Order.shipping_address
+                    ),
+                    joinedload(DeliveryOrderAssignment.order).joinedload(Order.items),
+                )
+                .all()
+            )
+
+            return {
+                "assignments": [
+                    {
+                        "assignment_id": assignment.assignment_id,
+                        "order_id": assignment.order_id,
+                        "assigned_at": assignment.assigned_at,
+                        "status": assignment.status.value,
+                        "pickup": DeliveryService.get_assignment_pickups_from_order_item(
+                            assignment.order
+                        ),
+                        "dropoff": {
+                            "lat": assignment.order.shipping_address.latitude,
+                            "lng": assignment.order.shipping_address.longitude,
+                        },
+                    }
+                    for assignment in active_assignments
+                ]
+            }
+
+    @staticmethod
+    def get_assignment_pickups_from_order_item(order: Order) -> List[Dict[str, float]]:
+        pickups = []
+        for item in order.items:
+            seller = item.seller
+            if not seller or not getattr(seller, "user", None):
+                continue
+            seller_address = getattr(seller.user, "address", None)
+            if (
+                not seller_address
+                or seller_address.latitude is None
+                or seller_address.longitude is None
+            ):
+                continue
+            pickups.append(
+                {"lat": seller_address.latitude, "lng": seller_address.longitude}
+            )
+        return pickups
+
+    @staticmethod
+    def is_valid_status_transition(
+        current_status: Optional[LogisticalStatus], new_status: LogisticalStatus
+    ) -> bool:
+        """
+        Validates if a status transition is allowed.
+
+        Status must follow this sequence:
+        None -> ARRIVED_PICKUP -> PICKED_UP -> EN_ROUTE_TO_DROPOFF -> DELIVERED_PENDING_QR -> COMPLETED
+
+        Args:
+            current_status: The current LogisticalStatus (can be None for initial assignment)
+            new_status: The desired LogisticalStatus
+
+        Returns:
+            bool: True if transition is valid, False otherwise
+        """
+        return new_status in DeliveryService.VALID_STATUS_TRANSITIONS.get(
+            current_status, []
+        )
+
+    @staticmethod
+    def update_assignment_status(
+        user_id: str, assignment_id: str, new_status: str
+    ) -> Dict:
+        with session_scope() as session:
+            assignment = (
+                session.query(DeliveryOrderAssignment)
+                .filter_by(assignment_id=assignment_id, delivery_user_id=user_id)
+                .first()
+            )
+            if not assignment:
+                logger.warning(
+                    f"No active assignment found with ID {assignment_id} for user {user_id}"
+                )
+                raise NotFoundError("Active assignment not found")
+
+            # Parse new_status string to LogisticalStatus Enum
+            try:
+                logistical_status = LogisticalStatus[new_status.upper()]
+            except KeyError:
+                logger.warning(
+                    f"Invalid status value: {new_status} is not a valid LogisticalStatus for assignment {assignment_id}"
+                )
+                raise ValidationError("Invalid status value")
+
+            # Validate status transition
+            current_status = assignment.logistical_status
+            if not DeliveryService.is_valid_status_transition(
+                current_status, logistical_status
+            ):
+                valid_transitions = DeliveryService.VALID_STATUS_TRANSITIONS.get(
+                    current_status, []
+                )
+                valid_status_names = (
+                    [s.value for s in valid_transitions] if valid_transitions else []
+                )
+                logger.warning(
+                    f"Invalid status transition from {current_status.value if current_status else 'None'} to {logistical_status.value} for assignment {assignment_id}. Valid next statuses: {valid_status_names}"
+                )
+                raise ValidationError(
+                    f"Cannot transition from {current_status.value if current_status else 'unassigned'} to {logistical_status.value}. Valid statuses: {', '.join(valid_status_names) if valid_status_names else 'None'}"
+                )
+
+            assignment.logistical_status = logistical_status
+            session.commit()
+
+            return {"status": assignment.logistical_status.value}
+
+    @staticmethod
+    def get_order_qr_code(user_id: str, order_id: str) -> Dict:
+        with session_scope() as session:
+            assignment = (
+                session.query(DeliveryOrderAssignment)
+                .filter_by(
+                    order_id=order_id,
+                    delivery_user_id=user_id,
+                    status=AssignmentStatus.ACCEPTED,
+                )
+                .first()
+            )
+            if not assignment:
+                logger.warning(
+                    f"No accepted assignment found for order {order_id} and user {user_id}"
+                )
+                raise NotFoundError("Accepted assignment not found")
+
+            return {
+                "qr_code": assignment.escrow_qr_code or "",
+                "order_id": order_id,
+            }
+
+    @staticmethod
+    def confirm_order_qr_code(user_id: str, order_id: str, qr_code: str) -> Dict:
+        with session_scope() as session:
+            # query the assignment to get the escrow QR code
+            assignment = (
+                session.query(DeliveryOrderAssignment)
+                .filter_by(
+                    order_id=order_id,
+                    delivery_user_id=user_id,
+                    status=AssignmentStatus.ACCEPTED,
+                )
+                .first()
+            )
+            if not assignment:
+                logger.warning(
+                    f"No accepted assignment found for order {order_id} and user {user_id}"
+                )
+                raise NotFoundError("Accepted assignment not found")
+
+            if not assignment.escrow_qr_code or assignment.escrow_qr_code != qr_code:
+                logger.warning(
+                    f"Invalid QR code provided for order {order_id} by user {user_id}"
+                )
+                raise ValidationError("Invalid QR code")
+
+            # Mark the order as delivered
+            order = session.query(Order).filter_by(id=order_id).first()
+            if not order:
+                logger.warning(f"No order found with ID {order_id}")
+                raise NotFoundError("Order not found")
+
+            order.status = OrderStatus.DELIVERED
+            assignment.logistical_status = LogisticalStatus.COMPLETED
+            session.commit()
+
+            return {"status": "success", "message": "Order marked as delivered"}
+
+    @staticmethod
+    def find_delivery_order_buyer(user_id: str, room_id: str) -> bool:
+        """Checks if the user passed is one of the buyers in a delivery order associated with the room.
+
+        user_id is the marketplace User.id (from the buyer's session). We resolve via Buyer
+        since Order.buyer_id references buyers.id, not users.id.
+        """
+        with session_scope() as session:
+            # First, get the location room and its associated assignments
+            location_room = (
+                session.query(LocationUpdateRoom).filter_by(room_id=room_id).first()
+            )
+            if not location_room:
+                logger.warning(f"Room {room_id} not found")
+                return False
+
+            # Explicit column: room_id is on OrderLocationMapping, not Order. Join Buyer to match
+            # by User.id (socket sends buyer's User.id).
+            mapping = (
+                session.query(OrderLocationMapping)
+                .join(Order, OrderLocationMapping.order_id == Order.id)
+                .join(Buyer, Order.buyer_id == Buyer.id)
+                .filter(OrderLocationMapping.room_id == room_id)
+                .filter(Buyer.user_id == user_id)
+                .first()
+            )
+            if not mapping:
+                logger.warning(f"User {user_id} is not authorized for room {room_id}")
+                return False
+
+            return True
+
+    @staticmethod
+    def is_delivery_partner_for_room(delivery_user_id: str, room_id: str) -> bool:
+        """True if this delivery partner is assigned to the given location room (e.g. can send location updates)."""
+        with session_scope() as session:
+            room = (
+                session.query(LocationUpdateRoom)
+                .filter_by(room_id=room_id, delivery_user_id=delivery_user_id)
+                .first()
+            )
+            if room:
+                return True
+            # Also allow if they have an accepted assignment linked to this room
+            assignment = (
+                session.query(DeliveryOrderAssignment)
+                .filter_by(
+                    delivery_user_id=delivery_user_id,
+                    room_id=room_id,
+                    status=AssignmentStatus.ACCEPTED,
+                )
+                .first()
+            )
+            return assignment is not None
