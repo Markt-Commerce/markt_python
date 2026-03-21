@@ -1,14 +1,30 @@
 name: Deploy to Markt Server
 
 on:
-  push:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches:
       - develop
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-develop
+  cancel-in-progress: true
 
 jobs:
   deploy:
-    name: Deploy over SSH
+    name: Deploy to test server over SSH
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: test
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'develop'
+      )
 
     steps:
       - name: Checkout repository
@@ -16,27 +32,62 @@ jobs:
 
       - name: Setup SSH
         run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
           echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/markt.pem
           chmod 600 ~/.ssh/markt.pem
-          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+          if [ -n "${{ secrets.SERVER_HOST_KEY }}" ]; then
+            echo "${{ secrets.SERVER_HOST_KEY }}" >> ~/.ssh/known_hosts
+          else
+            ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+          fi
 
       - name: Deploy Application
         run: |
+          set -euo pipefail
           ssh -i ~/.ssh/markt.pem ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} << 'EOF'
-          
+
+          set -euo pipefail
+
           sudo -i -u ubuntu bash <<'INNER_EOF'
+          set -euo pipefail
           cd /home/ubuntu/markt/apps/markt_python/
           source .venv/bin/activate
+
+          # Keep target branch current and install dependency updates before migrations.
+          git fetch origin develop
+          git checkout develop
           git pull origin develop
-          
-          # Uncomment this if migrations are needed
+
+          pip install -r requirements/dev-requirements.txt
+
           export FLASK_APP=main.setup:create_flask_app
           flask db upgrade
-          
+
           INNER_EOF
 
           sudo systemctl daemon-reload
           sudo systemctl restart markt markt-celery
-          
+          sudo systemctl is-active --quiet markt
+          sudo systemctl is-active --quiet markt-celery
+
+          # Prefer explicit health URL when provided, otherwise default to localhost.
+          HEALTHCHECK_URL=${{ secrets.HEALTHCHECK_URL }}
+          if [ -z "$HEALTHCHECK_URL" ]; then
+            HEALTHCHECK_URL="http://127.0.0.1/health/"
+          fi
+
+          # Retry health check to tolerate normal app warm-up.
+          for i in 1 2 3 4 5 6; do
+            if curl -fsS --max-time 10 "$HEALTHCHECK_URL" > /dev/null; then
+              echo "Health check passed on attempt $i"
+              break
+            fi
+            if [ "$i" -eq 6 ]; then
+              echo "Health check failed after retries"
+              exit 1
+            fi
+            sleep 5
+          done
+
           EOF
