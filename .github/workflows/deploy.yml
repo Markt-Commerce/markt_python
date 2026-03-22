@@ -1,4 +1,5 @@
 name: Deploy to Markt Server
+# Triggered after successful CI on develop (workflow_run) or manually (workflow_dispatch).
 
 on:
   workflow_run:
