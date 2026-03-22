@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 # package imports
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import joinedload
+from sqlalchemy import func
 from redis.exceptions import RedisError, ConnectionError as RedisConnectionError
 
 # project imports
@@ -2146,8 +2147,8 @@ class FeedService:
             # Check cache first
             cached_feed = FeedService._get_cached_feed(user_id, feed_type)
             if cached_feed and not kwargs.get("force_refresh"):
-                # Hydrate cached items before pagination
-                hydrated_items = FeedService._hydrate_cached_items(cached_feed)
+                # Hydrate cached items before pagination (pass user_id for liked_by_me)
+                hydrated_items = FeedService._hydrate_cached_items(cached_feed, user_id)
                 return FeedService._paginate_feed(hydrated_items, page, per_page)
 
             # Generate fresh feed
@@ -2156,14 +2157,14 @@ class FeedService:
             # Cache the feed
             FeedService._cache_feed(user_id, feed_items, feed_type)
 
-            # Hydrate and paginate fresh feed
-            hydrated_items = FeedService._hydrate_cached_items(feed_items)
+            # Hydrate and paginate fresh feed (pass user_id for liked_by_me, seller stats)
+            hydrated_items = FeedService._hydrate_cached_items(feed_items, user_id)
             return FeedService._paginate_feed(hydrated_items, page, per_page)
 
         except Exception as e:
             logger.error(f"Error getting feed for user {user_id}: {str(e)}")
-            # Fallback to trending content
-            return FeedService._get_fallback_feed(page, per_page)
+            # Fallback to trending content (pass user_id so hydration can set liked_by_me)
+            return FeedService._get_fallback_feed(page, per_page, user_id)
 
     @staticmethod
     def _get_cached_feed(user_id, feed_type="personalized"):
@@ -2186,8 +2187,9 @@ class FeedService:
         return None
 
     @staticmethod
-    def _hydrate_cached_items(cached_items):
-        """Enhanced hydration with better error handling and performance"""
+    def _hydrate_cached_items(cached_items, user_id=None):
+        """Enhanced hydration with better error handling and performance.
+        user_id: current user for liked_by_me (posts) and is_followed/follower_count (sellers)."""
         if not cached_items:
             return []
 
@@ -2257,6 +2259,52 @@ class FeedService:
             posts_dict = {post.id: post for post in posts}
             products_dict = {product.id: product for product in products}
 
+            # Batch: which posts has current user liked? (for liked_by_me)
+            liked_post_ids = set()
+            if user_id and post_ids:
+                with session_scope() as session:
+                    rows = (
+                        session.query(PostLike.post_id)
+                        .filter(
+                            PostLike.user_id == user_id,
+                            PostLike.post_id.in_(post_ids),
+                        )
+                        .all()
+                    )
+                    liked_post_ids = {r[0] for r in rows}
+
+            # Batch: follower_count and is_followed per seller (by user id)
+            seller_user_ids = list(
+                {
+                    p.seller.user.id
+                    for p in products_dict.values()
+                    if p.seller and getattr(p.seller, "user", None)
+                }
+            )
+            follower_counts = {}  # followee_id -> count
+            followed_by_me = set()  # followee_ids current user follows
+            if seller_user_ids:
+                with session_scope() as session:
+                    counts = (
+                        session.query(
+                            Follow.followee_id, func.count(Follow.follower_id)
+                        )
+                        .filter(Follow.followee_id.in_(seller_user_ids))
+                        .group_by(Follow.followee_id)
+                        .all()
+                    )
+                    follower_counts = {uid: c for uid, c in counts}
+                    if user_id:
+                        followed = (
+                            session.query(Follow.followee_id)
+                            .filter(
+                                Follow.follower_id == user_id,
+                                Follow.followee_id.in_(seller_user_ids),
+                            )
+                            .all()
+                        )
+                        followed_by_me = {r[0] for r in followed}
+
             # Hydrate feed items
             hydrated_items = []
 
@@ -2307,6 +2355,7 @@ class FeedService:
                                 ],
                                 "likes_count": len(post.likes),
                                 "comments_count": len(post.comments),
+                                "liked_by_me": post.id in liked_post_ids,
                                 "created_at": post.created_at.isoformat(),
                                 "score": score,
                                 "niche": {
@@ -2331,6 +2380,29 @@ class FeedService:
                 elif item_id.startswith("PRD_"):
                     product = products_dict.get(item_id)
                     if product:
+                        seller_user_id = (
+                            product.seller.user.id
+                            if (
+                                product.seller and getattr(product.seller, "user", None)
+                            )
+                            else None
+                        )
+                        seller_payload = {
+                            "id": product.seller.id,
+                            "shop_name": product.seller.shop_name,
+                            "user": {
+                                "id": product.seller.user.id,
+                                "username": product.seller.user.username,
+                                "profile_picture": product.seller.user.profile_picture,
+                            },
+                        }
+                        if seller_user_id is not None:
+                            seller_payload["follower_count"] = follower_counts.get(
+                                seller_user_id, 0
+                            )
+                            seller_payload["is_followed"] = (
+                                seller_user_id in followed_by_me if user_id else False
+                            )
                         hydrated_items.append(
                             {
                                 "id": product.id,
@@ -2338,15 +2410,7 @@ class FeedService:
                                 "name": product.name,
                                 "description": product.description,
                                 "price": float(product.price),
-                                "seller": {
-                                    "id": product.seller.id,
-                                    "shop_name": product.seller.shop_name,
-                                    "user": {
-                                        "id": product.seller.user.id,
-                                        "username": product.seller.user.username,
-                                        "profile_picture": product.seller.user.profile_picture,
-                                    },
-                                },
+                                "seller": seller_payload,
                                 "images": [
                                     {
                                         "url": m.media.get_url(),
@@ -2454,7 +2518,7 @@ class FeedService:
 
         except Exception as e:
             logger.error(f"Error generating fresh feed: {str(e)}")
-            return FeedService._get_fallback_feed()
+            return FeedService._get_fallback_feed(page=1, per_page=20, user_id=user_id)
 
     @staticmethod
     def _get_user_interests(user_id):
@@ -2990,8 +3054,9 @@ class FeedService:
         return diverse_items[:100]  # Limit to 100 items
 
     @staticmethod
-    def _get_fallback_feed(page=1, per_page=20):
-        """Get fallback trending feed when personalized feed fails"""
+    def _get_fallback_feed(page=1, per_page=20, user_id=None):
+        """Get fallback trending feed when personalized feed fails.
+        user_id: optional; when set, hydration includes liked_by_me and seller is_followed."""
         try:
             # Get trending content from Redis
             trending_posts = redis_client.zrevrange(
@@ -3031,8 +3096,8 @@ class FeedService:
             if not feed_items:
                 feed_items = FeedService._get_recent_content_fallback()
 
-            # Hydrate and paginate
-            hydrated_items = FeedService._hydrate_cached_items(feed_items)
+            # Hydrate and paginate (pass user_id for liked_by_me / is_followed)
+            hydrated_items = FeedService._hydrate_cached_items(feed_items, user_id)
             return FeedService._paginate_feed(hydrated_items, page, per_page)
 
         except Exception as e:

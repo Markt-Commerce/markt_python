@@ -19,6 +19,7 @@ def register_blueprints(app, api):
         "media",
         "categories",
         "socials",
+        "deliveries",
         "payments",
         "notifications",
         "health",

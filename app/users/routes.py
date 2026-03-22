@@ -42,6 +42,8 @@ from .schemas import (
     AnalyticsTimeseriesResponseSchema,
     AnalyticsTimeseriesQuerySchema,
     AnalyticsOverviewQuerySchema,
+    AddressSchema,
+    AddressUpdateSchema,
 )
 from .services import (
     AuthService,
@@ -308,6 +310,20 @@ class UserSettings(MethodView):
     @bp.response(200, SettingsSchema)
     def patch(self, data):
         """Update user settings"""
+
+
+@bp.route("/address")
+class UserAddressUpdate(MethodView):
+    @login_required
+    @bp.arguments(AddressUpdateSchema)
+    @bp.response(200, AddressSchema)
+    def patch(self, data):
+        """Create or update the current user's address (used for seller pickup logistics)."""
+        try:
+            address = UserService.upsert_user_address(current_user.id, data)
+            return address
+        except AuthError as e:
+            abort(e.status_code, message=e.message)
 
 
 @bp.route("/profile/picture", methods=["POST"])

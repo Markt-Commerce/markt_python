@@ -484,6 +484,9 @@ class FeedPostSchema(Schema):
     media = fields.List(fields.Dict(), dump_only=True)
     likes_count = fields.Int(dump_only=True)
     comments_count = fields.Int(dump_only=True)
+    liked_by_me = fields.Bool(
+        dump_only=True
+    )  # True if current user has liked this post
     created_at = fields.Str(dump_only=True)
     score = fields.Float(dump_only=True)
     niche = fields.Nested(NicheFeedInfoSchema, dump_only=True, allow_none=True)

@@ -114,10 +114,13 @@ def register_socket_namespaces(socketio):
 
     # Register namespaces with error handling
     try:
+        from app.deliveries.sockets import DeliveryLocationSharing
+        
         socketio.on_namespace(SocialNamespace("/social"))
         socketio.on_namespace(NotificationNamespace("/notification"))
         socketio.on_namespace(OrderNamespace("/orders"))
         socketio.on_namespace(ChatNamespace("/chat"))
+        socketio.on_namespace(DeliveryLocationSharing("/delivery"))
 
         # Add global error handler for socket connections
         @socketio.on_error()

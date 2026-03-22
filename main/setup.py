@@ -27,6 +27,8 @@ def configure_app(app):
 
     # Setup extensions
     login_manager = LoginManager(app)
+
+    # Since we are having two points of auth entry now, would we need this? @Adebowale-Morakinyo
     login_manager.login_view = "users.UserLogin"
 
     # API-friendly unauthorized response (avoid redirects to GET /users/login)
@@ -81,10 +83,19 @@ def create_app():
 
         # Setup user loader
         from app.users.models import User
+        from app.deliveries.models import DeliveryUser
 
         @login_manager.user_loader
         def load_user(user_id):
-            return User.query.get(str(user_id))
+            user = User.query.get(user_id)
+            if user:
+                return user
+
+            delivery_user = DeliveryUser.query.get(user_id)
+            if delivery_user:
+                return delivery_user
+
+            return None
 
         # Register routes
         register_blueprints(app, api)

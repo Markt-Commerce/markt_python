@@ -51,6 +51,10 @@ class AddressSchema(Schema):
     postal_code = fields.Str()
 
 
+class AddressUpdateSchema(AddressSchema):
+    """Schema for updating the current user's address."""
+
+
 class BuyerCreateSchema(Schema):
     buyername = fields.Str(required=True)
     shipping_address = fields.Dict()
