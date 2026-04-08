@@ -316,7 +316,7 @@ class DeliveryService:
     # we would need, after the MVP, to optimize this
     # either by using postGIS to calculate the distance properly,
     # or by pre-calculating the distance between the delivery partner and the sellers and caching that in Redis, and then just fetching the available orders based on the cached distances
- @staticmethod
+@staticmethod
 def get_available_orders(user_id: str,search_radius: int = 3000,page: int = 1,per_page: int = 20,) -> dict:
     """Get available orders for the delivery partner with pagination.
     per_page is capped at 50.
