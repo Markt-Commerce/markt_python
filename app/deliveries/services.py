@@ -348,12 +348,10 @@ def get_available_orders(user_id: str, search_radius: int = 3000, page: int = 1,
                 .filter(Order.status == OrderStatus.PROCESSING)
                 .options(
                     joinedload(Order.shipping_address),
-                    (
-                        joinedload(Order.items)
-                        .joinedload(OrderItem.seller)
-                        .joinedload(Seller.user)
-                        .joinedload(User.address)
-                    ),
+                    joinedload(Order.items)
+                    .joinedload(OrderItem.seller)
+                    .joinedload(Seller.user)
+                    .joinedload(User.address),
                 )
                 .all()
             )
