@@ -317,7 +317,7 @@ class DeliveryService:
     # either by using postGIS to calculate the distance properly,
     # or by pre-calculating the distance between the delivery partner and the sellers and caching that in Redis, and then just fetching the available orders based on the cached distances
 @staticmethod
-def get_available_orders(user_id: str,search_radius: int = 3000,page: int = 1,per_page: int = 20,) -> dict:
+def get_available_orders(user_id: str, search_radius: int = 3000, page: int = 1, per_page: int = 20, ) -> dict:
     """Get available orders for the delivery partner with pagination.
     per_page is capped at 50.
     """
@@ -348,10 +348,12 @@ def get_available_orders(user_id: str,search_radius: int = 3000,page: int = 1,pe
                 .filter(Order.status == OrderStatus.PROCESSING)
                 .options(
                     joinedload(Order.shipping_address),
-                    joinedload(Order.items)
+                    (
+                        joinedload(Order.items)
                         .joinedload(OrderItem.seller)
                         .joinedload(Seller.user)
-                        .joinedload(User.address),
+                        .joinedload(User.address)
+                    ),
                 )
                 .all()
             )
