@@ -18,7 +18,7 @@ from sqlalchemy.orm import joinedload
 from external.redis import redis_client
 from app.libs.session import session_scope
 from app.libs.pagination import Paginator
-from app.libs.errors import NotFoundError, ValidationError
+from app.libs.errors import APIError, NotFoundError, ValidationError
 from app.libs.email_service import email_service
 
 # app imports
@@ -316,8 +316,15 @@ class DeliveryService:
     # we would need, after the MVP, to optimize this
     # either by using postGIS to calculate the distance properly,
     # or by pre-calculating the distance between the delivery partner and the sellers and caching that in Redis, and then just fetching the available orders based on the cached distances
+
+
 @staticmethod
-def get_available_orders(user_id: str, search_radius: int = 3000, page: int = 1, per_page: int = 20, ) -> dict:
+def get_available_orders(
+    user_id: str,
+    search_radius: int = 3000,
+    page: int = 1,
+    per_page: int = 20,
+) -> dict:
     """Get available orders for the delivery partner with pagination.
     per_page is capped at 50.
     """
@@ -327,18 +334,25 @@ def get_available_orders(user_id: str, search_radius: int = 3000, page: int = 1,
     try:
         with session_scope() as session:
             delivery_user = (
-                session.query(DeliveryUser)
-                .filter(DeliveryUser.id == user_id)
-                .first()
+                session.query(DeliveryUser).filter(DeliveryUser.id == user_id).first()
             )
 
+            if not delivery_user:
+                raise NotFoundError("Delivery partner not found")
+
             if (
-                not delivery_user
-                or not delivery_user.last_location
+                not delivery_user.last_location
                 or delivery_user.last_location.latitude is None
                 or delivery_user.last_location.longitude is None
             ):
-                raise NotFoundError("Delivery partner location not found")
+                return {
+                    "range_meters": search_radius,
+                    "orders": [],
+                    "page": page,
+                    "per_page": per_page,
+                    "total": 0,
+                    "total_pages": 0,
+                }
 
             delivery_lat = delivery_user.last_location.latitude
             delivery_lng = delivery_user.last_location.longitude
@@ -361,11 +375,7 @@ def get_available_orders(user_id: str, search_radius: int = 3000, page: int = 1,
             for order in orders:
                 dropoff = order.shipping_address
 
-                if (
-                    not dropoff
-                    or dropoff.latitude is None
-                    or dropoff.longitude is None
-                ):
+                if not dropoff or dropoff.latitude is None or dropoff.longitude is None:
                     continue
 
                 if not order.items:
@@ -382,7 +392,9 @@ def get_available_orders(user_id: str, search_radius: int = 3000, page: int = 1,
 
                     seen_seller_ids.add(seller.id)
 
-                    seller_address = getattr(seller.user, "address", None) if seller.user else None
+                    seller_address = (
+                        getattr(seller.user, "address", None) if seller.user else None
+                    )
 
                     if (
                         not seller_address
@@ -440,12 +452,11 @@ def get_available_orders(user_id: str, search_radius: int = 3000, page: int = 1,
                 "total": total,
                 "total_pages": (total + per_page - 1) // per_page if total else 0,
             }
-
     except NotFoundError:
         raise
-    except Exception:
-        logger.exception("Error fetching available orders")
-        raise ServiceError("Failed to fetch available orders")
+    except Exception as e:
+        logger.exception(f"Error fetching available orders {str(e)}")
+        raise APIError("Failed to fetch available orders", status_code=500)
 
     @staticmethod
     def haversine_distance(lat1, lng1, lat2, lng2):
