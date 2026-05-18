@@ -195,11 +195,13 @@ class DeliveryService:
                     email=data.get("email"),
                     name=data["name"],
                     status=DeliveryStatus.INACTIVE,  # New partners start as INACTIVE until they complete onboarding
-                    vehicle_type=DeliveryVehicleType[data.get("vehicle_type").upper()]
-                    if data.get("vehicle_type")
-                    and data.get("vehicle_type").upper()
-                    in [e.name for e in DeliveryVehicleType]
-                    else DeliveryVehicleType.BIKE,
+                    vehicle_type=(
+                        DeliveryVehicleType[data.get("vehicle_type").upper()]
+                        if data.get("vehicle_type")
+                        and data.get("vehicle_type").upper()
+                        in [e.name for e in DeliveryVehicleType]
+                        else DeliveryVehicleType.BIKE
+                    ),
                 )
                 session.add(new_partner)
                 session.commit()
@@ -208,9 +210,11 @@ class DeliveryService:
                     "id": new_partner.id,
                     "name": new_partner.name,
                     "status": new_partner.status.value,
-                    "vehicle_type": new_partner.vehicle_type.value
-                    if new_partner.vehicle_type
-                    else None,
+                    "vehicle_type": (
+                        new_partner.vehicle_type.value
+                        if new_partner.vehicle_type
+                        else None
+                    ),
                 }
         except Exception as e:
             logger.error(f"Error registering delivery partner: {str(e)}")
@@ -232,9 +236,11 @@ class DeliveryService:
                     "id": delivery_user.id,
                     "name": delivery_user.name,
                     "status": delivery_user.status.value,
-                    "vehicle_type": delivery_user.vehicle_type.value
-                    if delivery_user.vehicle_type
-                    else None,
+                    "vehicle_type": (
+                        delivery_user.vehicle_type.value
+                        if delivery_user.vehicle_type
+                        else None
+                    ),
                     "rating": delivery_user.rating,
                 }
         except Exception as e:
