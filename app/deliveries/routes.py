@@ -117,7 +117,7 @@ class DeliveryAvailableOrders(MethodView):
         """Get available orders for the delivery partner (paginated)."""
         return DeliveryService.get_available_orders(
             current_user.id,
-            search_radius=args.get("search_radius", 3000),
+            search_radius=args.get("search_radius", 5000),
             page=args.get("page", 1),
             per_page=args.get("per_page", 20),
         )
