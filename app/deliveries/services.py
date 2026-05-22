@@ -460,7 +460,9 @@ def get_available_orders(
         raise
     except SQLAlchemyError as e:
         logger.exception(f"Database error fetching available orders: {str(e)}")
-        raise APIError("Database error while fetching available orders", status_code=500)
+        raise APIError(
+            "Database error while fetching available orders", status_code=500
+        )
     except Exception as e:
         logger.exception(f"Unexpected error fetching available orders: {str(e)}")
         raise APIError("Failed to fetch available orders", status_code=500)
