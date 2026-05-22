@@ -18,7 +18,7 @@ from sqlalchemy.orm import joinedload
 from external.redis import redis_client
 from app.libs.session import session_scope
 from app.libs.pagination import Paginator
-from app.libs.errors import APIError, NotFoundError, ValidationError
+from app.libs.errors import APIError, NotFoundError, ValidationError, ForbiddenError
 from app.libs.email_service import email_service
 
 # app imports
@@ -327,7 +327,7 @@ class DeliveryService:
 @staticmethod
 def get_available_orders(
     user_id: str,
-    search_radius: int = 3000,
+    search_radius: int = 5000,
     page: int = 1,
     per_page: int = 20,
 ) -> dict:
@@ -346,26 +346,24 @@ def get_available_orders(
             if not delivery_user:
                 raise NotFoundError("Delivery partner not found")
 
+            if delivery_user.status == DeliveryStatus.SUSPENDED:
+                raise ForbiddenError("Your account has been suspended")
+
             if (
                 not delivery_user.last_location
                 or delivery_user.last_location.latitude is None
                 or delivery_user.last_location.longitude is None
             ):
-                return {
-                    "range_meters": search_radius,
-                    "orders": [],
-                    "page": page,
-                    "per_page": per_page,
-                    "total": 0,
-                    "total_pages": 0,
-                }
+                raise ValidationError(
+                    "Location not set. Please update your location before browsing available orders."
+                )
 
             delivery_lat = delivery_user.last_location.latitude
             delivery_lng = delivery_user.last_location.longitude
 
             orders = (
                 session.query(Order)
-                .filter(Order.status == OrderStatus.PROCESSING)
+                .filter(Order.status == OrderStatus.READY_FOR_DELIVERY)
                 .options(
                     joinedload(Order.shipping_address),
                     joinedload(Order.items)
@@ -458,10 +456,13 @@ def get_available_orders(
                 "total": total,
                 "total_pages": (total + per_page - 1) // per_page if total else 0,
             }
-    except NotFoundError:
+    except (NotFoundError, ForbiddenError, ValidationError):
         raise
+    except SQLAlchemyError as e:
+        logger.exception(f"Database error fetching available orders: {str(e)}")
+        raise APIError("Database error while fetching available orders", status_code=500)
     except Exception as e:
-        logger.exception(f"Error fetching available orders {str(e)}")
+        logger.exception(f"Unexpected error fetching available orders: {str(e)}")
         raise APIError("Failed to fetch available orders", status_code=500)
 
     @staticmethod
