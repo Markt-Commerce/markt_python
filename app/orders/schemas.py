@@ -50,6 +50,7 @@ class BuyerOrderSchema(OrderCreateSchema):
     subtotal = fields.Float(dump_only=True)
     created_at = fields.DateTime(dump_only=True)
     items = fields.Nested(lambda: OrderItemSchema(many=True), dump_only=True)
+    shipping_address = fields.Dict(dump_only=True, attribute="shipping_address_dict")
 
 
 # For sellers - shows individual order items
