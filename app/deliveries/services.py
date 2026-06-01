@@ -323,149 +323,157 @@ class DeliveryService:
     # either by using postGIS to calculate the distance properly,
     # or by pre-calculating the distance between the delivery partner and the sellers and caching that in Redis, and then just fetching the available orders based on the cached distances
 
+    @staticmethod
+    def get_available_orders(
+        user_id: str,
+        search_radius: int = 5000,
+        page: int = 1,
+        per_page: int = 20,
+    ) -> dict:
+        """Get available orders for the delivery partner with pagination.
+        per_page is capped at 50.
+        """
+        per_page = min(max(1, per_page), 50)
+        page = max(1, page)
 
-@staticmethod
-def get_available_orders(
-    user_id: str,
-    search_radius: int = 5000,
-    page: int = 1,
-    per_page: int = 20,
-) -> dict:
-    """Get available orders for the delivery partner with pagination.
-    per_page is capped at 50.
-    """
-    per_page = min(max(1, per_page), 50)
-    page = max(1, page)
-
-    try:
-        with session_scope() as session:
-            delivery_user = (
-                session.query(DeliveryUser).filter(DeliveryUser.id == user_id).first()
-            )
-
-            if not delivery_user:
-                raise NotFoundError("Delivery partner not found")
-
-            if delivery_user.status == DeliveryStatus.SUSPENDED:
-                raise ForbiddenError("Your account has been suspended")
-
-            if (
-                not delivery_user.last_location
-                or delivery_user.last_location.latitude is None
-                or delivery_user.last_location.longitude is None
-            ):
-                raise ValidationError(
-                    "Location not set. Please update your location before browsing available orders."
+        try:
+            with session_scope() as session:
+                delivery_user = (
+                    session.query(DeliveryUser)
+                    .filter(DeliveryUser.id == user_id)
+                    .first()
                 )
 
-            delivery_lat = delivery_user.last_location.latitude
-            delivery_lng = delivery_user.last_location.longitude
+                # error handling for delivery user not found, suspended, or missing location
+                if not delivery_user:
+                    raise NotFoundError("Delivery partner not found")
 
-            orders = (
-                session.query(Order)
-                .filter(Order.status == OrderStatus.READY_FOR_DELIVERY)
-                .options(
-                    joinedload(Order.shipping_address),
-                    joinedload(Order.items)
-                    .joinedload(OrderItem.seller)
-                    .joinedload(Seller.user)
-                    .joinedload(User.address),
-                )
-                .all()
-            )
+                if delivery_user.status == DeliveryStatus.SUSPENDED:
+                    raise ForbiddenError("Your account has been suspended")
 
-            available_orders = []
-
-            for order in orders:
-                dropoff = order.shipping_address
-
-                if not dropoff or dropoff.latitude is None or dropoff.longitude is None:
-                    continue
-
-                if not order.items:
-                    continue
-
-                seller_pickups = []
-                pickup_distances = []
-                seen_seller_ids = set()
-
-                for item in order.items:
-                    seller = item.seller
-                    if not seller or seller.id in seen_seller_ids:
-                        continue
-
-                    seen_seller_ids.add(seller.id)
-
-                    seller_address = (
-                        getattr(seller.user, "address", None) if seller.user else None
+                if (
+                    not delivery_user.last_location
+                    or delivery_user.last_location.latitude is None
+                    or delivery_user.last_location.longitude is None
+                ):
+                    raise ValidationError(
+                        "Location not set. Please update your location before browsing available orders."
                     )
 
+                delivery_lat = delivery_user.last_location.latitude
+                delivery_lng = delivery_user.last_location.longitude
+
+                orders = (
+                    session.query(Order)
+                    .filter(Order.status == OrderStatus.READY_FOR_DELIVERY)
+                    .options(
+                        joinedload(Order.shipping_address),
+                        joinedload(Order.items)
+                        .joinedload(OrderItem.seller)
+                        .joinedload(Seller.user)
+                        .joinedload(User.address),
+                    )
+                    .all()
+                )
+
+                available_orders = []
+
+                for order in orders:
+                    dropoff = order.shipping_address
+
                     if (
-                        not seller_address
-                        or seller_address.latitude is None
-                        or seller_address.longitude is None
+                        not dropoff
+                        or dropoff.latitude is None
+                        or dropoff.longitude is None
                     ):
                         continue
 
-                    pickup_lat = seller_address.latitude
-                    pickup_lng = seller_address.longitude
+                    if not order.items:
+                        continue
 
-                    seller_pickups.append({"lat": pickup_lat, "lng": pickup_lng})
+                    seller_pickups = []
+                    pickup_distances = []
+                    seen_seller_ids = set()
 
-                    distance = DeliveryService.haversine_distance(
-                        delivery_lat, delivery_lng, pickup_lat, pickup_lng
+                    for item in order.items:
+                        seller = item.seller
+                        if not seller or seller.id in seen_seller_ids:
+                            continue
+
+                        seen_seller_ids.add(seller.id)
+
+                        seller_address = (
+                            getattr(seller.user, "address", None)
+                            if seller.user
+                            else None
+                        )
+
+                        if (
+                            not seller_address
+                            or seller_address.latitude is None
+                            or seller_address.longitude is None
+                        ):
+                            continue
+
+                        pickup_lat = seller_address.latitude
+                        pickup_lng = seller_address.longitude
+
+                        seller_pickups.append({"lat": pickup_lat, "lng": pickup_lng})
+
+                        distance = DeliveryService.haversine_distance(
+                            delivery_lat, delivery_lng, pickup_lat, pickup_lng
+                        )
+                        pickup_distances.append(distance)
+
+                    if not seller_pickups:
+                        continue
+
+                    # Better than average for multi-pickup feasibility
+                    max_distance = max(pickup_distances)
+
+                    if max_distance > search_radius:
+                        continue
+
+                    estimated_earnings = (
+                        order.shipping_fee if order.shipping_fee is not None else 0
                     )
-                    pickup_distances.append(distance)
 
-                if not seller_pickups:
-                    continue
+                    available_orders.append(
+                        {
+                            "order_id": order.id,
+                            "pickup": seller_pickups,
+                            "dropoff": {
+                                "lat": dropoff.latitude,
+                                "lng": dropoff.longitude,
+                            },
+                            "distance_meters": round(max_distance, 2),
+                            "estimated_earnings": estimated_earnings,
+                        }
+                    )
 
-                # Better than average for multi-pickup feasibility
-                max_distance = max(pickup_distances)
+                total = len(available_orders)
+                start = (page - 1) * per_page
+                end = start + per_page
+                page_orders = available_orders[start:end]
 
-                if max_distance > search_radius:
-                    continue
-
-                estimated_earnings = (
-                    order.shipping_fee if order.shipping_fee is not None else 0
-                )
-
-                available_orders.append(
-                    {
-                        "order_id": order.id,
-                        "pickup": seller_pickups,
-                        "dropoff": {
-                            "lat": dropoff.latitude,
-                            "lng": dropoff.longitude,
-                        },
-                        "distance_meters": round(max_distance, 2),
-                        "estimated_earnings": estimated_earnings,
-                    }
-                )
-
-            total = len(available_orders)
-            start = (page - 1) * per_page
-            end = start + per_page
-            page_orders = available_orders[start:end]
-
-            return {
-                "range_meters": search_radius,
-                "orders": page_orders,
-                "page": page,
-                "per_page": per_page,
-                "total": total,
-                "total_pages": (total + per_page - 1) // per_page if total else 0,
-            }
-    except (NotFoundError, ForbiddenError, ValidationError):
-        raise
-    except SQLAlchemyError as e:
-        logger.exception(f"Database error fetching available orders: {str(e)}")
-        raise APIError(
-            "Database error while fetching available orders", status_code=500
-        )
-    except Exception as e:
-        logger.exception(f"Unexpected error fetching available orders: {str(e)}")
-        raise APIError("Failed to fetch available orders", status_code=500)
+                return {
+                    "range_meters": search_radius,
+                    "orders": page_orders,
+                    "page": page,
+                    "per_page": per_page,
+                    "total": total,
+                    "total_pages": (total + per_page - 1) // per_page if total else 0,
+                }
+        except (NotFoundError, ForbiddenError, ValidationError):
+            raise
+        except SQLAlchemyError as e:
+            logger.exception(f"Database error fetching available orders: {str(e)}")
+            raise APIError(
+                "Database error while fetching available orders", status_code=500
+            )
+        except Exception as e:
+            logger.exception(f"Unexpected error fetching available orders: {str(e)}")
+            raise APIError("Failed to fetch available orders", status_code=500)
 
     @staticmethod
     def haversine_distance(lat1, lng1, lat2, lng2):
