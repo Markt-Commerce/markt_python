@@ -370,7 +370,14 @@ class PaymentService:
                 except:
                     base_url = "http://localhost:8000"  # Final fallback
 
-            callback_url = f"{base_url}/api/v1/payments/callback/{payment.id}"
+            # Carry the originating platform through Paystack's redirect so the
+            # final callback knows whether to send the user back to the mobile
+            # app (deep link) or the web app.
+            platform = (metadata or {}).get("platform", "web")
+            callback_url = (
+                f"{base_url}/api/v1/payments/callback/{payment.id}"
+                f"?platform={platform}"
+            )
 
             payload = {
                 "amount": int(payment.amount * 100),  # Convert to kobo
