@@ -30,9 +30,41 @@ class WithdrawalRequestSchema(Schema):
     account_name = fields.Str(required=True)
 
 
+class WithdrawalListResponseSchema(Schema):
+    withdrawals = fields.List(fields.Dict())
+    pagination = fields.Dict()
+
+
 class WithdrawalResponseSchema(Schema):
     id = fields.Str()
     amount = fields.Float()
     currency = fields.Str()
     status = fields.Str()
     created_at = fields.DateTime()
+
+
+class TopUpInitializeSchema(Schema):
+    amount = fields.Float(required=True, validate=validate.Range(min=100))
+    currency = fields.Str(missing="NGN")
+    platform = fields.Str(missing="web")
+
+
+class TopUpInitializeResponseSchema(Schema):
+    topup_id = fields.Str()
+    amount = fields.Float()
+    currency = fields.Str()
+    authorization_url = fields.Str()
+    reference = fields.Str()
+
+
+class SellerPayoutAccountSchema(Schema):
+    bank_code = fields.Str(required=True)
+    account_number = fields.Str(required=True)
+    account_name = fields.Str(required=True)
+
+
+class SellerPayoutAccountResponseSchema(Schema):
+    seller_id = fields.Int()
+    subaccount_code = fields.Str()
+    account_name = fields.Str()
+    account_number_masked = fields.Str()

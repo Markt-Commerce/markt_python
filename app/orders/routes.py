@@ -24,6 +24,9 @@ from .schemas import (
     OrderItemStatusUpdateSchema,
     OrderCancelSchema,
     OrderCancelResponseSchema,
+    OrderReturnRequestSchema,
+    OrderReturnResponseSchema,
+    OrderReturnActionSchema,
 )
 
 bp = Blueprint("orders", __name__, description="Order operations", url_prefix="/orders")
@@ -163,6 +166,60 @@ class CancelOrder(MethodView):
                 "cancel_reason": order.cancel_reason,
                 "refund_amount": refund_amount,
             }
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/<order_id>/returns")
+class OrderReturnRequest(MethodView):
+    @login_required
+    @buyer_required
+    @bp.arguments(OrderReturnRequestSchema)
+    @bp.response(201, OrderReturnResponseSchema)
+    def post(self, return_data, order_id):
+        """Request a return for a shipped or delivered order"""
+        try:
+            return OrderService.request_return(
+                order_id,
+                current_user.buyer_account.id,
+                reason=return_data["reason"],
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/returns/<return_id>/approve")
+class ApproveOrderReturn(MethodView):
+    @login_required
+    @seller_required
+    @bp.arguments(OrderReturnActionSchema)
+    @bp.response(200, OrderReturnResponseSchema)
+    def post(self, action_data, return_id):
+        """Approve a buyer return request and refund to wallet"""
+        try:
+            return OrderService.approve_return(
+                return_id,
+                current_user.seller_account.id,
+                seller_notes=action_data.get("seller_notes"),
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/returns/<return_id>/reject")
+class RejectOrderReturn(MethodView):
+    @login_required
+    @seller_required
+    @bp.arguments(OrderReturnActionSchema)
+    @bp.response(200, OrderReturnResponseSchema)
+    def post(self, action_data, return_id):
+        """Reject a buyer return request"""
+        try:
+            return OrderService.reject_return(
+                return_id,
+                current_user.seller_account.id,
+                seller_notes=action_data.get("seller_notes"),
+            )
         except APIError as e:
             abort(e.status_code, message=e.message)
 
