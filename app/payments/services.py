@@ -199,7 +199,7 @@ class PaymentService:
                     return existing_payment
 
             # Validate order
-            order = session.query(Order).get(order_id)
+            order = session.query(Order).options(joinedload(Order.buyer)).get(order_id)
             if not order:
                 raise NotFoundError("Order not found")
 
@@ -234,14 +234,37 @@ class PaymentService:
             session.add(payment)
             session.flush()
 
-            # Initialize with Paystack if card payment
-            if method == PaymentMethod.CARD:
+            wallet_payment_id = None
+
+            if method == PaymentMethod.WALLET:
+                if not order.buyer or not order.buyer.user_id:
+                    raise ValidationError("Buyer account required for wallet payment")
+                from app.wallet.services import WalletService
+
+                payment.transaction_id = f"WALLET_{payment.id}"
+                WalletService.pay_for_order(
+                    order.buyer.user_id,
+                    order_id,
+                    payment.id,
+                    resolved_amount,
+                    currency=currency,
+                )
+                payment.status = PaymentStatus.COMPLETED
+                payment.paid_at = datetime.utcnow()
+                wallet_payment_id = payment.id
+            elif method == PaymentMethod.CARD:
                 PaymentService._initialize_paystack_transaction(payment, metadata)
 
-            # Cache payment
             PaymentService._cache_payment(payment)
 
-            return payment
+            if wallet_payment_id:
+                session.flush()
+
+        if wallet_payment_id:
+            PaymentService.complete_payment(payment_id=wallet_payment_id)
+            return PaymentService.get_payment(wallet_payment_id)
+
+        return payment
 
     @staticmethod
     def process_payment(payment_id: str, payment_data: Dict[str, Any]) -> Payment:
@@ -415,11 +438,14 @@ class PaymentService:
             }
 
     @staticmethod
-    def handle_webhook(payload: Dict[str, Any], signature: str) -> bool:
+    def handle_webhook(
+        payload: Dict[str, Any],
+        signature: str,
+        raw_body: Optional[bytes] = None,
+    ) -> bool:
         """Handle Paystack webhook"""
         try:
-            # Verify webhook signature
-            if not PaymentService._verify_webhook_signature(payload, signature):
+            if not PaymentService._verify_webhook_signature(signature, raw_body):
                 logger.warning("Invalid webhook signature")
                 return False
 
@@ -430,6 +456,8 @@ class PaymentService:
                 return PaymentService._handle_successful_charge(data)
             elif event == "transfer.success":
                 return PaymentService._handle_successful_transfer(data)
+            elif event == "transfer.failed":
+                return PaymentService._handle_failed_transfer(data)
             elif event == "charge.failed":
                 return PaymentService._handle_failed_charge(data)
             else:
@@ -441,6 +469,27 @@ class PaymentService:
             return False
 
     # ==================== PRIVATE METHODS ====================
+
+    @staticmethod
+    def _resolve_subaccount_split(order: Order) -> Optional[Dict[str, str]]:
+        """Return Paystack subaccount code when order has a single registered seller."""
+        seller_ids = {item.seller_id for item in order.items if item.seller_id}
+        if len(seller_ids) != 1:
+            return None
+
+        seller_id = next(iter(seller_ids))
+        seller = (
+            order.items[0].seller
+            if order.items and order.items[0].seller_id == seller_id
+            else None
+        )
+        if not seller:
+            with session_scope() as session:
+                seller = session.query(Seller).get(seller_id)
+        if not seller or not seller.paystack_subaccount_code:
+            return None
+
+        return {"subaccount_code": seller.paystack_subaccount_code}
 
     @staticmethod
     def _initialize_paystack_transaction(
@@ -487,6 +536,11 @@ class PaymentService:
                     **(metadata or {}),
                 },
             }
+
+            split = PaymentService._resolve_subaccount_split(order)
+            if split:
+                payload["subaccount"] = split["subaccount_code"]
+                order.paystack_split_used = True
 
             response = requests.post(
                 f"{PaymentService.PAYSTACK_BASE_URL}/transaction/initialize",
@@ -636,16 +690,16 @@ class PaymentService:
             raise APIError("Bank transfer processing failed", 500)
 
     @staticmethod
-    def _verify_webhook_signature(payload: Dict[str, Any], signature: str) -> bool:
-        """Verify Paystack webhook signature"""
+    def _verify_webhook_signature(signature: str, raw_body: Optional[bytes]) -> bool:
+        """Verify Paystack webhook signature against the raw request body."""
+        if not signature or not raw_body:
+            return False
         try:
-            # Create HMAC SHA512 hash
             computed_signature = hmac.new(
                 PaymentService.PAYSTACK_SECRET_KEY.encode("utf-8"),
-                str(payload).encode("utf-8"),
+                raw_body,
                 hashlib.sha512,
             ).hexdigest()
-
             return hmac.compare_digest(computed_signature, signature)
         except Exception:
             return False
@@ -656,6 +710,13 @@ class PaymentService:
         reference = data.get("reference")
         if not reference:
             return False
+
+        metadata = data.get("metadata") or {}
+        if reference.startswith("TOP_") or metadata.get("type") == "wallet_topup":
+            from app.wallet.services import WalletService
+
+            return WalletService.complete_topup(reference, data)
+
         return PaymentService.complete_payment(
             reference=reference,
             gateway_response=data,
@@ -696,9 +757,24 @@ class PaymentService:
 
     @staticmethod
     def _handle_successful_transfer(data: Dict[str, Any]) -> bool:
-        """Handle successful transfer webhook (for payouts)"""
-        # Implementation for seller payouts
-        return True
+        """Handle successful transfer webhook (wallet withdrawals)."""
+        from app.wallet.services import WalletService
+
+        reference = data.get("reference") or data.get("transfer_code")
+        if not reference:
+            return False
+        return WalletService.complete_withdrawal_transfer(reference)
+
+    @staticmethod
+    def _handle_failed_transfer(data: Dict[str, Any]) -> bool:
+        """Handle failed transfer webhook and refund wallet."""
+        from app.wallet.services import WalletService
+
+        reference = data.get("reference") or data.get("transfer_code")
+        if not reference:
+            return False
+        reason = data.get("reason") or "Paystack transfer failed"
+        return WalletService.fail_withdrawal_transfer(reference, reason)
 
     @staticmethod
     def _send_payment_notifications(payment: Payment, status: PaymentStatus):

@@ -118,6 +118,13 @@ class Config:
         self.CELERY_WORKER_DISABLE_RATE_LIMITS = False
         self.CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 
+        self.UNPAID_ORDER_EXPIRY_HOURS = config(
+            "UNPAID_ORDER_EXPIRY_HOURS", default=48, cast=int
+        )
+        self.PLATFORM_COMMISSION_RATE = config(
+            "PLATFORM_COMMISSION_RATE", default=0.10, cast=float
+        )
+
     @property
     def SQLALCHEMY_DATABASE_URI(self):
         return f"postgresql+psycopg2://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"

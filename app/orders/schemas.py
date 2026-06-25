@@ -101,6 +101,24 @@ class OrderCancelResponseSchema(Schema):
     refund_amount = fields.Float()
 
 
+class OrderReturnRequestSchema(Schema):
+    reason = fields.Str(required=True, validate=validate.Length(min=3))
+
+
+class OrderReturnResponseSchema(Schema):
+    id = fields.Str()
+    order_id = fields.Str()
+    status = fields.Str()
+    reason = fields.Str()
+    refund_amount = fields.Float(allow_none=True)
+    seller_notes = fields.Str(allow_none=True)
+    created_at = fields.DateTime()
+
+
+class OrderReturnActionSchema(Schema):
+    seller_notes = fields.Str(allow_none=True)
+
+
 class OrderItemStatusUpdateSchema(Schema):
     status = fields.Enum(OrderItem.Status, by_value=True, required=True)
 

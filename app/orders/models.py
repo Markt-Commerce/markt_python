@@ -38,6 +38,7 @@ class Order(BaseModel, UniqueIdMixin):
     )  # Prevent duplicate orders
     cancelled_at = db.Column(db.DateTime, nullable=True)
     cancel_reason = db.Column(db.Text, nullable=True)
+    paystack_split_used = db.Column(db.Boolean, default=False, nullable=False)
     # Relationships
     buyer = db.relationship("Buyer", back_populates="orders")
     items = db.relationship(
@@ -51,6 +52,7 @@ class Order(BaseModel, UniqueIdMixin):
         cascade="all, delete-orphan",
     )
     shipments = db.relationship("Shipment", back_populates="order")
+    returns = db.relationship("OrderReturn", back_populates="order", lazy="dynamic")
 
     def generate_order_number(self):
         # Implement your order number generation logic
@@ -133,3 +135,28 @@ class Shipment(BaseModel):
     delivered_at = db.Column(db.DateTime)
 
     order = db.relationship("Order", back_populates="shipments")
+
+
+class OrderReturnStatus(Enum):
+    REQUESTED = "requested"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    REFUNDED = "refunded"
+
+
+class OrderReturn(BaseModel, UniqueIdMixin):
+    __tablename__ = "order_returns"
+    id_prefix = "RET_"
+
+    id = db.Column(db.String(12), primary_key=True, default=None)
+    order_id = db.Column(db.String(12), db.ForeignKey("orders.id"), nullable=False)
+    buyer_id = db.Column(db.Integer, db.ForeignKey("buyers.id"), nullable=False)
+    reason = db.Column(db.Text, nullable=False)
+    status = db.Column(
+        db.Enum(OrderReturnStatus), default=OrderReturnStatus.REQUESTED, nullable=False
+    )
+    refund_amount = db.Column(db.Float, nullable=True)
+    seller_notes = db.Column(db.Text, nullable=True)
+
+    order = db.relationship("Order", back_populates="returns")
+    buyer = db.relationship("Buyer")
