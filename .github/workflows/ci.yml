@@ -68,3 +68,6 @@ jobs:
 
       - name: Syntax smoke check
         run: python -m compileall -q app main external
+
+      - name: Run pytest
+        run: pytest tests/ -v --tb=short

@@ -23,7 +23,7 @@ from app.libs.errors import (
 
 # app imports
 from .models import Payment, Transaction, PaymentStatus, PaymentMethod
-from app.orders.models import Order, OrderStatus
+from app.orders.models import Order, OrderStatus, OrderItem
 from app.users.models import User, Seller
 from app.notifications.services import NotificationService
 from app.notifications.models import NotificationType
@@ -49,6 +49,131 @@ class PaymentService:
         cls.PAYSTACK_SECRET_KEY = secret_key
         cls.PAYSTACK_PUBLIC_KEY = public_key
         logger.info("Paystack payment service initialized")
+
+    @staticmethod
+    def _resolve_order_payment_amount(
+        order: Order, client_amount: Optional[float]
+    ) -> float:
+        """Derive the payable amount from the order; optionally validate client input."""
+        expected = order.total if order.total is not None else order.subtotal
+        if expected is None:
+            raise ValidationError("Order total is not set")
+        if client_amount is not None and abs(client_amount - expected) > 0.01:
+            raise ValidationError(
+                f"Payment amount {client_amount} does not match order total {expected}"
+            )
+        return expected
+
+    @staticmethod
+    def complete_payment(
+        *,
+        payment_id: Optional[str] = None,
+        reference: Optional[str] = None,
+        gateway_response: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Idempotently mark a payment completed and advance the order lifecycle."""
+        if not payment_id and not reference:
+            return False
+
+        with session_scope() as session:
+            query = session.query(Payment).options(
+                joinedload(Payment.order).joinedload(Order.items),
+                joinedload(Payment.order).joinedload(Order.buyer),
+            )
+            if payment_id:
+                payment = query.get(payment_id)
+            else:
+                payment = query.filter_by(transaction_id=reference).first()
+
+            if not payment:
+                logger.warning(
+                    "complete_payment: payment not found (id=%s, ref=%s)",
+                    payment_id,
+                    reference,
+                )
+                return False
+
+            already_completed = payment.status == PaymentStatus.COMPLETED
+
+            if not already_completed:
+                payment.status = PaymentStatus.COMPLETED
+                payment.paid_at = datetime.utcnow()
+                if gateway_response is not None:
+                    payment.gateway_response = gateway_response
+
+            order = payment.order
+            if order and order.status in (
+                OrderStatus.PENDING,
+                OrderStatus.PENDING_PAYMENT,
+            ):
+                order.status = OrderStatus.READY_FOR_DELIVERY
+                if not order.order_number:
+                    order.order_number = order.generate_order_number()
+
+                for item in order.items:
+                    if item.status == OrderItem.Status.PENDING:
+                        item.status = OrderItem.Status.PROCESSING
+
+                if not already_completed:
+                    from app.products.services import ProductService
+
+                    ProductService.reduce_inventory_for_order(order.items)
+
+                    existing_txn = (
+                        session.query(Transaction)
+                        .filter_by(reference=f"PAY_{payment.id}")
+                        .first()
+                    )
+                    if not existing_txn:
+                        transaction = Transaction(
+                            user_id=order.buyer.user_id,
+                            seller_id=order.items[0].seller_id if order.items else None,
+                            amount=payment.amount,
+                            type="debit",
+                            reference=f"PAY_{payment.id}",
+                            status="completed",
+                            payment_metadata=gateway_response or {},
+                        )
+                        session.add(transaction)
+
+            session.flush()
+
+            if not already_completed:
+                PaymentService._send_payment_notifications(
+                    payment, PaymentStatus.COMPLETED
+                )
+                PaymentService._emit_payment_confirmed(payment)
+
+            PaymentService._invalidate_payment_cache(payment.id)
+            return True
+
+    @staticmethod
+    def _emit_payment_confirmed(payment: Payment):
+        try:
+            from app.realtime.event_manager import EventManager
+
+            EventManager.emit_to_order(
+                payment.order_id,
+                "payment_confirmed",
+                {
+                    "payment_id": payment.id,
+                    "order_id": payment.order_id,
+                    "user_id": payment.order.buyer.user_id
+                    if payment.order and payment.order.buyer
+                    else None,
+                    "amount": payment.amount,
+                    "status": payment.status.value,
+                    "transaction_id": payment.transaction_id,
+                    "metadata": {
+                        "method": payment.method.value if payment.method else None,
+                        "order_number": payment.order.order_number
+                        if payment.order
+                        else None,
+                    },
+                },
+            )
+        except Exception as e:
+            logger.warning(f"Failed to queue payment_confirmed event: {e}")
 
     @staticmethod
     def create_payment(
@@ -78,6 +203,10 @@ class PaymentService:
             if not order:
                 raise NotFoundError("Order not found")
 
+            resolved_amount = PaymentService._resolve_order_payment_amount(
+                order, amount
+            )
+
             # Accept both PENDING and PENDING_PAYMENT for backward compatibility
             if order.status not in (OrderStatus.PENDING, OrderStatus.PENDING_PAYMENT):
                 raise ValidationError(
@@ -94,7 +223,7 @@ class PaymentService:
             # Create payment record
             payment = Payment(
                 order_id=order_id,
-                amount=amount,
+                amount=resolved_amount,
                 currency=currency,
                 method=method,
                 status=PaymentStatus.PENDING,
@@ -117,6 +246,10 @@ class PaymentService:
     @staticmethod
     def process_payment(payment_id: str, payment_data: Dict[str, Any]) -> Payment:
         """Process payment with Paystack"""
+        resolved_id = payment_id
+        gateway_response: Dict[str, Any] = {}
+        result_status: Optional[PaymentStatus] = None
+
         with session_scope() as session:
             payment = session.query(Payment).get(payment_id)
             if not payment:
@@ -126,7 +259,6 @@ class PaymentService:
                 raise ValidationError("Payment is not in pending status")
 
             try:
-                # Process with Paystack
                 if payment.method == PaymentMethod.CARD:
                     result = PaymentService._process_paystack_payment(
                         payment, payment_data
@@ -140,127 +272,90 @@ class PaymentService:
                         f"Unsupported payment method: {payment.method}"
                     )
 
-                # Update payment status
                 payment.status = result["status"]
-                payment.transaction_id = result.get("transaction_id")
+                if result.get("transaction_id"):
+                    payment.transaction_id = result["transaction_id"]
                 payment.gateway_response = result.get("gateway_response", {})
+                result_status = result["status"]
+                gateway_response = payment.gateway_response
+                resolved_id = payment.id
 
                 if result["status"] == PaymentStatus.COMPLETED:
                     payment.paid_at = datetime.utcnow()
-
-                # Update order status to processing after payment succeeds
-                order = session.query(Order).get(payment.order_id)
-                if order:
-                    # Move from PENDING_PAYMENT (or PENDING for backward compat) to PROCESSING
-                    if order.status in (
-                        OrderStatus.PENDING,
-                        OrderStatus.PENDING_PAYMENT,
-                    ):
-                        order.status = OrderStatus.PROCESSING
-
-                        # Reduce inventory for all order items
-                        from app.products.services import ProductService
-
-                        ProductService.reduce_inventory_for_order(order.items)
-
-                        # Create transaction record
-                        transaction = Transaction(
-                            user_id=order.buyer.user_id,
-                            seller_id=order.items[0].product.seller_id
-                            if order.items
-                            else None,
-                            amount=payment.amount,
-                            type="debit",
-                            reference=f"PAY_{payment.id}",
-                            status="completed",
-                            payment_metadata=result.get("gateway_response", {}),
-                        )
-                        session.add(transaction)
+                elif result["status"] == PaymentStatus.FAILED:
+                    PaymentService._send_payment_notifications(
+                        payment, PaymentStatus.FAILED
+                    )
 
                 session.flush()
-
-                # Send notifications
-                PaymentService._send_payment_notifications(payment, result["status"])
-
-                # Queue async real-time event (non-blocking)
-                try:
-                    from app.realtime.event_manager import EventManager
-
-                    EventManager.emit_to_order(
-                        payment.order_id,
-                        "payment_confirmed",
-                        {
-                            "payment_id": payment.id,
-                            "order_id": payment.order_id,
-                            "user_id": payment.order.buyer.user_id
-                            if payment.order and payment.order.buyer
-                            else None,
-                            "amount": payment.amount,
-                            "status": payment.status.value,
-                            "transaction_id": payment.transaction_id,
-                            "metadata": {
-                                "method": payment.method.value
-                                if payment.method
-                                else None,
-                                "order_number": payment.order.order_number
-                                if payment.order
-                                else None,
-                            },
-                        },
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to queue payment_confirmed event: {e}")
-
-                return payment
 
             except Exception as e:
                 logger.error(f"Payment processing failed: {str(e)}")
                 payment.status = PaymentStatus.FAILED
                 payment.gateway_response = {"error": str(e)}
                 session.flush()
-
-                # Send failure notification
                 PaymentService._send_payment_notifications(
                     payment, PaymentStatus.FAILED
                 )
                 raise APIError("Payment processing failed", 500)
 
+        if result_status == PaymentStatus.COMPLETED:
+            PaymentService.complete_payment(
+                payment_id=resolved_id,
+                gateway_response=gateway_response,
+            )
+
+        return PaymentService.get_payment(resolved_id)
+
     @staticmethod
     def verify_payment(payment_id: str) -> Dict[str, Any]:
-        """Verify payment status with Paystack"""
+        """Verify payment status with Paystack and persist success when confirmed."""
         with session_scope() as session:
             payment = session.query(Payment).get(payment_id)
             if not payment:
                 raise NotFoundError("Payment not found")
 
+            if payment.status == PaymentStatus.COMPLETED:
+                return {
+                    "verified": True,
+                    "amount": payment.amount,
+                    "gateway_response": payment.gateway_response,
+                    "already_completed": True,
+                }
+
             if not payment.transaction_id:
                 raise ValidationError("No transaction ID to verify")
 
-            try:
-                # Verify with Paystack
-                response = requests.get(
-                    f"{PaymentService.PAYSTACK_BASE_URL}/transaction/verify/{payment.transaction_id}",
-                    headers={
-                        "Authorization": f"Bearer {PaymentService.PAYSTACK_SECRET_KEY}"
-                    },
-                )
+            transaction_id = payment.transaction_id
 
-                if response.status_code == 200:
-                    data = response.json()
-                    if data["status"] and data["data"]["status"] == "success":
-                        return {
-                            "verified": True,
-                            "amount": data["data"]["amount"] / 100,  # Convert from kobo
-                            "gateway_response": data,
-                        }
-                    else:
-                        return {"verified": False, "gateway_response": data}
-                else:
-                    raise APIError("Failed to verify payment with gateway", 500)
+        try:
+            response = requests.get(
+                f"{PaymentService.PAYSTACK_BASE_URL}/transaction/verify/{transaction_id}",
+                headers={
+                    "Authorization": f"Bearer {PaymentService.PAYSTACK_SECRET_KEY}"
+                },
+            )
 
-            except Exception as e:
-                logger.error(f"Payment verification failed: {str(e)}")
-                raise APIError("Payment verification failed", 500)
+            if response.status_code == 200:
+                data = response.json()
+                if data["status"] and data["data"]["status"] == "success":
+                    PaymentService.complete_payment(
+                        payment_id=payment_id,
+                        gateway_response=data,
+                    )
+                    return {
+                        "verified": True,
+                        "amount": data["data"]["amount"] / 100,
+                        "gateway_response": data,
+                    }
+                return {"verified": False, "gateway_response": data}
+            raise APIError("Failed to verify payment with gateway", 500)
+
+        except APIError:
+            raise
+        except Exception as e:
+            logger.error(f"Payment verification failed: {str(e)}")
+            raise APIError("Payment verification failed", 500)
 
     @staticmethod
     def get_payment(payment_id: str) -> Payment:
@@ -558,79 +653,13 @@ class PaymentService:
     @staticmethod
     def _handle_successful_charge(data: Dict[str, Any]) -> bool:
         """Handle successful charge webhook"""
-        try:
-            reference = data.get("reference")
-            if not reference:
-                return False
-
-            with session_scope() as session:
-                payment = (
-                    session.query(Payment).filter_by(transaction_id=reference).first()
-                )
-                if not payment:
-                    logger.warning(f"Payment not found for reference: {reference}")
-                    return False
-
-                payment.status = PaymentStatus.COMPLETED
-                payment.paid_at = datetime.utcnow()
-                payment.gateway_response = data
-
-                # Update order status to processing after payment succeeds
-                order = session.query(Order).get(payment.order_id)
-                if order:
-                    # Move from PENDING_PAYMENT (or PENDING for backward compat) to PROCESSING
-                    if order.status in (
-                        OrderStatus.PENDING,
-                        OrderStatus.PENDING_PAYMENT,
-                    ):
-                        order.status = OrderStatus.PROCESSING
-
-                    # Reduce inventory for all order items
-                    from app.products.services import ProductService
-
-                    ProductService.reduce_inventory_for_order(order.items)
-
-                session.flush()
-
-                # Send notifications
-                PaymentService._send_payment_notifications(
-                    payment, PaymentStatus.COMPLETED
-                )
-
-                # Queue async real-time event (non-blocking)
-                try:
-                    from app.realtime.event_manager import EventManager
-
-                    EventManager.emit_to_order(
-                        payment.order_id,
-                        "payment_confirmed",
-                        {
-                            "payment_id": payment.id,
-                            "order_id": payment.order_id,
-                            "user_id": payment.order.buyer.user_id
-                            if payment.order and payment.order.buyer
-                            else None,
-                            "amount": payment.amount,
-                            "status": payment.status.value,
-                            "transaction_id": payment.transaction_id,
-                            "metadata": {
-                                "method": payment.method.value
-                                if payment.method
-                                else None,
-                                "order_number": payment.order.order_number
-                                if payment.order
-                                else None,
-                            },
-                        },
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to queue payment_confirmed event: {e}")
-
-                return True
-
-        except Exception as e:
-            logger.error(f"Failed to handle successful charge: {str(e)}")
+        reference = data.get("reference")
+        if not reference:
             return False
+        return PaymentService.complete_payment(
+            reference=reference,
+            gateway_response=data,
+        )
 
     @staticmethod
     def _handle_failed_charge(data: Dict[str, Any]) -> bool:

@@ -2,6 +2,7 @@
 from flask_smorest import Blueprint, abort
 from flask.views import MethodView
 from flask_login import login_required, current_user
+from flask import jsonify, make_response
 
 # project imports
 from app.libs.schemas import PaginationQueryArgs
@@ -35,16 +36,25 @@ class OrderList(MethodView):
         return OrderService.get_user_orders(current_user.buyer_account.id)
 
     @login_required
+    @buyer_required
     @bp.arguments(OrderCreateSchema)
-    @bp.response(201, OrderSchema)
     def post(self, order_data):
-        """Create new order from cart"""
-        return OrderService.create_order(
-            order_data["cart_id"],
-            current_user.buyer_account.id,
-            order_data["shipping_address"],
-            order_data.get("payment_method", "card"),
+        """Create new order from cart (deprecated — use POST /cart/checkout)."""
+        response = make_response(
+            jsonify(
+                {
+                    "message": (
+                        "POST /orders is deprecated. "
+                        "Use POST /cart/checkout to create an order from the active cart."
+                    ),
+                    "replacement": "/api/v1/cart/checkout",
+                }
+            ),
+            410,
         )
+        response.headers["Deprecation"] = "true"
+        response.headers["Link"] = '</api/v1/cart/checkout>; rel="successor-version"'
+        return response
 
 
 @bp.route("/<order_id>/pay")

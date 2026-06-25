@@ -52,9 +52,25 @@ class CheckoutSchema(Schema):
     shipping_address = fields.Dict(required=True)
     billing_address = fields.Dict(required=True)
     notes = fields.Str(allow_none=True)
+    use_saved_address = fields.Bool(missing=False)
     idempotency_key = fields.Str(
         allow_none=True
     )  # Optional idempotency key for retry safety
+
+
+class CheckoutResponseSchema(Schema):
+    """Full order summary returned after checkout."""
+
+    order_id = fields.Str(required=True)
+    order_number = fields.Str(allow_none=True)
+    status = fields.Str(required=True)
+    subtotal = fields.Float(required=True)
+    shipping_fee = fields.Float(required=True)
+    tax = fields.Float(required=True)
+    discount = fields.Float(required=True)
+    total = fields.Float(required=True)
+    shipping_address = fields.Dict(required=True)
+    message = fields.Str()
 
 
 class CartSummarySchema(Schema):
