@@ -54,3 +54,21 @@ class TestCheckoutAuthSmoke:
             },
         )
         assert response.status_code == 401
+
+
+class TestWalletAuthSmoke:
+    def test_wallet_requires_auth(self, client):
+        response = client.get("/api/v1/wallet/")
+        assert response.status_code == 401
+
+
+class TestOrderCancelAuthSmoke:
+    def test_cancel_requires_auth(self, client):
+        response = client.post("/api/v1/orders/ORD_TEST01/cancel", json={})
+        assert response.status_code == 401
+
+
+class TestOrderTrackAuthSmoke:
+    def test_track_requires_auth(self, client):
+        response = client.get("/api/v1/orders/ORD_TEST01/track")
+        assert response.status_code == 401

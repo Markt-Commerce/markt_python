@@ -52,6 +52,12 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
         "Notification", back_populates="user", lazy="dynamic"
     )
     transactions = db.relationship("Transaction", back_populates="user", lazy="dynamic")
+    wallet_accounts = db.relationship(
+        "WalletAccount", back_populates="user", lazy="dynamic"
+    )
+    withdrawal_requests = db.relationship(
+        "WithdrawalRequest", back_populates="user", lazy="dynamic"
+    )
     posts = db.relationship("Post", back_populates="user", lazy="dynamic")
     post_likes = db.relationship("PostLike", back_populates="user", lazy="dynamic")
     post_comments = db.relationship(

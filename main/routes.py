@@ -23,6 +23,7 @@ def register_blueprints(app, api):
         "payments",
         "notifications",
         "health",
+        "wallet",
     ]
 
     for module in modules:
