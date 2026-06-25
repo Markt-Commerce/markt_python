@@ -8,6 +8,7 @@ def pytest_configure():
     import app.cart.models  # noqa: F401
     import app.chats.models  # noqa: F401
     import app.deliveries.models  # noqa: F401
+    import app.media.models  # noqa: F401
     import app.notifications.models  # noqa: F401
     import app.orders.models  # noqa: F401
     import app.payments.models  # noqa: F401

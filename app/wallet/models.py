@@ -13,8 +13,16 @@ class WalletEntryType(Enum):
 class WalletReferenceType(Enum):
     ORDER_SETTLEMENT = "order_settlement"
     ORDER_REFUND = "order_refund"
+    ORDER_PAYMENT = "order_payment"
+    WALLET_TOPUP = "wallet_topup"
     WITHDRAWAL = "withdrawal"
     ADJUSTMENT = "adjustment"
+
+
+class TopUpStatus(Enum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 class WithdrawalStatus(Enum):
@@ -78,3 +86,19 @@ class WithdrawalRequest(BaseModel, UniqueIdMixin):
     failure_reason = db.Column(db.String(255), nullable=True)
 
     user = db.relationship("User", back_populates="withdrawal_requests")
+
+
+class WalletTopUp(BaseModel, UniqueIdMixin):
+    __tablename__ = "wallet_topups"
+    id_prefix = "TOP_"
+
+    id = db.Column(db.String(12), primary_key=True, default=None)
+    user_id = db.Column(db.String(12), db.ForeignKey("users.id"), nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    currency = db.Column(db.String(3), default="NGN", nullable=False)
+    status = db.Column(
+        db.Enum(TopUpStatus), default=TopUpStatus.PENDING, nullable=False
+    )
+    paystack_reference = db.Column(db.String(100), unique=True, nullable=True)
+
+    user = db.relationship("User", back_populates="wallet_topups")

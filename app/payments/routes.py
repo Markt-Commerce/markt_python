@@ -100,12 +100,15 @@ class PaystackWebhook(MethodView):
                 abort(400, message="Missing webhook signature")
 
             # Get webhook payload
+            raw_body = request.get_data()
             payload = request.get_json()
             if not payload:
                 abort(400, message="Invalid webhook payload")
 
             # Process webhook
-            success = PaymentService.handle_webhook(payload, signature)
+            success = PaymentService.handle_webhook(
+                payload, signature, raw_body=raw_body
+            )
 
             if success:
                 return jsonify({"status": "success"}), 200

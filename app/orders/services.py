@@ -24,7 +24,15 @@ from app.users.models import Buyer
 from app.products.services import ProductService
 
 # app imports
-from .models import Order, OrderStatus, OrderItem, ShippingAddress, Shipment
+from .models import (
+    Order,
+    OrderStatus,
+    OrderItem,
+    ShippingAddress,
+    Shipment,
+    OrderReturn,
+    OrderReturnStatus,
+)
 from app.orders.shipping import (
     normalize_shipping_address,
     shipping_address_to_model_kwargs,
@@ -38,6 +46,11 @@ BUYER_CANCELLABLE_STATUSES = {
     OrderStatus.PENDING,
     OrderStatus.PROCESSING,
     OrderStatus.READY_FOR_DELIVERY,
+}
+
+RETURNABLE_ORDER_STATUSES = {
+    OrderStatus.SHIPPED,
+    OrderStatus.DELIVERED,
 }
 
 
@@ -415,6 +428,146 @@ class OrderService:
                 else None,
                 "delivery": delivery_info,
             }
+
+    @staticmethod
+    def request_return(order_id: str, buyer_id: int, reason: str) -> OrderReturn:
+        """Buyer requests a return for a shipped or delivered order."""
+        if not reason or not reason.strip():
+            raise ValidationError("Return reason is required")
+
+        with session_scope() as session:
+            order = (
+                session.query(Order).options(db.joinedload(Order.items)).get(order_id)
+            )
+            if not order:
+                raise NotFoundError("Order not found")
+            if order.buyer_id != buyer_id:
+                raise ForbiddenError("You can only request returns for your own orders")
+            if order.status not in RETURNABLE_ORDER_STATUSES:
+                raise ValidationError(
+                    f"Returns are not available for orders in '{order.status.value}' status"
+                )
+
+            existing = (
+                session.query(OrderReturn)
+                .filter(
+                    OrderReturn.order_id == order_id,
+                    OrderReturn.status.in_(
+                        [OrderReturnStatus.REQUESTED, OrderReturnStatus.APPROVED]
+                    ),
+                )
+                .first()
+            )
+            if existing:
+                raise ConflictError("A return request is already open for this order")
+
+            paid_amount = OrderService._get_completed_payment_amount(order)
+            order_return = OrderReturn(
+                order_id=order_id,
+                buyer_id=buyer_id,
+                reason=reason.strip(),
+                status=OrderReturnStatus.REQUESTED,
+                refund_amount=paid_amount if paid_amount > 0 else order.total,
+            )
+            session.add(order_return)
+            session.flush()
+            return order_return
+
+    @staticmethod
+    def approve_return(
+        return_id: str, seller_id: int, seller_notes: Optional[str] = None
+    ):
+        """Seller approves a return and refunds the buyer to wallet."""
+        from app.wallet.services import WalletService
+
+        refund_amount = 0.0
+        buyer_user_id = None
+        order_id = None
+
+        with session_scope() as session:
+            order_return = (
+                session.query(OrderReturn)
+                .options(
+                    db.joinedload(OrderReturn.order).joinedload(Order.items),
+                    db.joinedload(OrderReturn.order).joinedload(Order.buyer),
+                    db.joinedload(OrderReturn.order).joinedload(Order.payments),
+                )
+                .get(return_id)
+            )
+            if not order_return:
+                raise NotFoundError("Return request not found")
+            if order_return.status != OrderReturnStatus.REQUESTED:
+                raise ConflictError("Return request is not pending approval")
+
+            order = order_return.order
+            is_seller = any(item.seller_id == seller_id for item in order.items)
+            if not is_seller:
+                raise ForbiddenError("Only a seller on this order can approve returns")
+
+            refund_amount = (
+                order_return.refund_amount
+                or OrderService._get_completed_payment_amount(order)
+            )
+            if refund_amount <= 0:
+                refund_amount = order.total or 0.0
+
+            buyer_user_id = order.buyer.user_id if order.buyer else None
+            order_id = order.id
+
+            order_return.status = OrderReturnStatus.REFUNDED
+            order_return.seller_notes = seller_notes
+            order.status = OrderStatus.RETURNED
+
+            for item in order.items:
+                if item.status != OrderItem.Status.CANCELLED:
+                    item.status = OrderItem.Status.CANCELLED
+
+            for payment in order.payments or []:
+                if payment.status == PaymentStatus.COMPLETED:
+                    payment.status = PaymentStatus.REFUNDED
+
+            session.flush()
+
+        if refund_amount > 0 and buyer_user_id:
+            from app.wallet.models import WalletReferenceType
+
+            WalletService.credit(
+                buyer_user_id,
+                refund_amount,
+                WalletReferenceType.ORDER_REFUND,
+                return_id,
+                description=f"Return refund for order {order_id}",
+                idempotency_key=f"return-refund:{return_id}",
+            )
+
+        return order_return
+
+    @staticmethod
+    def reject_return(
+        return_id: str, seller_id: int, seller_notes: Optional[str] = None
+    ):
+        """Seller rejects a return request."""
+        with session_scope() as session:
+            order_return = (
+                session.query(OrderReturn)
+                .options(db.joinedload(OrderReturn.order).joinedload(Order.items))
+                .get(return_id)
+            )
+            if not order_return:
+                raise NotFoundError("Return request not found")
+            if order_return.status != OrderReturnStatus.REQUESTED:
+                raise ConflictError("Return request is not pending approval")
+
+            is_seller = any(
+                item.seller_id == seller_id for item in order_return.order.items
+            )
+            if not is_seller:
+                raise ForbiddenError("Only a seller on this order can reject returns")
+
+            order_return.status = OrderReturnStatus.REJECTED
+            order_return.seller_notes = seller_notes
+            session.flush()
+            return order_return
 
     # TODO: Add order history tracking
     # TODO: Add refund processing

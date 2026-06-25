@@ -13,6 +13,7 @@ from app.wallet.services import DEFAULT_COMMISSION_RATE, WalletService
 def test_settle_order_item_calculates_net_after_commission():
     item = SimpleNamespace(
         id=42,
+        order_id="ORD_1",
         price=10000.0,
         quantity=2,
         seller=SimpleNamespace(user_id="USR_SELLER1"),
@@ -20,11 +21,17 @@ def test_settle_order_item_calculates_net_after_commission():
     gross = item.price * item.quantity
     expected_net = round(gross * (1 - DEFAULT_COMMISSION_RATE), 2)
 
-    with patch.object(WalletService, "credit") as mock_credit:
-        mock_credit.return_value = MagicMock()
-        WalletService.settle_order_item(item)
-        mock_credit.assert_called_once()
-        assert mock_credit.call_args[0][1] == expected_net
+    order = SimpleNamespace(paystack_split_used=False)
+    session = MagicMock()
+    session.query.return_value.get.return_value = order
+
+    with patch("app.wallet.services.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        with patch.object(WalletService, "credit") as mock_credit:
+            mock_credit.return_value = MagicMock()
+            WalletService.settle_order_item(item)
+            mock_credit.assert_called_once()
+            assert mock_credit.call_args[0][1] == expected_net
 
 
 def test_credit_rejects_non_positive_amount():
