@@ -36,6 +36,8 @@ class Order(BaseModel, UniqueIdMixin):
     idempotency_key = db.Column(
         db.String(100), unique=True, nullable=True
     )  # Prevent duplicate orders
+    cancelled_at = db.Column(db.DateTime, nullable=True)
+    cancel_reason = db.Column(db.Text, nullable=True)
     # Relationships
     buyer = db.relationship("Buyer", back_populates="orders")
     items = db.relationship(
