@@ -946,6 +946,44 @@ class ProductService:
             raise APIError(f"Inventory reduction failed: {str(e)}", 500)
 
     @staticmethod
+    def restore_inventory_for_order(order_items: List[OrderItem]) -> bool:
+        """Restore inventory when a paid order is cancelled."""
+        try:
+            with session_scope() as session:
+                for item in order_items:
+                    if item.variant_id:
+                        inventory = (
+                            session.query(ProductInventory)
+                            .filter_by(
+                                product_id=item.product_id, variant_id=item.variant_id
+                            )
+                            .first()
+                        )
+                        if inventory:
+                            inventory.quantity += item.quantity
+                        else:
+                            inventory = ProductInventory(
+                                product_id=item.product_id,
+                                variant_id=item.variant_id,
+                                quantity=item.quantity,
+                            )
+                            session.add(inventory)
+                    else:
+                        product = session.query(Product).get(item.product_id)
+                        if not product:
+                            continue
+                        product.stock += item.quantity
+                        if product.status == Product.Status.OUT_OF_STOCK:
+                            product.status = Product.Status.ACTIVE
+
+                session.flush()
+                logger.info("Successfully restored inventory for cancelled order")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to restore inventory: {str(e)}")
+            raise APIError(f"Inventory restoration failed: {str(e)}", 500)
+
+    @staticmethod
     def check_inventory_availability(order_items: List[OrderItem]) -> bool:
         """Check if all order items have sufficient inventory"""
         try:

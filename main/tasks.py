@@ -23,8 +23,9 @@ def create_celery_app(app: Flask = None) -> Celery:
             "app.socials.tasks",
             "app.notifications.tasks",
             "app.media.tasks",
-            "app.realtime.tasks",  # New real-time tasks module
-            # add more task modules here
+            "app.realtime.tasks",
+            "app.orders.tasks",
+            "app.wallet.tasks",
         ]
     )
 

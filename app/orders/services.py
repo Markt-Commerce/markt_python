@@ -1,7 +1,7 @@
 # python imports
 from datetime import datetime, timedelta
 import logging
-import requests
+from typing import Any, Dict, Optional
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -21,9 +21,18 @@ from app.cart.models import Cart, CartItem
 from app.products.models import Product
 from app.payments.models import Payment, PaymentStatus
 from app.users.models import Buyer
+from app.products.services import ProductService
 
 # app imports
-from .models import Order, OrderStatus, OrderItem, ShippingAddress
+from .models import (
+    Order,
+    OrderStatus,
+    OrderItem,
+    ShippingAddress,
+    Shipment,
+    OrderReturn,
+    OrderReturnStatus,
+)
 from app.orders.shipping import (
     normalize_shipping_address,
     shipping_address_to_model_kwargs,
@@ -31,6 +40,18 @@ from app.orders.shipping import (
 
 
 logger = logging.getLogger(__name__)
+
+BUYER_CANCELLABLE_STATUSES = {
+    OrderStatus.PENDING_PAYMENT,
+    OrderStatus.PENDING,
+    OrderStatus.PROCESSING,
+    OrderStatus.READY_FOR_DELIVERY,
+}
+
+RETURNABLE_ORDER_STATUSES = {
+    OrderStatus.SHIPPED,
+    OrderStatus.DELIVERED,
+}
 
 
 class OrderService:
@@ -201,6 +222,353 @@ class OrderService:
 
             return order
 
+    @staticmethod
+    def _get_completed_payment_amount(order: Order) -> float:
+        for payment in order.payments or []:
+            if payment.status == PaymentStatus.COMPLETED:
+                return payment.amount
+        return 0.0
+
+    @staticmethod
+    def cancel_order(order_id: str, buyer_id: int, reason: Optional[str] = None):
+        """Cancel an order on behalf of the buyer."""
+        from app.wallet.services import WalletService
+
+        paid_amount = 0.0
+        buyer_user_id = None
+        order_items = []
+
+        with session_scope() as session:
+            order = (
+                session.query(Order)
+                .options(
+                    db.joinedload(Order.items),
+                    db.joinedload(Order.payments),
+                    db.joinedload(Order.buyer),
+                )
+                .get(order_id)
+            )
+
+            if not order:
+                raise NotFoundError("Order not found")
+            if order.buyer_id != buyer_id:
+                raise ForbiddenError("You can only cancel your own orders")
+            if order.status == OrderStatus.CANCELLED:
+                raise ConflictError("Order is already cancelled")
+            if order.status not in BUYER_CANCELLABLE_STATUSES:
+                raise ValidationError(
+                    f"Order in status '{order.status.value}' cannot be cancelled"
+                )
+
+            paid_amount = OrderService._get_completed_payment_amount(order)
+            buyer_user_id = order.buyer.user_id if order.buyer else None
+            order_items = list(order.items)
+
+            order.status = OrderStatus.CANCELLED
+            order.cancelled_at = datetime.utcnow()
+            order.cancel_reason = reason
+
+            for item in order.items:
+                if item.status != OrderItem.Status.CANCELLED:
+                    item.status = OrderItem.Status.CANCELLED
+
+            if paid_amount > 0:
+                for payment in order.payments:
+                    if payment.status == PaymentStatus.COMPLETED:
+                        payment.status = PaymentStatus.REFUNDED
+
+            session.flush()
+
+        if paid_amount > 0:
+            ProductService.restore_inventory_for_order(order_items)
+            if buyer_user_id:
+                WalletService.refund_order_to_wallet(
+                    buyer_user_id, order_id, paid_amount
+                )
+
+        try:
+            from app.realtime.event_manager import EventManager
+
+            EventManager.emit_to_order(
+                order_id,
+                "order_status_changed",
+                {
+                    "order_id": order_id,
+                    "user_id": buyer_user_id,
+                    "status": OrderStatus.CANCELLED.value,
+                    "metadata": {"cancel_reason": reason},
+                },
+            )
+        except Exception as e:
+            logger.warning(f"Failed to queue order_status_changed event: {e}")
+
+        return OrderService.get_order(order_id)
+
+    @staticmethod
+    def track_order(order_id: str, user_id: str) -> Dict[str, Any]:
+        """Return order tracking timeline for buyer or participating seller."""
+        from app.deliveries.models import DeliveryOrderAssignment, AssignmentStatus
+
+        with session_scope() as session:
+            order = (
+                session.query(Order)
+                .options(
+                    db.joinedload(Order.items).joinedload(OrderItem.seller),
+                    db.joinedload(Order.shipping_address),
+                    db.joinedload(Order.shipments),
+                    db.joinedload(Order.payments),
+                    db.joinedload(Order.buyer),
+                )
+                .get(order_id)
+            )
+
+            if not order:
+                raise NotFoundError("Order not found")
+
+            is_buyer = order.buyer and order.buyer.user_id == user_id
+            is_seller = any(
+                item.seller and item.seller.user_id == user_id for item in order.items
+            )
+            if not is_buyer and not is_seller:
+                raise ForbiddenError("You do not have access to track this order")
+
+            assignment = (
+                session.query(DeliveryOrderAssignment)
+                .filter_by(order_id=order_id)
+                .order_by(DeliveryOrderAssignment.assigned_at.desc())
+                .first()
+            )
+
+            latest_payment = None
+            for payment in sorted(
+                order.payments or [], key=lambda p: p.created_at or datetime.min
+            ):
+                if payment.status == PaymentStatus.COMPLETED:
+                    latest_payment = payment
+
+            timeline = [
+                {
+                    "status": "created",
+                    "label": "Order placed",
+                    "timestamp": order.created_at.isoformat()
+                    if order.created_at
+                    else None,
+                }
+            ]
+            if latest_payment and latest_payment.paid_at:
+                timeline.append(
+                    {
+                        "status": "paid",
+                        "label": "Payment confirmed",
+                        "timestamp": latest_payment.paid_at.isoformat(),
+                    }
+                )
+            if order.cancelled_at:
+                timeline.append(
+                    {
+                        "status": "cancelled",
+                        "label": "Order cancelled",
+                        "timestamp": order.cancelled_at.isoformat(),
+                    }
+                )
+            elif order.status == OrderStatus.DELIVERED:
+                timeline.append(
+                    {
+                        "status": "delivered",
+                        "label": "Delivered",
+                        "timestamp": order.updated_at.isoformat()
+                        if order.updated_at
+                        else None,
+                    }
+                )
+
+            shipment = order.shipments[0] if order.shipments else None
+            delivery_info = None
+            if assignment and assignment.status == AssignmentStatus.ACCEPTED:
+                delivery_info = {
+                    "assignment_id": assignment.assignment_id,
+                    "status": assignment.status.value,
+                    "logistical_status": assignment.logistical_status.value
+                    if assignment.logistical_status
+                    else None,
+                    "assigned_at": assignment.assigned_at.isoformat()
+                    if assignment.assigned_at
+                    else None,
+                }
+
+            return {
+                "order_id": order.id,
+                "order_number": order.order_number,
+                "status": order.status.value,
+                "timeline": timeline,
+                "shipping_address": order.shipping_address_dict,
+                "items": [
+                    {
+                        "id": item.id,
+                        "product_id": item.product_id,
+                        "quantity": item.quantity,
+                        "status": item.status.value,
+                        "seller_id": item.seller_id,
+                    }
+                    for item in order.items
+                ],
+                "shipment": {
+                    "carrier": shipment.carrier,
+                    "tracking_number": shipment.tracking_number,
+                    "tracking_url": shipment.tracking_url,
+                    "status": shipment.status,
+                    "shipped_at": shipment.shipped_at.isoformat()
+                    if shipment and shipment.shipped_at
+                    else None,
+                    "delivered_at": shipment.delivered_at.isoformat()
+                    if shipment and shipment.delivered_at
+                    else None,
+                }
+                if shipment
+                else None,
+                "delivery": delivery_info,
+            }
+
+    @staticmethod
+    def request_return(order_id: str, buyer_id: int, reason: str) -> OrderReturn:
+        """Buyer requests a return for a shipped or delivered order."""
+        if not reason or not reason.strip():
+            raise ValidationError("Return reason is required")
+
+        with session_scope() as session:
+            order = (
+                session.query(Order).options(db.joinedload(Order.items)).get(order_id)
+            )
+            if not order:
+                raise NotFoundError("Order not found")
+            if order.buyer_id != buyer_id:
+                raise ForbiddenError("You can only request returns for your own orders")
+            if order.status not in RETURNABLE_ORDER_STATUSES:
+                raise ValidationError(
+                    f"Returns are not available for orders in '{order.status.value}' status"
+                )
+
+            existing = (
+                session.query(OrderReturn)
+                .filter(
+                    OrderReturn.order_id == order_id,
+                    OrderReturn.status.in_(
+                        [OrderReturnStatus.REQUESTED, OrderReturnStatus.APPROVED]
+                    ),
+                )
+                .first()
+            )
+            if existing:
+                raise ConflictError("A return request is already open for this order")
+
+            paid_amount = OrderService._get_completed_payment_amount(order)
+            order_return = OrderReturn(
+                order_id=order_id,
+                buyer_id=buyer_id,
+                reason=reason.strip(),
+                status=OrderReturnStatus.REQUESTED,
+                refund_amount=paid_amount if paid_amount > 0 else order.total,
+            )
+            session.add(order_return)
+            session.flush()
+            return order_return
+
+    @staticmethod
+    def approve_return(
+        return_id: str, seller_id: int, seller_notes: Optional[str] = None
+    ):
+        """Seller approves a return and refunds the buyer to wallet."""
+        from app.wallet.services import WalletService
+
+        refund_amount = 0.0
+        buyer_user_id = None
+        order_id = None
+
+        with session_scope() as session:
+            order_return = (
+                session.query(OrderReturn)
+                .options(
+                    db.joinedload(OrderReturn.order).joinedload(Order.items),
+                    db.joinedload(OrderReturn.order).joinedload(Order.buyer),
+                    db.joinedload(OrderReturn.order).joinedload(Order.payments),
+                )
+                .get(return_id)
+            )
+            if not order_return:
+                raise NotFoundError("Return request not found")
+            if order_return.status != OrderReturnStatus.REQUESTED:
+                raise ConflictError("Return request is not pending approval")
+
+            order = order_return.order
+            is_seller = any(item.seller_id == seller_id for item in order.items)
+            if not is_seller:
+                raise ForbiddenError("Only a seller on this order can approve returns")
+
+            refund_amount = (
+                order_return.refund_amount
+                or OrderService._get_completed_payment_amount(order)
+            )
+            if refund_amount <= 0:
+                refund_amount = order.total or 0.0
+
+            buyer_user_id = order.buyer.user_id if order.buyer else None
+            order_id = order.id
+
+            order_return.status = OrderReturnStatus.REFUNDED
+            order_return.seller_notes = seller_notes
+            order.status = OrderStatus.RETURNED
+
+            for item in order.items:
+                if item.status != OrderItem.Status.CANCELLED:
+                    item.status = OrderItem.Status.CANCELLED
+
+            for payment in order.payments or []:
+                if payment.status == PaymentStatus.COMPLETED:
+                    payment.status = PaymentStatus.REFUNDED
+
+            session.flush()
+
+        if refund_amount > 0 and buyer_user_id:
+            from app.wallet.models import WalletReferenceType
+
+            WalletService.credit(
+                buyer_user_id,
+                refund_amount,
+                WalletReferenceType.ORDER_REFUND,
+                return_id,
+                description=f"Return refund for order {order_id}",
+                idempotency_key=f"return-refund:{return_id}",
+            )
+
+        return order_return
+
+    @staticmethod
+    def reject_return(
+        return_id: str, seller_id: int, seller_notes: Optional[str] = None
+    ):
+        """Seller rejects a return request."""
+        with session_scope() as session:
+            order_return = (
+                session.query(OrderReturn)
+                .options(db.joinedload(OrderReturn.order).joinedload(Order.items))
+                .get(return_id)
+            )
+            if not order_return:
+                raise NotFoundError("Return request not found")
+            if order_return.status != OrderReturnStatus.REQUESTED:
+                raise ConflictError("Return request is not pending approval")
+
+            is_seller = any(
+                item.seller_id == seller_id for item in order_return.order.items
+            )
+            if not is_seller:
+                raise ForbiddenError("Only a seller on this order can reject returns")
+
+            order_return.status = OrderReturnStatus.REJECTED
+            order_return.seller_notes = seller_notes
+            session.flush()
+            return order_return
+
     # TODO: Add order history tracking
     # TODO: Add refund processing
 
@@ -241,6 +609,7 @@ class SellerOrderService:
         with session_scope() as session:
             item = (
                 session.query(OrderItem)
+                .options(db.joinedload(OrderItem.seller))
                 .filter_by(id=order_item_id, seller_id=seller_id)
                 .first()
             )
@@ -269,11 +638,14 @@ class SellerOrderService:
 
             item.status = status
 
-            # If all items are delivered, mark order as completed
             if status == OrderItem.Status.DELIVERED:
                 order = session.query(Order).get(item.order_id)
                 if all(i.status == OrderItem.Status.DELIVERED for i in order.items):
                     order.status = OrderStatus.DELIVERED
+
+                from app.wallet.services import WalletService
+
+                WalletService.settle_order_item(item)
 
             return item
 
