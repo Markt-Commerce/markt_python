@@ -24,6 +24,10 @@ from app.users.models import Buyer
 
 # app imports
 from .models import Order, OrderStatus, OrderItem, ShippingAddress
+from app.orders.shipping import (
+    normalize_shipping_address,
+    shipping_address_to_model_kwargs,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -48,16 +52,7 @@ class OrderService:
                     raise ValidationError("Cannot create order from empty cart")
 
                 # Validate shipping address
-                required_fields = ['recipient_name', 'street_address', 'city', 'state', 'postal_code', 'country']
-                for field in required_fields:
-                    if field not in shipping_address or not shipping_address[field]:
-                        raise ValidationError(f"Missing required shipping address field: {field}")
-
-                # Check for longitude and latitude
-                if 'longitude' not in shipping_address or 'latitude' not in shipping_address:
-                    lat, lon = OrderService._get_geocoordinates(shipping_address)
-                    shipping_address['latitude'] = lat
-                    shipping_address['longitude'] = lon
+                shipping_normalized = normalize_shipping_address(shipping_address)
 
                 # Create single order for buyer
                 # Note: This method is deprecated in favor of CartService.checkout_cart()
@@ -73,7 +68,10 @@ class OrderService:
                 session.flush()
 
                 # Create shipping address
-                shipping_address_obj = ShippingAddress(order_id=order.id, **shipping_address)
+                shipping_address_obj = ShippingAddress(
+                    order_id=order.id,
+                    **shipping_address_to_model_kwargs(shipping_normalized),
+                )
                 session.add(shipping_address_obj)
 
                 # Create order items for each product
@@ -103,49 +101,10 @@ class OrderService:
 
     @staticmethod
     def _get_geocoordinates(address_dict):
-        """
-        Get geocoordinates from address using Nominatim API.
-        Returns (latitude, longitude) as floats.
-        If fails, returns (0.0, 0.0)
-        """
-        try:
-            # Construct address string
-            address_parts = [
-                address_dict.get('street_address', ''),
-                address_dict.get('city', ''),
-                address_dict.get('state', ''),
-                address_dict.get('postal_code', ''),
-                address_dict.get('country', '')
-            ]
-            address_str = ', '.join(part for part in address_parts if part)
+        """Backward-compatible wrapper around shared geocoding helper."""
+        from app.orders.shipping import geocode_address
 
-            if not address_str:
-                return 0.0, 0.0
-
-            # Call Nominatim API
-            url = "https://nominatim.openstreetmap.org/search"
-            params = {
-                'q': address_str,
-                'format': 'json',
-                'limit': 1
-            }
-            headers = {
-                'User-Agent': 'Markt-Commerce-OrderService/1.0'
-            }
-
-            response = requests.get(url, params=params, headers=headers, timeout=10)
-            response.raise_for_status()
-
-            data = response.json()
-            if data:
-                lat = float(data[0]['lat'])
-                lon = float(data[0]['lon'])
-                return lat, lon
-            else:
-                return 0.0, 0.0
-        except Exception as e:
-            logger.warning(f"Failed to get geocoordinates: {e}")
-            return 0.0, 0.0
+        return geocode_address(address_dict)
 
     @staticmethod
     def get_user_orders(user_id):
