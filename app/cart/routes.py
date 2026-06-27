@@ -15,6 +15,7 @@ from .schemas import (
     AddToCartSchema,
     UpdateCartItemSchema,
     CheckoutSchema,
+    CheckoutResponseSchema,
     CartSummarySchema,
 )
 
@@ -99,7 +100,7 @@ class Checkout(MethodView):
     @login_required
     @buyer_required
     @bp.arguments(CheckoutSchema)
-    @bp.response(201)
+    @bp.response(201, CheckoutResponseSchema)
     def post(self, checkout_data):
         """Checkout cart and create order"""
         try:
@@ -108,7 +109,18 @@ class Checkout(MethodView):
                 checkout_data,
                 idempotency_key=checkout_data.get("idempotency_key"),
             )
-            return {"order_id": order.id, "message": "Order created successfully"}
+            return {
+                "order_id": order.id,
+                "order_number": order.order_number,
+                "status": order.status.value,
+                "subtotal": order.subtotal,
+                "shipping_fee": order.shipping_fee,
+                "tax": order.tax,
+                "discount": order.discount,
+                "total": order.total,
+                "shipping_address": order.shipping_address_dict,
+                "message": "Order created successfully",
+            }
         except APIError as e:
             abort(e.status_code, message=e.message)
 

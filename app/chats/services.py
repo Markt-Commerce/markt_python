@@ -144,16 +144,56 @@ class ChatService:
         return result
 
     @staticmethod
+    def _user_pair_room_filter(buyer_id: str, seller_id: str):
+        """Match a chat room regardless of which user is stored as buyer or seller."""
+        return db.or_(
+            db.and_(
+                ChatRoom.buyer_id == buyer_id,
+                ChatRoom.seller_id == seller_id,
+            ),
+            db.and_(
+                ChatRoom.buyer_id == seller_id,
+                ChatRoom.seller_id == buyer_id,
+            ),
+        )
+
+    @staticmethod
+    def _find_room_for_user_pair(session, buyer_id: str, seller_id: str):
+        """Return the most recently active room between two users, if any."""
+        return (
+            session.query(ChatRoom)
+            .filter(ChatService._user_pair_room_filter(buyer_id, seller_id))
+            .order_by(
+                ChatRoom.last_message_at.desc().nullslast(),
+                ChatRoom.id.desc(),
+            )
+            .first()
+        )
+
+    @staticmethod
+    def _apply_room_context(
+        room: ChatRoom,
+        product_id: Optional[str],
+        request_id: Optional[str],
+    ) -> None:
+        """Attach product/request context to a room when not already set."""
+        if product_id and room.product_id is None:
+            room.product_id = product_id
+        if request_id and room.request_id is None:
+            room.request_id = request_id
+
+    @staticmethod
     def create_or_get_chat_room(
         buyer_id: str,
         seller_id: str,
         product_id: Optional[str] = None,
         request_id: Optional[str] = None,
     ) -> ChatRoom:
-        """Create or get existing chat room between buyer and seller
+        """Create or get the single chat room between a buyer and seller.
 
-        This method ensures that only one chat room exists between two users
-        for a given product/request, regardless of which user initiated the conversation.
+        One conversation exists per user pair. product_id and request_id are
+        optional context (e.g. opened from a product page) and do not create
+        separate rooms. Product-specific content belongs on messages.
         """
         try:
             if buyer_id == seller_id:
@@ -184,31 +224,15 @@ class ChatService:
                     if not request_obj:
                         raise NotFoundError(f"Request with ID {request_id} not found")
 
-                # Check if room already exists in either direction
-                # (buyer_id=A, seller_id=B) OR (buyer_id=B, seller_id=A)
-                existing_room = (
-                    session.query(ChatRoom)
-                    .filter(
-                        db.or_(
-                            db.and_(
-                                ChatRoom.buyer_id == buyer_id,
-                                ChatRoom.seller_id == seller_id,
-                            ),
-                            db.and_(
-                                ChatRoom.buyer_id == seller_id,
-                                ChatRoom.seller_id == buyer_id,
-                            ),
-                        ),
-                        ChatRoom.product_id == product_id,
-                        ChatRoom.request_id == request_id,
-                    )
-                    .first()
+                existing_room = ChatService._find_room_for_user_pair(
+                    session, buyer_id, seller_id
                 )
-
                 if existing_room:
+                    ChatService._apply_room_context(
+                        existing_room, product_id, request_id
+                    )
                     return existing_room
 
-                # Create new room
                 room = ChatRoom(
                     buyer_id=buyer_id,
                     seller_id=seller_id,
@@ -219,7 +243,6 @@ class ChatService:
                 session.add(room)
                 session.flush()
 
-                # Cache room for both users
                 ChatService._cache_user_room(buyer_id, room)
                 ChatService._cache_user_room(seller_id, room)
 

@@ -73,13 +73,18 @@ class Config:
             default="http://localhost:8000" if self.ENV == "development" else "",
         )
 
-        # Frontend Base URL for payment redirects
-        # For production: https://yourdomain.com or https://app.yourdomain.com
+        # Web app base URL for payment redirects
+        # For production: https://marktcommerce.com/app
         # For development: http://localhost:3000
-        self.FRONTEND_BASE_URL = config(
-            "FRONTEND_BASE_URL",
-            default="http://localhost:3000" if self.ENV == "development" else "",
+        self.WEB_APP_BASE_URL = config(
+            "WEB_APP_BASE_URL",
+            default="http://localhost:3000"
+            if self.ENV == "development"
+            else "https://marktcommerce.com/app",
         )
+
+        # Mobile app deep link scheme for payment redirects (e.g. markt://)
+        self.MOBILE_APP_SCHEME = config("MOBILE_APP_SCHEME", default="markt://")
 
         # AWS Configuration
         self.AWS_ACCESS_KEY = config("AWS_ACCESS_KEY", default="")
@@ -112,6 +117,13 @@ class Config:
         self.CELERY_TASK_ACKS_LATE = True  # Acknowledge after completion
         self.CELERY_WORKER_DISABLE_RATE_LIMITS = False
         self.CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+
+        self.UNPAID_ORDER_EXPIRY_HOURS = config(
+            "UNPAID_ORDER_EXPIRY_HOURS", default=48, cast=int
+        )
+        self.PLATFORM_COMMISSION_RATE = config(
+            "PLATFORM_COMMISSION_RATE", default=0.10, cast=float
+        )
 
     @property
     def SQLALCHEMY_DATABASE_URI(self):
