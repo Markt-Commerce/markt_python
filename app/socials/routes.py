@@ -28,6 +28,7 @@ from .schemas import (
     FollowSchema,
     FeedItemSchema,
     HybridFeedSchema,
+    FeedQueryArgs,
     # Niche schemas
     NicheSchema,
     NicheSearchResultSchema,
@@ -59,10 +60,10 @@ from .services import (
     ReactionService,
 )
 
-
 bp = Blueprint(
     "socials", __name__, description="Social commerce operations", url_prefix="/socials"
 )
+
 
 # Niche/Community Routes
 # -----------------------------------------------
@@ -461,12 +462,12 @@ class FollowUser(MethodView):
 @bp.route("/feed")
 class Feed(MethodView):
     @login_required
-    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.arguments(FeedQueryArgs, location="query")
     @bp.response(200, description="Personalized feed")
     def get(self, args):
         """Get personalized hybrid feed"""
         try:
-            feed_type = args.get("feed_type", "personalized")
+            feed_type = "personalized"
             force_refresh = args.get("force_refresh", False)
 
             feed_data = FeedService.get_hybrid_feed(
