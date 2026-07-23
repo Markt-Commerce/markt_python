@@ -1,6 +1,6 @@
 from marshmallow import Schema, fields, validate
 
-from app.libs.schemas import PaginationSchema
+from app.libs.schemas import PaginationSchema, PaginationQueryArgs
 from app.libs.errors import ValidationError
 
 from app.products.schemas import ProductSchema
@@ -434,6 +434,14 @@ class FeedItemSchema(Schema):
 class HybridFeedSchema(Schema):
     items = fields.List(fields.Nested(FeedItemSchema))
     pagination = fields.Nested(PaginationSchema)
+
+
+class FeedQueryArgs(PaginationQueryArgs):
+    """Query args for the main feed. Declares force_refresh so webargs doesn't
+    strip it — undeclared query params are silently excluded and the client's
+    pull-to-refresh (force_refresh=true) would never reach the service."""
+
+    force_refresh = fields.Bool(load_default=False)
 
 
 class ProductReviewSchema(Schema):
