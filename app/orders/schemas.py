@@ -79,7 +79,44 @@ class SellerOrderResponseSchema(Schema):
 
 
 class TrackingSchema(Schema):
-    pass
+    order_id = fields.Str()
+    order_number = fields.Str(allow_none=True)
+    status = fields.Str()
+    timeline = fields.List(fields.Dict())
+    shipping_address = fields.Dict(allow_none=True)
+    items = fields.List(fields.Dict())
+    shipment = fields.Dict(allow_none=True)
+    delivery = fields.Dict(allow_none=True)
+
+
+class OrderCancelSchema(Schema):
+    reason = fields.Str(allow_none=True)
+
+
+class OrderCancelResponseSchema(Schema):
+    order_id = fields.Str()
+    status = fields.Str()
+    cancelled_at = fields.DateTime(allow_none=True)
+    cancel_reason = fields.Str(allow_none=True)
+    refund_amount = fields.Float()
+
+
+class OrderReturnRequestSchema(Schema):
+    reason = fields.Str(required=True, validate=validate.Length(min=3))
+
+
+class OrderReturnResponseSchema(Schema):
+    id = fields.Str()
+    order_id = fields.Str()
+    status = fields.Str()
+    reason = fields.Str()
+    refund_amount = fields.Float(allow_none=True)
+    seller_notes = fields.Str(allow_none=True)
+    created_at = fields.DateTime()
+
+
+class OrderReturnActionSchema(Schema):
+    seller_notes = fields.Str(allow_none=True)
 
 
 class OrderItemStatusUpdateSchema(Schema):

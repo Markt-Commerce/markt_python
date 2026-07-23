@@ -51,7 +51,7 @@ class MediaService:
         # Image size limits
         self.image_limits = {
             "max_size": 10 * 1024 * 1024,  # 10MB
-            "max_dimensions": (4000, 4000),
+            "max_dimensions": (5000, 5000),
             "allowed_formats": [".jpg", ".jpeg", ".png", ".webp", ".gif"],
         }
 

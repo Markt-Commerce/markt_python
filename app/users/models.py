@@ -52,6 +52,15 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
         "Notification", back_populates="user", lazy="dynamic"
     )
     transactions = db.relationship("Transaction", back_populates="user", lazy="dynamic")
+    wallet_accounts = db.relationship(
+        "WalletAccount", back_populates="user", lazy="dynamic"
+    )
+    withdrawal_requests = db.relationship(
+        "WithdrawalRequest", back_populates="user", lazy="dynamic"
+    )
+    wallet_topups = db.relationship(
+        "WalletTopUp", back_populates="user", lazy="dynamic"
+    )
     posts = db.relationship("Post", back_populates="user", lazy="dynamic")
     post_likes = db.relationship("PostLike", back_populates="user", lazy="dynamic")
     post_comments = db.relationship(
@@ -213,6 +222,10 @@ class Seller(BaseModel):
     )
     is_active = db.Column(db.Boolean, default=True)
     deactivated_at = db.Column(db.DateTime)
+    paystack_subaccount_code = db.Column(db.String(50), nullable=True)
+    payout_bank_code = db.Column(db.String(10), nullable=True)
+    payout_account_number = db.Column(db.String(20), nullable=True)
+    payout_account_name = db.Column(db.String(100), nullable=True)
 
     # Relationships
     user = db.relationship("User", back_populates="seller_account")
