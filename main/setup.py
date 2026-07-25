@@ -97,6 +97,30 @@ def create_app():
 
             return None
 
+        @login_manager.request_loader
+        def load_user_from_token(req):
+            """Authenticate API clients that send a signed bearer token instead
+            of a session cookie (the React Native app). Falls back to None so
+            Flask-Login can still try the session cookie."""
+            auth_header = req.headers.get("Authorization", "")
+            if not auth_header.startswith("Bearer "):
+                return None
+
+            token = auth_header[len("Bearer ") :].strip()
+            if not token:
+                return None
+
+            from app.libs.auth_tokens import verify_auth_token
+
+            user_id = verify_auth_token(token)
+            if not user_id:
+                return None
+
+            user = User.query.get(user_id)
+            if user:
+                return user
+            return DeliveryUser.query.get(user_id)
+
         # Register routes
         register_blueprints(app, api)
         create_root_routes(app)

@@ -128,9 +128,19 @@ class NichePostSchema(Schema):
 
 
 class NichePostCreateSchema(Schema):
-    """Schema for creating posts in niches"""
+    """Schema for creating posts in niches.
+
+    Mirrors PostCreateSchema's input fields: category_ids, media_ids and tags
+    must be declared or webargs silently strips them, so niche posts would lose
+    their images and categories.
+    """
 
     caption = fields.Str(required=False)
+    category_ids = fields.List(fields.Int(), required=False)
+    tags = fields.List(fields.Str(), required=False)
+    media_ids = fields.List(
+        fields.Int(), required=False, description="List of media IDs to link to post"
+    )
     social_media = fields.List(fields.Nested("SocialMediaPostSchema"), required=False)
     products = fields.List(fields.Nested("PostProductSchema"), required=False)
     status = fields.Str(
