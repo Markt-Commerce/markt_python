@@ -31,6 +31,9 @@ class UserSchema(Schema):
     created_at = fields.DateTime(dump_only=True)
     updated_at = fields.DateTime(dump_only=True)
     last_login_at = fields.DateTime(dump_only=True)
+    # Bearer token, only populated on login/register responses (see routes).
+    # Absent elsewhere, so marshmallow omits it from other user payloads.
+    access_token = fields.Str(dump_only=True)
 
     def get_profile_picture_url(self, obj):
         """Get profile picture URL with fallback to default"""

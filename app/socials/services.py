@@ -2558,7 +2558,11 @@ class FeedService:
 
         except Exception as e:
             logger.error(f"Error generating fresh feed: {str(e)}")
-            return FeedService._get_fallback_feed(page=1, per_page=20, user_id=user_id)
+            # Return a list of item-refs. _get_fallback_feed returns an already
+            # paginated dict, which the caller would then try to hydrate/paginate
+            # again — iterating its keys and yielding an empty feed. The recent
+            # content list hydrates correctly and keeps the feed non-empty.
+            return FeedService._get_recent_content_fallback()
 
     @staticmethod
     def _get_user_interests(user_id):
@@ -3339,9 +3343,14 @@ class FeedService:
         """Check if product matches user preferences"""
         user_preferences = FeedService._get_user_preferences(user_id)
 
-        # Check price range
-        price_range = user_preferences.get("price_range", {"min": 0, "max": 1000})
-        if not (price_range["min"] <= product.price <= price_range["max"]):
+        # Check price range. price_range is None until one is learned from the
+        # user's view history (new users have none). `.get(key, default)` returns
+        # the stored None here, not the default, so guard explicitly — indexing
+        # None["min"] would raise and crash feed generation for every new user.
+        price_range = user_preferences.get("price_range")
+        if price_range and not (
+            price_range["min"] <= product.price <= price_range["max"]
+        ):
             return False
 
         # Check category preferences
