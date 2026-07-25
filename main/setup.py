@@ -106,7 +106,9 @@ def create_app():
             if not auth_header.startswith("Bearer "):
                 return None
 
-            token = auth_header[len("Bearer ") :].strip()
+            # Split off the "Bearer " prefix without a slice (avoids black's
+            # "whitespace before ':'" which flake8 flags as E203).
+            token = auth_header.split(" ", 1)[1].strip()
             if not token:
                 return None
 
