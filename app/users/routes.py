@@ -92,6 +92,13 @@ class UserLogin(MethodView):
             )
             login_user(user)
             user.access_token = generate_auth_token(user.id)
+            # Gamification: first login of the day (idempotent per day).
+            try:
+                from app.signals import daily_login
+
+                daily_login.send("users", user_id=user.id)
+            except Exception as e:
+                logger.warning(f"gamification daily_login emit failed: {e}")
             return user
         except UnverifiedEmailError as e:
             # Return structured payload that frontend can detect easily

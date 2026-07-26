@@ -72,6 +72,22 @@ class NotificationNamespace(Namespace):
         except Exception as e:
             logger.error(f"Notification disconnection error: {e}")
 
+    def on_register(self, data):
+        """Join the caller to their personal room so per-user server pushes
+        (notifications and gamification events) reach this socket. The client
+        emits this right after connecting with its user id."""
+        from main.sockets import SocketManager
+
+        try:
+            user_id = (data or {}).get("user_id")
+            if not user_id:
+                return
+            join_room(f"user_{user_id}")
+            SocketManager.mark_user_online(user_id)
+            emit("registered", {"user_id": user_id})
+        except Exception as e:
+            logger.error(f"Notification register error: {e}")
+
     def on_mark_as_read(self, data):
         """Handle mark as read request via socket with validation"""
         try:

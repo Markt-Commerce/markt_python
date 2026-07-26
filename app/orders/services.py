@@ -38,7 +38,6 @@ from app.orders.shipping import (
     shipping_address_to_model_kwargs,
 )
 
-
 logger = logging.getLogger(__name__)
 
 BUYER_CANCELLABLE_STATUSES = {
@@ -220,7 +219,36 @@ class OrderService:
             except Exception as e:
                 logger.warning(f"Failed to queue order_status_changed event: {e}")
 
-            return order
+        # Post-commit: gamification points (award on delivery, reverse on
+        # cancel/return of a previously-delivered order).
+        if new_status == OrderStatus.DELIVERED and old_status != OrderStatus.DELIVERED:
+            OrderService._emit_gam_order_completed(order_id)
+        elif (
+            new_status
+            in (OrderStatus.CANCELLED, OrderStatus.RETURNED, OrderStatus.FAILED)
+            and old_status == OrderStatus.DELIVERED
+        ):
+            OrderService._emit_gam_order_reversed(order_id)
+
+        return order
+
+    @staticmethod
+    def _emit_gam_order_completed(order_id):
+        try:
+            from app.signals import order_completed
+
+            order_completed.send("orders", order_id=order_id)
+        except Exception as e:  # never let gamification break order flow
+            logger.warning(f"gamification order_completed emit failed: {e}")
+
+    @staticmethod
+    def _emit_gam_order_reversed(order_id):
+        try:
+            from app.signals import order_reversed
+
+            order_reversed.send("orders", order_id=order_id)
+        except Exception as e:
+            logger.warning(f"gamification order_reversed emit failed: {e}")
 
     @staticmethod
     def _get_completed_payment_amount(order: Order) -> float:
@@ -350,9 +378,9 @@ class OrderService:
                 {
                     "status": "created",
                     "label": "Order placed",
-                    "timestamp": order.created_at.isoformat()
-                    if order.created_at
-                    else None,
+                    "timestamp": (
+                        order.created_at.isoformat() if order.created_at else None
+                    ),
                 }
             ]
             if latest_payment and latest_payment.paid_at:
@@ -376,9 +404,9 @@ class OrderService:
                     {
                         "status": "delivered",
                         "label": "Delivered",
-                        "timestamp": order.updated_at.isoformat()
-                        if order.updated_at
-                        else None,
+                        "timestamp": (
+                            order.updated_at.isoformat() if order.updated_at else None
+                        ),
                     }
                 )
 
@@ -388,12 +416,16 @@ class OrderService:
                 delivery_info = {
                     "assignment_id": assignment.assignment_id,
                     "status": assignment.status.value,
-                    "logistical_status": assignment.logistical_status.value
-                    if assignment.logistical_status
-                    else None,
-                    "assigned_at": assignment.assigned_at.isoformat()
-                    if assignment.assigned_at
-                    else None,
+                    "logistical_status": (
+                        assignment.logistical_status.value
+                        if assignment.logistical_status
+                        else None
+                    ),
+                    "assigned_at": (
+                        assignment.assigned_at.isoformat()
+                        if assignment.assigned_at
+                        else None
+                    ),
                 }
 
             return {
@@ -412,20 +444,26 @@ class OrderService:
                     }
                     for item in order.items
                 ],
-                "shipment": {
-                    "carrier": shipment.carrier,
-                    "tracking_number": shipment.tracking_number,
-                    "tracking_url": shipment.tracking_url,
-                    "status": shipment.status,
-                    "shipped_at": shipment.shipped_at.isoformat()
-                    if shipment and shipment.shipped_at
-                    else None,
-                    "delivered_at": shipment.delivered_at.isoformat()
-                    if shipment and shipment.delivered_at
-                    else None,
-                }
-                if shipment
-                else None,
+                "shipment": (
+                    {
+                        "carrier": shipment.carrier,
+                        "tracking_number": shipment.tracking_number,
+                        "tracking_url": shipment.tracking_url,
+                        "status": shipment.status,
+                        "shipped_at": (
+                            shipment.shipped_at.isoformat()
+                            if shipment and shipment.shipped_at
+                            else None
+                        ),
+                        "delivered_at": (
+                            shipment.delivered_at.isoformat()
+                            if shipment and shipment.delivered_at
+                            else None
+                        ),
+                    }
+                    if shipment
+                    else None
+                ),
                 "delivery": delivery_info,
             }
 
@@ -540,6 +578,10 @@ class OrderService:
                 idempotency_key=f"return-refund:{return_id}",
             )
 
+        # Post-commit: claw back any gamification points earned on this order.
+        if order_id:
+            OrderService._emit_gam_order_reversed(order_id)
+
         return order_return
 
     @staticmethod
@@ -638,16 +680,22 @@ class SellerOrderService:
 
             item.status = status
 
+            completed_order_id = None
             if status == OrderItem.Status.DELIVERED:
                 order = session.query(Order).get(item.order_id)
                 if all(i.status == OrderItem.Status.DELIVERED for i in order.items):
                     order.status = OrderStatus.DELIVERED
+                    completed_order_id = order.id
 
                 from app.wallet.services import WalletService
 
                 WalletService.settle_order_item(item)
 
-            return item
+        # Post-commit: award gamification points once the whole order is delivered.
+        if completed_order_id:
+            OrderService._emit_gam_order_completed(completed_order_id)
+
+        return item
 
     @staticmethod
     def get_seller_order_stats(seller_id):
