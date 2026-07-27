@@ -327,32 +327,42 @@ class NotificationService:
             # Format message with safe defaults
             format_data = {
                 "username": actor_name or "Someone",
-                "product_name": metadata_.get("product_name", "your product")
-                if metadata_
-                else "your product",
+                "product_name": (
+                    metadata_.get("product_name", "your product")
+                    if metadata_
+                    else "your product"
+                ),
                 "rating": metadata_.get("rating", 0) if metadata_ else 0,
                 "order_id": reference_id or "N/A",
-                "status": metadata_.get("status", "updated")
-                if metadata_
-                else "updated",
+                "status": (
+                    metadata_.get("status", "updated") if metadata_ else "updated"
+                ),
                 "message": metadata_.get("message", "") if metadata_ else "",
                 # Buyer request variables
-                "seller_name": metadata_.get("seller_name", "A seller")
-                if metadata_
-                else "A seller",
-                "request_title": metadata_.get("request_title", "your request")
-                if metadata_
-                else "your request",
+                "seller_name": (
+                    metadata_.get("seller_name", "A seller")
+                    if metadata_
+                    else "A seller"
+                ),
+                "request_title": (
+                    metadata_.get("request_title", "your request")
+                    if metadata_
+                    else "your request"
+                ),
                 # Social variables
-                "inviter_name": metadata_.get("inviter_name", "Someone")
-                if metadata_
-                else "Someone",
-                "niche_name": metadata_.get("niche_name", "a community")
-                if metadata_
-                else "a community",
-                "action_type": metadata_.get("action_type", "moderation")
-                if metadata_
-                else "moderation",
+                "inviter_name": (
+                    metadata_.get("inviter_name", "Someone") if metadata_ else "Someone"
+                ),
+                "niche_name": (
+                    metadata_.get("niche_name", "a community")
+                    if metadata_
+                    else "a community"
+                ),
+                "action_type": (
+                    metadata_.get("action_type", "moderation")
+                    if metadata_
+                    else "moderation"
+                ),
             }
 
             message = template["message"].format(**format_data)
@@ -566,3 +576,103 @@ class NotificationService:
             ).update({"is_seen": True}, synchronize_session=False)
         except Exception as e:
             logger.error(f"Error marking notifications as seen: {str(e)}")
+
+
+class PushService:
+    """Remote push notifications via the Expo Push API.
+
+    Tokens are Expo push tokens (``ExponentPushToken[...]``) registered by the
+    mobile client. Sending is best-effort; invalid tokens returned by Expo
+    (``DeviceNotRegistered``) are pruned so we stop pushing to dead devices.
+    """
+
+    EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
+
+    @staticmethod
+    def register_token(user_id: str, token: str, platform: str = None) -> None:
+        from .models import PushToken
+
+        if not token:
+            return
+        with session_scope() as session:
+            existing = session.query(PushToken).filter_by(token=token).first()
+            if existing:
+                existing.user_id = user_id
+                if platform:
+                    existing.platform = platform
+            else:
+                session.add(PushToken(user_id=user_id, token=token, platform=platform))
+
+    @staticmethod
+    def remove_token(token: str) -> None:
+        from .models import PushToken
+
+        with session_scope() as session:
+            session.query(PushToken).filter_by(token=token).delete()
+
+    @staticmethod
+    def get_user_tokens(user_id: str) -> List[str]:
+        from .models import PushToken
+
+        with session_scope() as session:
+            return [
+                t.token
+                for t in session.query(PushToken).filter_by(user_id=user_id).all()
+            ]
+
+    @staticmethod
+    def send_to_user(
+        user_id: str, title: str, body: str, data: Dict[str, Any] = None
+    ) -> None:
+        tokens = PushService.get_user_tokens(user_id)
+        if tokens:
+            PushService.send_to_tokens(tokens, title, body, data)
+
+    @staticmethod
+    def send_to_tokens(
+        tokens: List[str], title: str, body: str, data: Dict[str, Any] = None
+    ) -> None:
+        import requests
+
+        messages = [
+            {
+                "to": t,
+                "title": title,
+                "body": body,
+                "data": data or {},
+                "sound": "default",
+                "channelId": "default",
+            }
+            for t in tokens
+            if str(t).startswith("ExponentPushToken")
+        ]
+        if not messages:
+            return
+        try:
+            resp = requests.post(
+                PushService.EXPO_PUSH_URL,
+                json=messages,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                timeout=10,
+            )
+            PushService._prune_invalid(resp, messages)
+        except Exception as e:
+            logger.error(f"Expo push send failed: {e}")
+
+    @staticmethod
+    def _prune_invalid(resp, messages) -> None:
+        """Remove tokens Expo reports as no longer registered."""
+        try:
+            tickets = (resp.json() or {}).get("data", [])
+        except Exception:
+            return
+        for msg, ticket in zip(messages, tickets):
+            if (
+                isinstance(ticket, dict)
+                and ticket.get("status") == "error"
+                and (ticket.get("details") or {}).get("error") == "DeviceNotRegistered"
+            ):
+                PushService.remove_token(msg["to"])

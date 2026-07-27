@@ -140,6 +140,16 @@ def _emit(user_id: str, event: str, data: dict) -> None:
         logger.debug(f"gamification emit {event} failed for {user_id}: {e}")
 
 
+def _push(user_id: str, title: str, body: str, data: dict = None) -> None:
+    """Best-effort remote push so gamification wins reach a closed app."""
+    try:
+        from app.notifications.services import PushService
+
+        PushService.send_to_user(user_id, title, body, data or {})
+    except Exception as e:  # pragma: no cover - push best-effort
+        logger.debug(f"gamification push failed for {user_id}: {e}")
+
+
 # --------------------------------------------------------------------------- #
 # Core: award / reverse points
 # --------------------------------------------------------------------------- #
@@ -264,6 +274,12 @@ def award_points(
                     "new_tier": result["new_tier"],
                     "stars": result["star_count"],
                 },
+            )
+            _push(
+                user_id,
+                "Level up! 🌟",
+                f"You reached a new tier — {result['star_count']}★.",
+                {"type": "tier_changed", "new_tier": result["new_tier"]},
             )
     return result
 
@@ -521,6 +537,12 @@ def evaluate_badges_for(user_id: str, trigger: str) -> list:
                     "description": badge.description,
                 }
             },
+        )
+        _push(
+            user_id,
+            "Badge unlocked! 🎉",
+            f"You earned the {badge.name} badge.",
+            {"type": "badge_earned", "slug": badge.slug},
         )
     if newly:
         _invalidate_stats_cache(user_id)
