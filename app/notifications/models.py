@@ -68,3 +68,16 @@ class Notification(BaseModel):
             "created_at": self.created_at,
             "metadata_": self.metadata_ or {},
         }
+
+
+class PushToken(BaseModel):
+    """A device's Expo push token, for remote push notifications."""
+
+    __tablename__ = "push_tokens"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(
+        db.String(12), db.ForeignKey("users.id"), nullable=False, index=True
+    )
+    token = db.Column(db.String(255), nullable=False, unique=True)
+    platform = db.Column(db.String(20), nullable=True)  # ios / android
