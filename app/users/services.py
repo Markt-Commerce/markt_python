@@ -379,7 +379,37 @@ class UserService:
                 pass
 
             session.commit()
-            return user
+
+        UserService._maybe_emit_profile_completed(user_id)
+        return user
+
+    @staticmethod
+    def _is_profile_complete(user) -> bool:
+        """A profile counts as 'completed' for gamification once the user adds
+        the optional-at-signup fields the app nudges them to fill: a phone
+        number and a non-default profile picture."""
+        if not user:
+            return False
+        has_phone = bool(user.phone_number and str(user.phone_number).strip())
+        pic = user.profile_picture
+        has_photo = bool(pic and pic != "default.jpg")
+        return has_phone and has_photo
+
+    @staticmethod
+    def _maybe_emit_profile_completed(user_id):
+        """Emit the profile.completed signal (idempotent +50) when the profile
+        is complete. Safe to call after any profile update — the underlying
+        award is granted at most once via ref_id=user_id."""
+        try:
+            with session_scope() as session:
+                user = session.query(User).get(user_id)
+                complete = UserService._is_profile_complete(user)
+            if complete:
+                from app.signals import profile_completed
+
+                profile_completed.send("users", user_id=user_id)
+        except Exception as e:
+            logger.warning(f"gamification profile_completed emit failed: {e}")
 
     @staticmethod
     def update_buyer_profile(user_id, data):
@@ -394,7 +424,9 @@ class UserService:
                 buyer.shipping_address = data["shipping_address"]
 
             session.commit()
-            return buyer
+
+        UserService._maybe_emit_profile_completed(user_id)
+        return buyer
 
     @staticmethod
     def update_seller_profile(user_id, data):
@@ -431,7 +463,9 @@ class UserService:
                     session.add(seller_category)
 
             session.commit()
-            return seller
+
+        UserService._maybe_emit_profile_completed(user_id)
+        return seller
 
     @staticmethod
     def list_users(args):
@@ -515,9 +549,9 @@ class UserService:
 
             return {
                 "available": not exists,
-                "message": "Username is already taken"
-                if exists
-                else "Username available",
+                "message": (
+                    "Username is already taken" if exists else "Username available"
+                ),
             }
 
     @staticmethod
@@ -588,6 +622,9 @@ class UserService:
                     raise AuthError("User not found")
                 user.profile_picture = media.get_url()  # Original URL for now
                 session.commit()
+
+            # A photo is often the final step to a complete profile — check now.
+            UserService._maybe_emit_profile_completed(user_id)
 
             return {
                 "success": True,
@@ -876,9 +913,11 @@ class ShopService:
                         "is_active": shop.is_active,
                         "total_rating": shop.total_rating,
                         "total_raters": shop.total_raters,
-                        "average_rating": shop.total_rating / shop.total_raters
-                        if shop.total_raters > 0
-                        else 0,
+                        "average_rating": (
+                            shop.total_rating / shop.total_raters
+                            if shop.total_raters > 0
+                            else 0
+                        ),
                         "user": {
                             "id": shop.user.id,
                             "username": shop.user.username,
@@ -970,9 +1009,11 @@ class ShopService:
                     "is_active": shop.is_active,
                     "total_rating": shop.total_rating,
                     "total_raters": shop.total_raters,
-                    "average_rating": shop.total_rating / shop.total_raters
-                    if shop.total_raters > 0
-                    else 0,
+                    "average_rating": (
+                        shop.total_rating / shop.total_raters
+                        if shop.total_raters > 0
+                        else 0
+                    ),
                     "policies": shop.policies,
                     "user": {
                         "id": shop.user.id,
@@ -1051,9 +1092,11 @@ class ShopService:
                         ],
                         "total_rating": shop.total_rating,
                         "total_raters": shop.total_raters,
-                        "average_rating": shop.total_rating / shop.total_raters
-                        if shop.total_raters > 0
-                        else 0,
+                        "average_rating": (
+                            shop.total_rating / shop.total_raters
+                            if shop.total_raters > 0
+                            else 0
+                        ),
                         "user": {
                             "id": shop.user.id,
                             "username": shop.user.username,
@@ -1113,9 +1156,11 @@ class ShopService:
             media_items.append(
                 {
                     "url": url,
-                    "type": media.media_type.value
-                    if hasattr(media.media_type, "value")
-                    else media.media_type,
+                    "type": (
+                        media.media_type.value
+                        if hasattr(media.media_type, "value")
+                        else media.media_type
+                    ),
                     "alt_text": media.alt_text,
                 }
             )
@@ -1133,9 +1178,11 @@ class ShopService:
             product.images,
             key=lambda img: (
                 not getattr(img, "is_featured", False),
-                getattr(img, "sort_order", 0)
-                if getattr(img, "sort_order", None) is not None
-                else 0,
+                (
+                    getattr(img, "sort_order", 0)
+                    if getattr(img, "sort_order", None) is not None
+                    else 0
+                ),
             ),
         )
 

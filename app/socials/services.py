@@ -65,6 +65,33 @@ from .constants import POST_STATUS_TRANSITIONS
 logger = logging.getLogger(__name__)
 
 
+class _SignalPost:
+    """Minimal detached carrier for post gamification signals.
+
+    Signals fire post-commit, so we pass a tiny value object with just the
+    fields the listener needs (id, author user_id) rather than a live/detached
+    ORM row that could trigger lazy loads.
+    """
+
+    __slots__ = ("id", "user_id")
+
+    def __init__(self, post_id, user_id):
+        self.id = post_id
+        self.user_id = user_id
+
+
+class _SignalReview:
+    """Minimal detached carrier for review gamification signals."""
+
+    __slots__ = ("id", "user_id", "rating", "product_id")
+
+    def __init__(self, review_id, user_id, rating, product_id):
+        self.id = review_id
+        self.user_id = user_id
+        self.rating = rating
+        self.product_id = product_id
+
+
 class NicheService:
     """Service for managing niche communities with role-based access control"""
 
@@ -983,12 +1010,40 @@ class PostService:
                     {post.id: int(post.created_at.timestamp())},
                 )
 
-                return post
+                post_id = post.id
+
+            # Post-commit: award gamification points to the author.
+            PostService._emit_gam_post_created(post_id, user_id)
+            return post
         except SQLAlchemyError as e:
             logger.error(f"Error creating post: {str(e)}")
             raise ConflictError("Failed to create post")
         except (RedisError, RedisConnectionError) as e:
             logger.warning(f"Redis error while creating post: {str(e)}", exc_info=True)
+
+    @staticmethod
+    def _emit_gam_post_created(post_id, user_id):
+        """Fire the post-created domain signal (gamification listens)."""
+        try:
+            from app.signals import post_created
+
+            post_created.send("socials", post=_SignalPost(post_id, user_id))
+        except Exception as e:  # never let gamification break post creation
+            logger.warning(f"gamification post_created emit failed: {e}")
+
+    @staticmethod
+    def _emit_gam_post_reaction(post_id, author_user_id, reactor_id):
+        """Fire the post-reaction signal for the post author."""
+        try:
+            from app.signals import post_reaction_added
+
+            post_reaction_added.send(
+                "socials",
+                post=_SignalPost(post_id, author_user_id),
+                reactor_id=reactor_id,
+            )
+        except Exception as e:
+            logger.warning(f"gamification post_reaction emit failed: {e}")
 
     @staticmethod
     def get_post(post_id):
@@ -1156,7 +1211,12 @@ class PostService:
                 except Exception as e:
                     logger.warning(f"Failed to queue post_liked event: {e}")
 
-                return like
+                author_id = post.user_id if (post and post.user_id != user_id) else None
+
+            # Post-commit: award reaction points to the post author (capped/day).
+            if author_id:
+                PostService._emit_gam_post_reaction(post_id, author_id, user_id)
+            return like
         except SQLAlchemyError as e:
             logger.error(f"Error liking post: {str(e)}")
             raise ConflictError("Failed to like post")
@@ -1893,7 +1953,22 @@ class ProductSocialService:
                 except Exception as e:
                     logger.warning(f"Failed to queue review_added event: {e}")
 
-                return review
+                review_id = review.id
+                review_rating = data.get("rating")
+
+            # Post-commit: award gamification points to the reviewer and fold the
+            # rating into the seller's aggregate for badge evaluation.
+            try:
+                from app.signals import review_created
+
+                review_created.send(
+                    "socials",
+                    review=_SignalReview(review_id, user_id, review_rating, product_id),
+                )
+            except Exception as e:
+                logger.warning(f"gamification review_created emit failed: {e}")
+
+            return review
         except Exception as e:
             logger.error(f"Error adding review: {str(e)}")
             raise APIError("Failed to add review", 500)
