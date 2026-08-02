@@ -5,6 +5,7 @@ import time
 # package imports
 from flask import Flask
 from flask_login import LoginManager
+from werkzeug.middleware.proxy_fix import ProxyFix
 from flask_migrate import Migrate
 from flask_cors import CORS
 from flask_smorest import Api
@@ -68,7 +69,17 @@ def create_app():
     setup_logging()
 
     app = Flask(__name__)
+
+    # Serve /path and /path/ alike instead of 308-redirecting between them.
+    # The redirect was the source of the mobile "empty categories" bug: werkzeug
+    # rebuilt the URL with the scheme it saw behind the proxy (http), and
+    # release Android builds refuse cleartext, so the request silently died.
+    app.url_map.strict_slashes = False
+
     app.wsgi_app = AuthMiddleware(app.wsgi_app)
+    # Trust the reverse proxy's X-Forwarded-* headers so any URL werkzeug does
+    # generate (redirects, url_for with _external) keeps https and the real host.
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
     # Track application start time for health checks
     app.start_time = time.time()
