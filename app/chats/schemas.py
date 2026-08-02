@@ -165,13 +165,17 @@ class ChatMessageReactionSchema(Schema):
     id = fields.Int(dump_only=True)
     message_id = fields.Int(dump_only=True)
     user_id = fields.Str(dump_only=True)
-    reaction_type = fields.Str(dump_only=True)
-    emoji = fields.Str(dump_only=True)
+    reaction_type = fields.Method("get_reaction_type", dump_only=True)
+    emoji = fields.Method("get_emoji", dump_only=True)
     created_at = fields.DateTime(dump_only=True)
 
+    def get_reaction_type(self, obj):
+        rt = obj.reaction_type
+        return rt.value if hasattr(rt, "value") else rt
+
     def get_emoji(self, obj):
-        """Get emoji for reaction type"""
-        return REACTION_EMOJIS.get(obj.reaction_type.value, "👍")
+        key = self.get_reaction_type(obj)
+        return REACTION_EMOJIS.get(key, "👍")
 
 
 class ChatMessageReactionCreateSchema(Schema):

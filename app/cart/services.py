@@ -25,6 +25,10 @@ from .models import Cart, CartItem
 from app.users.models import User, Buyer
 from app.products.models import Product, ProductVariant
 from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
+from app.orders.shipping import (
+    normalize_shipping_address,
+    shipping_address_to_model_kwargs,
+)
 from app.notifications.services import NotificationService
 from app.notifications.models import NotificationType
 
@@ -316,14 +320,18 @@ class CartService:
             # Validate cart items (check availability, prices, etc.)
             CartService._validate_cart_items(cart.items)
 
+            shipping_normalized = normalize_shipping_address(
+                checkout_data.get("shipping_address"),
+                saved_address=user.buyer_account.shipping_address,
+                use_saved_address=checkout_data.get("use_saved_address", False),
+            )
+
             # Calculate order totals
             subtotal = cart.subtotal()
             shipping_fee = CartService._calculate_shipping_fee(
-                cart, checkout_data.get("shipping_address")
+                cart, shipping_normalized
             )
-            tax = CartService._calculate_tax(
-                subtotal, checkout_data.get("shipping_address")
-            )
+            tax = CartService._calculate_tax(subtotal, shipping_normalized)
             discount = CartService._calculate_discount(subtotal, cart.coupon_code)
             total = subtotal + shipping_fee + tax - discount
 
@@ -339,21 +347,9 @@ class CartService:
             order.discount = discount
             order.total = total
 
-            # shipping_address is a relationship; map dict payload to ShippingAddress ORM
-            shipping_data = checkout_data.get("shipping_address") or {}
-            shipping_address = ShippingAddress(
-                recipient_name=shipping_data.get("recipient_name"),
-                street_address=shipping_data.get("street_address")
-                or shipping_data.get("street"),
-                city=shipping_data.get("city"),
-                state=shipping_data.get("state"),
-                postal_code=shipping_data.get("postal_code")
-                or shipping_data.get("zip"),
-                country=shipping_data.get("country"),
-                latitude=shipping_data.get("latitude"),
-                longitude=shipping_data.get("longitude"),
+            order.shipping_address = ShippingAddress(
+                **shipping_address_to_model_kwargs(shipping_normalized)
             )
-            order.shipping_address = shipping_address
 
             # billing_address is JSONB on Order, so we can store the dict directly
             order.billing_address = checkout_data.get("billing_address")
@@ -361,6 +357,7 @@ class CartService:
             order.idempotency_key = idempotency_key or str(uuid.uuid4())
             session.add(order)
             session.flush()
+            order.order_number = order.generate_order_number()
 
             # Create order items from cart items
             for cart_item in cart.items:

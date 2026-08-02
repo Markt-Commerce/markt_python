@@ -144,75 +144,95 @@ class ChatService:
         return result
 
     @staticmethod
+    def _user_pair_room_filter(buyer_id: str, seller_id: str):
+        """Match a chat room regardless of which user is stored as buyer or seller."""
+        return db.or_(
+            db.and_(
+                ChatRoom.buyer_id == buyer_id,
+                ChatRoom.seller_id == seller_id,
+            ),
+            db.and_(
+                ChatRoom.buyer_id == seller_id,
+                ChatRoom.seller_id == buyer_id,
+            ),
+        )
+
+    @staticmethod
+    def _find_room_for_user_pair(session, buyer_id: str, seller_id: str):
+        """Return the most recently active room between two users, if any."""
+        return (
+            session.query(ChatRoom)
+            .filter(ChatService._user_pair_room_filter(buyer_id, seller_id))
+            .order_by(
+                ChatRoom.last_message_at.desc().nullslast(),
+                ChatRoom.id.desc(),
+            )
+            .first()
+        )
+
+    @staticmethod
+    def _apply_room_context(
+        room: ChatRoom,
+        product_id: Optional[str],
+        request_id: Optional[str],
+    ) -> None:
+        """Attach product/request context to a room when not already set."""
+        if product_id and room.product_id is None:
+            room.product_id = product_id
+        if request_id and room.request_id is None:
+            room.request_id = request_id
+
+    @staticmethod
     def create_or_get_chat_room(
         buyer_id: str,
         seller_id: str,
         product_id: Optional[str] = None,
         request_id: Optional[str] = None,
     ) -> ChatRoom:
-        """Create or get existing chat room between buyer and seller
+        """Create or get the single chat room between a buyer and seller.
 
-        This method ensures that only one chat room exists between two users
-        for a given product/request, regardless of which user initiated the conversation.
+        One conversation exists per user pair. product_id and request_id are
+        optional context (e.g. opened from a product page) and do not create
+        separate rooms. Product-specific content belongs on messages.
         """
         try:
-            # Validate that buyer and seller are different users
             if buyer_id == seller_id:
                 raise ValidationError("Cannot create a chat room with yourself")
 
-            # Validate that both users exist
-            buyer = session.query(User).filter(User.id == buyer_id).first()
-            if not buyer:
-                raise NotFoundError(f"Buyer with ID {buyer_id} not found")
-
-            seller = session.query(User).filter(User.id == seller_id).first()
-            if not seller:
-                raise NotFoundError(f"Seller with ID {seller_id} not found")
-
-            # Validate product_id if provided
-            if product_id:
-                product = (
-                    session.query(Product).filter(Product.id == product_id).first()
-                )
-                if not product:
-                    raise NotFoundError(f"Product with ID {product_id} not found")
-
-            # Validate request_id if provided
-            if request_id:
-                request_obj = (
-                    session.query(BuyerRequest)
-                    .filter(BuyerRequest.id == request_id)
-                    .first()
-                )
-                if not request_obj:
-                    raise NotFoundError(f"Request with ID {request_id} not found")
-
             with session_scope() as session:
-                # Check if room already exists in either direction
-                # (buyer_id=A, seller_id=B) OR (buyer_id=B, seller_id=A)
-                existing_room = (
-                    session.query(ChatRoom)
-                    .filter(
-                        db.or_(
-                            db.and_(
-                                ChatRoom.buyer_id == buyer_id,
-                                ChatRoom.seller_id == seller_id,
-                            ),
-                            db.and_(
-                                ChatRoom.buyer_id == seller_id,
-                                ChatRoom.seller_id == buyer_id,
-                            ),
-                        ),
-                        ChatRoom.product_id == product_id,
-                        ChatRoom.request_id == request_id,
-                    )
-                    .first()
-                )
+                buyer = session.query(User).filter(User.id == buyer_id).first()
+                if not buyer:
+                    raise NotFoundError(f"Buyer with ID {buyer_id} not found")
 
+                seller = session.query(User).filter(User.id == seller_id).first()
+                if not seller:
+                    raise NotFoundError(f"Seller with ID {seller_id} not found")
+
+                if product_id:
+                    product = (
+                        session.query(Product).filter(Product.id == product_id).first()
+                    )
+                    if not product:
+                        raise NotFoundError(f"Product with ID {product_id} not found")
+
+                if request_id:
+                    request_obj = (
+                        session.query(BuyerRequest)
+                        .filter(BuyerRequest.id == request_id)
+                        .first()
+                    )
+                    if not request_obj:
+                        raise NotFoundError(f"Request with ID {request_id} not found")
+
+                existing_room = ChatService._find_room_for_user_pair(
+                    session, buyer_id, seller_id
+                )
                 if existing_room:
+                    ChatService._apply_room_context(
+                        existing_room, product_id, request_id
+                    )
                     return existing_room
 
-                # Create new room
                 room = ChatRoom(
                     buyer_id=buyer_id,
                     seller_id=seller_id,
@@ -223,15 +243,16 @@ class ChatService:
                 session.add(room)
                 session.flush()
 
-                # Cache room for both users
                 ChatService._cache_user_room(buyer_id, room)
                 ChatService._cache_user_room(seller_id, room)
 
                 return room
 
+        except APIError:
+            raise
         except Exception as e:
-            logger.error(f"Failed to create chat room: {str(e)}")
-            raise APIError("Failed to create chat room")
+            logger.exception("Failed to create chat room: %s", e)
+            raise APIError("Failed to create chat room", status_code=500)
 
     @staticmethod
     def get_user_chat_rooms(
@@ -960,6 +981,33 @@ class ChatReactionService:
     """Service for managing reactions on chat messages"""
 
     @staticmethod
+    def _emit_message_reaction_event(
+        event: str,
+        message_id: int,
+        user_id: str,
+        reaction_type: str,
+        username: Optional[str] = None,
+    ) -> None:
+        """Emit reaction events from HTTP handlers (outside Socket.IO request context)."""
+        from main.extensions import socketio
+
+        reaction_value = (
+            reaction_type.value if hasattr(reaction_type, "value") else reaction_type
+        )
+        socketio.emit(
+            event,
+            {
+                "message_id": message_id,
+                "user_id": user_id,
+                "username": username or "User",
+                "reaction_type": reaction_value,
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+            room=f"message_{message_id}",
+            namespace="/chat",
+        )
+
+    @staticmethod
     def add_message_reaction(user_id: str, message_id: int, reaction_type: str):
         """Add or update a reaction on a chat message"""
         try:
@@ -1006,22 +1054,22 @@ class ChatReactionService:
                 session.add(reaction)
                 session.commit()
 
-                # Emit real-time websocket event
                 try:
-                    from flask_socketio import emit
-
-                    emit(
+                    user = session.query(User).filter(User.id == user_id).first()
+                    ChatReactionService._emit_message_reaction_event(
                         "message_reaction_added",
-                        {
-                            "message_id": message_id,
-                            "user_id": user_id,
-                            "reaction_type": reaction_type,
-                            "timestamp": datetime.utcnow().isoformat(),
-                        },
-                        room=f"message_{message_id}",
+                        message_id,
+                        user_id,
+                        reaction_type_enum,
+                        username=user.username if user else None,
+                    )
+                    redis_client.hincrby(
+                        f"message:{message_id}:reactions",
+                        reaction_type_enum.value,
+                        1,
                     )
                 except Exception as e:
-                    logger.warning(f"Failed to emit message_reaction_added event: {e}")
+                    logger.warning("Failed to emit message_reaction_added event: %s", e)
 
                 return reaction
 
@@ -1056,23 +1104,21 @@ class ChatReactionService:
                 session.delete(reaction)
                 session.commit()
 
-                # Emit real-time websocket event
                 try:
-                    from flask_socketio import emit
-
-                    emit(
+                    user = session.query(User).filter(User.id == user_id).first()
+                    ChatReactionService._emit_message_reaction_event(
                         "message_reaction_removed",
-                        {
-                            "message_id": message_id,
-                            "user_id": user_id,
-                            "reaction_type": reaction_type,
-                            "timestamp": datetime.utcnow().isoformat(),
-                        },
-                        room=f"message_{message_id}",
+                        message_id,
+                        user_id,
+                        reaction_type,
+                        username=user.username if user else None,
+                    )
+                    redis_client.hincrby(
+                        f"message:{message_id}:reactions", reaction_type, -1
                     )
                 except Exception as e:
                     logger.warning(
-                        f"Failed to emit message_reaction_removed event: {e}"
+                        "Failed to emit message_reaction_removed event: %s", e
                     )
 
                 return True

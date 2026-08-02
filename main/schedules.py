@@ -56,4 +56,9 @@ CELERYBEAT_SCHEDULE = {
         "schedule": crontab(hour="*/4"),  # Every 4 hours
         "options": {"queue": "analytics"},
     },
+    "expire-unpaid-orders": {
+        "task": "app.orders.tasks.expire_unpaid_orders",
+        "schedule": crontab(hour="*/1"),  # Hourly
+        "options": {"queue": "default"},
+    },
 }

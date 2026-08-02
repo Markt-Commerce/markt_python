@@ -1,6 +1,6 @@
 from marshmallow import Schema, fields, validate
 
-from app.libs.schemas import PaginationSchema
+from app.libs.schemas import PaginationSchema, PaginationQueryArgs
 from app.libs.errors import ValidationError
 
 from app.products.schemas import ProductSchema
@@ -128,9 +128,19 @@ class NichePostSchema(Schema):
 
 
 class NichePostCreateSchema(Schema):
-    """Schema for creating posts in niches"""
+    """Schema for creating posts in niches.
+
+    Mirrors PostCreateSchema's input fields: category_ids, media_ids and tags
+    must be declared or webargs silently strips them, so niche posts would lose
+    their images and categories.
+    """
 
     caption = fields.Str(required=False)
+    category_ids = fields.List(fields.Int(), required=False)
+    tags = fields.List(fields.Str(), required=False)
+    media_ids = fields.List(
+        fields.Int(), required=False, description="List of media IDs to link to post"
+    )
     social_media = fields.List(fields.Nested("SocialMediaPostSchema"), required=False)
     products = fields.List(fields.Nested("PostProductSchema"), required=False)
     status = fields.Str(
@@ -434,6 +444,14 @@ class FeedItemSchema(Schema):
 class HybridFeedSchema(Schema):
     items = fields.List(fields.Nested(FeedItemSchema))
     pagination = fields.Nested(PaginationSchema)
+
+
+class FeedQueryArgs(PaginationQueryArgs):
+    """Query args for the main feed. Declares force_refresh so webargs doesn't
+    strip it — undeclared query params are silently excluded and the client's
+    pull-to-refresh (force_refresh=true) would never reach the service."""
+
+    force_refresh = fields.Bool(load_default=False)
 
 
 class ProductReviewSchema(Schema):

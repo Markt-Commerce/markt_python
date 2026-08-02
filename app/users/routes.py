@@ -9,6 +9,7 @@ from sqlalchemy import or_
 
 # project imports
 from app.libs.errors import AuthError, NotFoundError, UnverifiedEmailError
+from app.libs.auth_tokens import generate_auth_token
 from app.libs.pagination import Paginator
 from app.libs.schemas import PaginationQueryArgs
 from app.media.schemas import MediaSchema
@@ -69,6 +70,7 @@ class UserRegister(MethodView):
         try:
             user = AuthService.register_user(user_data)
             login_user(user)
+            user.access_token = generate_auth_token(user.id)
             return user
         except AuthError as e:
             abort(e.status_code, message=e.message)
@@ -89,6 +91,14 @@ class UserLogin(MethodView):
                 credentials.get("account_type"),  # Use .get() to handle optional field
             )
             login_user(user)
+            user.access_token = generate_auth_token(user.id)
+            # Gamification: first login of the day (idempotent per day).
+            try:
+                from app.signals import daily_login
+
+                daily_login.send("users", user_id=user.id)
+            except Exception as e:
+                logger.warning(f"gamification daily_login emit failed: {e}")
             return user
         except UnverifiedEmailError as e:
             # Return structured payload that frontend can detect easily

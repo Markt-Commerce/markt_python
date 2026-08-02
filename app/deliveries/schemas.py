@@ -76,7 +76,7 @@ class DeliveryAvailableOrdersQuerySchema(Schema):
     page = fields.Int(validate=validate.Range(min=1), missing=1)
     per_page = fields.Int(validate=validate.Range(min=1, max=50), missing=20)
     search_radius = fields.Int(
-        validate=validate.Range(min=100, max=50000), missing=3000
+        validate=validate.Range(min=100, max=50000), missing=5000
     )
 
 

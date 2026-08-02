@@ -25,7 +25,16 @@ class PaymentCreateSchema(Schema):
     """Payment creation schema"""
 
     order_id = fields.Str(required=True)
-    amount = fields.Float(required=True, validate=validate.Range(min=0))
+    amount = fields.Float(
+        validate=validate.Range(min=0),
+        allow_none=True,
+        metadata={
+            "description": (
+                "Optional. When provided, must match order.total exactly. "
+                "Server always charges order.total."
+            )
+        },
+    )
     currency = fields.Str(validate=validate.Length(equal=3), missing="NGN")
     method = fields.Str(missing="card")  # PaymentMethod.CARD.value
     metadata = fields.Dict(missing={})

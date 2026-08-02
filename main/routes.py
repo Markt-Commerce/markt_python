@@ -23,6 +23,8 @@ def register_blueprints(app, api):
         "payments",
         "notifications",
         "health",
+        "wallet",
+        "gamification",
     ]
 
     for module in modules:
@@ -30,8 +32,10 @@ def register_blueprints(app, api):
             mod = import_module(f"app.{module}.routes")
             bp = getattr(mod, "bp", None) or getattr(mod, f"{module}_bp")
 
-            # Add URL prefix to each blueprint
-            bp.url_prefix = "/api/v1" + (bp.url_prefix or "")
+            # Add URL prefix to each blueprint (idempotent across app factory calls)
+            prefix = bp.url_prefix or ""
+            if not prefix.startswith("/api/v1"):
+                bp.url_prefix = f"/api/v1{prefix}"
 
             api.register_blueprint(bp)
             logger.info(f"Registered blueprint for {module} at {bp.url_prefix}")

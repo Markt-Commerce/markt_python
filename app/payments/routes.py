@@ -100,12 +100,15 @@ class PaystackWebhook(MethodView):
                 abort(400, message="Missing webhook signature")
 
             # Get webhook payload
+            raw_body = request.get_data()
             payload = request.get_json()
             if not payload:
                 abort(400, message="Invalid webhook payload")
 
             # Process webhook
-            success = PaymentService.handle_webhook(payload, signature)
+            success = PaymentService.handle_webhook(
+                payload, signature, raw_body=raw_body
+            )
 
             if success:
                 return jsonify({"status": "success"}), 200
@@ -175,42 +178,46 @@ class PaymentInitialize(MethodView):
 @bp.route("/callback/<payment_id>")
 class PaymentCallback(MethodView):
     def get(self, payment_id):
-        """Handle payment callback from Paystack and redirect to frontend"""
+        """Handle payment callback from Paystack and redirect to the mobile app or web app"""
         from flask import redirect
+        from urllib.parse import urlencode
         from main.config import settings
+
+        # The platform is set on the callback_url when the payment was
+        # initialized (see PaymentService._initialize_paystack_transaction)
+        # and echoed back by Paystack's redirect.
+        platform = request.args.get("platform", "web")
+
+        def client_redirect(status: str, **params):
+            query_params = {k: v for k, v in params.items() if v is not None}
+            query = urlencode(query_params)
+            if platform == "mobile":
+                url = f"{settings.MOBILE_APP_SCHEME}payment/{status}"
+            else:
+                url = f"{settings.WEB_APP_BASE_URL}/payment-{status}"
+            return redirect(f"{url}?{query}" if query else url)
 
         try:
             # Get reference from query params
             reference = request.args.get("reference")
             if not reference:
-                # Redirect to frontend error page
-                frontend_url = settings.FRONTEND_BASE_URL or "http://localhost:3000"
-                return redirect(
-                    f"{frontend_url}/payment/failed?error=missing_reference"
-                )
+                return client_redirect("failed", error="missing_reference")
 
             # Verify payment
             verification_result = PaymentService.verify_payment(payment_id)
 
-            # Get frontend URL from config
-            frontend_url = settings.FRONTEND_BASE_URL or "http://localhost:3000"
-
             if verification_result["verified"]:
-                # Redirect to frontend success page
-                return redirect(
-                    f"{frontend_url}/payment/success?payment_id={payment_id}&reference={reference}"
+                return client_redirect(
+                    "success", payment_id=payment_id, reference=reference
                 )
             else:
-                # Redirect to frontend failure page
-                return redirect(
-                    f"{frontend_url}/payment/failed?payment_id={payment_id}&reference={reference}"
+                return client_redirect(
+                    "failed", payment_id=payment_id, reference=reference
                 )
 
         except Exception as e:
             current_app.logger.error(f"Payment callback error: {str(e)}")
-            # Redirect to frontend error page
-            frontend_url = settings.FRONTEND_BASE_URL or "http://localhost:3000"
-            return redirect(f"{frontend_url}/payment/failed?error=server_error")
+            return client_redirect("failed", error="server_error")
 
 
 # Admin routes for payment management

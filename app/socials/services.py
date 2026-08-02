@@ -65,6 +65,33 @@ from .constants import POST_STATUS_TRANSITIONS
 logger = logging.getLogger(__name__)
 
 
+class _SignalPost:
+    """Minimal detached carrier for post gamification signals.
+
+    Signals fire post-commit, so we pass a tiny value object with just the
+    fields the listener needs (id, author user_id) rather than a live/detached
+    ORM row that could trigger lazy loads.
+    """
+
+    __slots__ = ("id", "user_id")
+
+    def __init__(self, post_id, user_id):
+        self.id = post_id
+        self.user_id = user_id
+
+
+class _SignalReview:
+    """Minimal detached carrier for review gamification signals."""
+
+    __slots__ = ("id", "user_id", "rating", "product_id")
+
+    def __init__(self, review_id, user_id, rating, product_id):
+        self.id = review_id
+        self.user_id = user_id
+        self.rating = rating
+        self.product_id = product_id
+
+
 class NicheService:
     """Service for managing niche communities with role-based access control"""
 
@@ -983,12 +1010,40 @@ class PostService:
                     {post.id: int(post.created_at.timestamp())},
                 )
 
-                return post
+                post_id = post.id
+
+            # Post-commit: award gamification points to the author.
+            PostService._emit_gam_post_created(post_id, user_id)
+            return post
         except SQLAlchemyError as e:
             logger.error(f"Error creating post: {str(e)}")
             raise ConflictError("Failed to create post")
         except (RedisError, RedisConnectionError) as e:
             logger.warning(f"Redis error while creating post: {str(e)}", exc_info=True)
+
+    @staticmethod
+    def _emit_gam_post_created(post_id, user_id):
+        """Fire the post-created domain signal (gamification listens)."""
+        try:
+            from app.signals import post_created
+
+            post_created.send("socials", post=_SignalPost(post_id, user_id))
+        except Exception as e:  # never let gamification break post creation
+            logger.warning(f"gamification post_created emit failed: {e}")
+
+    @staticmethod
+    def _emit_gam_post_reaction(post_id, author_user_id, reactor_id):
+        """Fire the post-reaction signal for the post author."""
+        try:
+            from app.signals import post_reaction_added
+
+            post_reaction_added.send(
+                "socials",
+                post=_SignalPost(post_id, author_user_id),
+                reactor_id=reactor_id,
+            )
+        except Exception as e:
+            logger.warning(f"gamification post_reaction emit failed: {e}")
 
     @staticmethod
     def get_post(post_id):
@@ -1156,7 +1211,12 @@ class PostService:
                 except Exception as e:
                     logger.warning(f"Failed to queue post_liked event: {e}")
 
-                return like
+                author_id = post.user_id if (post and post.user_id != user_id) else None
+
+            # Post-commit: award reaction points to the post author (capped/day).
+            if author_id:
+                PostService._emit_gam_post_reaction(post_id, author_id, user_id)
+            return like
         except SQLAlchemyError as e:
             logger.error(f"Error liking post: {str(e)}")
             raise ConflictError("Failed to like post")
@@ -1893,7 +1953,22 @@ class ProductSocialService:
                 except Exception as e:
                     logger.warning(f"Failed to queue review_added event: {e}")
 
-                return review
+                review_id = review.id
+                review_rating = data.get("rating")
+
+            # Post-commit: award gamification points to the reviewer and fold the
+            # rating into the seller's aggregate for badge evaluation.
+            try:
+                from app.signals import review_created
+
+                review_created.send(
+                    "socials",
+                    review=_SignalReview(review_id, user_id, review_rating, product_id),
+                )
+            except Exception as e:
+                logger.warning(f"gamification review_created emit failed: {e}")
+
+            return review
         except Exception as e:
             logger.error(f"Error adding review: {str(e)}")
             raise APIError("Failed to add review", 500)
@@ -2189,7 +2264,8 @@ class FeedService:
     @staticmethod
     def _hydrate_cached_items(cached_items, user_id=None):
         """Enhanced hydration with better error handling and performance.
-        user_id: current user for liked_by_me (posts) and is_followed/follower_count (sellers)."""
+        user_id: current user for liked_by_me (posts) and is_followed/follower_count (sellers).
+        """
         if not cached_items:
             return []
 
@@ -2329,104 +2405,116 @@ class FeedService:
                 if isinstance(item_id, bytes):
                     item_id = item_id.decode("utf-8")
 
-                if item_id.startswith("PST_"):
-                    post = posts_dict.get(item_id)
-                    if post:
-                        hydrated_items.append(
-                            {
-                                "id": post.id,
-                                "type": "post",
-                                "caption": post.caption,
-                                "user": {
-                                    "id": post.user.id,
-                                    "username": post.user.username,
-                                    "profile_picture": post.user.profile_picture,
-                                },
-                                "media": [
-                                    {
-                                        "url": m.media.get_url(),
-                                        "type": m.media.media_type.value,
-                                        "platform": m.platform,
-                                        "post_type": m.post_type,
-                                        "aspect_ratio": m.aspect_ratio,
-                                        "optimized_for_platform": m.optimized_for_platform,
-                                    }
-                                    for m in post.social_media
-                                ],
-                                "likes_count": len(post.likes),
-                                "comments_count": len(post.comments),
-                                "liked_by_me": post.id in liked_post_ids,
-                                "created_at": post.created_at.isoformat(),
-                                "score": score,
-                                "niche": {
-                                    "id": post.niche_posts[0].niche.id,
-                                    "name": post.niche_posts[0].niche.name,
-                                    "slug": post.niche_posts[0].niche.slug,
-                                    "visibility": post.niche_posts[
-                                        0
-                                    ].niche.visibility.value,
-                                    "is_pinned": post.niche_posts[0].is_pinned,
-                                    "is_featured": post.niche_posts[0].is_featured,
-                                    "niche_likes": post.niche_posts[0].niche_likes,
-                                    "niche_comments": post.niche_posts[
-                                        0
-                                    ].niche_comments,
+                try:
+                    if item_id.startswith("PST_"):
+                        post = posts_dict.get(item_id)
+                        if post:
+                            hydrated_items.append(
+                                {
+                                    "id": post.id,
+                                    "type": "post",
+                                    "caption": post.caption,
+                                    "user": {
+                                        "id": post.user.id,
+                                        "username": post.user.username,
+                                        "profile_picture": post.user.profile_picture,
+                                    },
+                                    "media": [
+                                        {
+                                            "url": m.media.get_url(),
+                                            "type": m.media.media_type.value,
+                                            "platform": m.platform,
+                                            "post_type": m.post_type,
+                                            "aspect_ratio": m.aspect_ratio,
+                                            "optimized_for_platform": m.optimized_for_platform,
+                                        }
+                                        for m in post.social_media
+                                    ],
+                                    "likes_count": len(post.likes),
+                                    "comments_count": len(post.comments),
+                                    "liked_by_me": post.id in liked_post_ids,
+                                    "created_at": post.created_at.isoformat(),
+                                    "score": score,
+                                    "niche": (
+                                        {
+                                            "id": post.niche_posts[0].niche.id,
+                                            "name": post.niche_posts[0].niche.name,
+                                            "slug": post.niche_posts[0].niche.slug,
+                                            "visibility": post.niche_posts[
+                                                0
+                                            ].niche.visibility.value,
+                                            "is_pinned": post.niche_posts[0].is_pinned,
+                                            "is_featured": post.niche_posts[
+                                                0
+                                            ].is_featured,
+                                            "niche_likes": post.niche_posts[
+                                                0
+                                            ].niche_likes,
+                                            "niche_comments": post.niche_posts[
+                                                0
+                                            ].niche_comments,
+                                        }
+                                        if post.niche_posts
+                                        else None
+                                    ),
                                 }
-                                if post.niche_posts
-                                else None,
-                            }
-                        )
+                            )
 
-                elif item_id.startswith("PRD_"):
-                    product = products_dict.get(item_id)
-                    if product:
-                        seller_user_id = (
-                            product.seller.user.id
-                            if (
-                                product.seller and getattr(product.seller, "user", None)
-                            )
-                            else None
-                        )
-                        seller_payload = {
-                            "id": product.seller.id,
-                            "shop_name": product.seller.shop_name,
-                            "user": {
-                                "id": product.seller.user.id,
-                                "username": product.seller.user.username,
-                                "profile_picture": product.seller.user.profile_picture,
-                            },
-                        }
-                        if seller_user_id is not None:
-                            seller_payload["follower_count"] = follower_counts.get(
-                                seller_user_id, 0
-                            )
-                            seller_payload["is_followed"] = (
-                                seller_user_id in followed_by_me if user_id else False
-                            )
-                        hydrated_items.append(
-                            {
-                                "id": product.id,
-                                "type": "product",
-                                "name": product.name,
-                                "description": product.description,
-                                "price": float(product.price),
-                                "seller": seller_payload,
-                                "images": [
-                                    {
-                                        "url": m.media.get_url(),
-                                        "type": m.media.media_type.value,
-                                        "sort_order": m.sort_order,
-                                        "is_featured": m.is_featured,
-                                        "alt_text": m.alt_text,
-                                    }
-                                    for m in product.images
-                                ],
-                                "rating": product.average_rating,
-                                "reviews_count": len(product.reviews),
-                                "created_at": product.created_at.isoformat(),
-                                "score": score,
+                    elif item_id.startswith("PRD_"):
+                        product = products_dict.get(item_id)
+                        # A product without a linked seller/user can't be
+                        # rendered — skip it rather than raising.
+                        if (
+                            product
+                            and product.seller
+                            and getattr(product.seller, "user", None)
+                        ):
+                            seller_user_id = product.seller.user.id
+                            seller_payload = {
+                                "id": product.seller.id,
+                                "shop_name": product.seller.shop_name,
+                                "user": {
+                                    "id": product.seller.user.id,
+                                    "username": product.seller.user.username,
+                                    "profile_picture": product.seller.user.profile_picture,
+                                },
+                                "follower_count": follower_counts.get(
+                                    seller_user_id, 0
+                                ),
+                                "is_followed": (
+                                    seller_user_id in followed_by_me
+                                    if user_id
+                                    else False
+                                ),
                             }
-                        )
+                            hydrated_items.append(
+                                {
+                                    "id": product.id,
+                                    "type": "product",
+                                    "name": product.name,
+                                    "description": product.description,
+                                    "price": float(product.price),
+                                    "seller": seller_payload,
+                                    "images": [
+                                        {
+                                            "url": m.media.get_url(),
+                                            "type": m.media.media_type.value,
+                                            "sort_order": m.sort_order,
+                                            "is_featured": m.is_featured,
+                                            "alt_text": m.alt_text,
+                                        }
+                                        for m in product.images
+                                    ],
+                                    "rating": product.average_rating,
+                                    "reviews_count": len(product.reviews),
+                                    "created_at": product.created_at.isoformat(),
+                                    "score": score,
+                                }
+                            )
+                except Exception as item_err:
+                    # One bad record must not blank the whole feed — skip it.
+                    logger.warning(f"Skipping feed item {item_id}: {str(item_err)}")
+                    continue
 
             return hydrated_items
 
@@ -2506,6 +2594,20 @@ class FeedService:
                 niche_items = FeedService._get_niche_content(niche_id, user_id)
                 feed_items.extend(niche_items)
 
+            # Personalized combines several sources that can return the same
+            # item — keep the first occurrence (followed > engaged > trending
+            # > discover) so pages never repeat an id.
+            seen_ids = set()
+            deduped_items = []
+            for item in feed_items:
+                item_id = item.get("id") if isinstance(item, dict) else None
+                if item_id and item_id in seen_ids:
+                    continue
+                if item_id:
+                    seen_ids.add(item_id)
+                deduped_items.append(item)
+            feed_items = deduped_items
+
             # Apply personalization scoring
             scored_items = FeedService._apply_personalization_scoring(
                 feed_items, user_id
@@ -2514,11 +2616,28 @@ class FeedService:
             # Apply diversity and freshness
             final_items = FeedService._apply_diversity_and_freshness(scored_items)
 
-            return final_items
+            # Young-marketplace safeguard: personalized sources are sparse or
+            # empty for new users (no follows, likes, or views yet). Backfill
+            # with recent platform content so the main feed always has items
+            # to show and paginate.
+            if feed_type == "personalized" and len(final_items) < 40:
+                existing_ids = {i["id"] for i in final_items}
+                backfill = [
+                    item
+                    for item in FeedService._get_recent_content_fallback()
+                    if item["id"] not in existing_ids
+                ]
+                final_items.extend(FeedService._apply_diversity_and_freshness(backfill))
+
+            return final_items[:100]
 
         except Exception as e:
             logger.error(f"Error generating fresh feed: {str(e)}")
-            return FeedService._get_fallback_feed(page=1, per_page=20, user_id=user_id)
+            # Return a list of item-refs. _get_fallback_feed returns an already
+            # paginated dict, which the caller would then try to hydrate/paginate
+            # again — iterating its keys and yielding an empty feed. The recent
+            # content list hydrates correctly and keeps the feed non-empty.
+            return FeedService._get_recent_content_fallback()
 
     @staticmethod
     def _get_user_interests(user_id):
@@ -2671,7 +2790,10 @@ class FeedService:
             # Analyze patterns
             preferences = {
                 "content_ratio": 0.5,  # Default 50% posts, 50% products
-                "price_range": {"min": 0, "max": 1000},
+                # None = no price constraint until we learn one from view history.
+                # A hardcoded default (e.g. 0-1000) filters out virtually all
+                # naira-priced products and empties the discover source.
+                "price_range": None,
                 "category_preferences": {},
                 "engagement_preference": "high",  # high/medium/low
                 "freshness_preference": "recent",  # recent/trending/classic
@@ -2820,7 +2942,7 @@ class FeedService:
                 "popular_posts", 0, 99, withscores=True
             )
             trending_products = redis_client.zrevrange(
-                "popular_products", 0, 99, withscores=True
+                "trending_products", 0, 99, withscores=True
             )
         except RedisError:
             return []
@@ -2930,23 +3052,26 @@ class FeedService:
                         "id": post.id,
                         "type": "post",
                         "score": score,
-                        "created_at": post.created_at
-                        if hasattr(post, "created_at")
-                        else datetime.utcnow(),
+                        "created_at": (
+                            post.created_at
+                            if hasattr(post, "created_at")
+                            else datetime.utcnow()
+                        ),
                     }
                 )
 
-            # Get products in user's price range
-            price_range = preferences.get("price_range", {"min": 0, "max": 1000})
-            products = (
-                session.query(Product)
-                .filter(
-                    Product.price.between(price_range["min"], price_range["max"]),
-                    Product.status == Product.Status.ACTIVE,
+            # Get products in user's price range. Only constrain by price when a
+            # range was actually learned from the user's view history.
+            price_range = preferences.get("price_range")
+            products_query = session.query(Product).filter(
+                Product.status == Product.Status.ACTIVE
+            )
+            if price_range:
+                products_query = products_query.filter(
+                    Product.price.between(price_range["min"], price_range["max"])
                 )
-                .order_by(Product.created_at.desc())
-                .limit(20)
-                .all()
+            products = (
+                products_query.order_by(Product.created_at.desc()).limit(20).all()
             )
             for product in products:
                 score = (
@@ -2959,9 +3084,11 @@ class FeedService:
                         "id": product.id,
                         "type": "product",
                         "score": score,
-                        "created_at": product.created_at
-                        if hasattr(product, "created_at")
-                        else datetime.utcnow(),
+                        "created_at": (
+                            product.created_at
+                            if hasattr(product, "created_at")
+                            else datetime.utcnow()
+                        ),
                     }
                 )
 
@@ -3056,14 +3183,15 @@ class FeedService:
     @staticmethod
     def _get_fallback_feed(page=1, per_page=20, user_id=None):
         """Get fallback trending feed when personalized feed fails.
-        user_id: optional; when set, hydration includes liked_by_me and seller is_followed."""
+        user_id: optional; when set, hydration includes liked_by_me and seller is_followed.
+        """
         try:
             # Get trending content from Redis
             trending_posts = redis_client.zrevrange(
                 "popular_posts", 0, 49, withscores=True
             )
             trending_products = redis_client.zrevrange(
-                "popular_products", 0, 49, withscores=True
+                "trending_products", 0, 49, withscores=True
             )
 
             feed_items = []
@@ -3120,7 +3248,7 @@ class FeedService:
                     )
                     .filter(Post.status == PostStatus.ACTIVE)
                     .order_by(Post.created_at.desc())
-                    .limit(20)
+                    .limit(50)
                     .all()
                 )
 
@@ -3134,7 +3262,7 @@ class FeedService:
                     session.query(Product)
                     .filter(Product.status == Product.Status.ACTIVE)
                     .order_by(Product.created_at.desc())
-                    .limit(20)
+                    .limit(50)
                     .all()
                 )
 
@@ -3190,9 +3318,11 @@ class FeedService:
                     "id": item.get("id"),
                     "type": item.get("type"),
                     "score": item.get("score", 0),
-                    "created_at": item.get("created_at").isoformat()
-                    if item.get("created_at")
-                    else None,
+                    "created_at": (
+                        item.get("created_at").isoformat()
+                        if item.get("created_at")
+                        else None
+                    ),
                 }
                 serializable_items.append(serializable_item)
 
@@ -3288,9 +3418,14 @@ class FeedService:
         """Check if product matches user preferences"""
         user_preferences = FeedService._get_user_preferences(user_id)
 
-        # Check price range
-        price_range = user_preferences.get("price_range", {"min": 0, "max": 1000})
-        if not (price_range["min"] <= product.price <= price_range["max"]):
+        # Check price range. price_range is None until one is learned from the
+        # user's view history (new users have none). `.get(key, default)` returns
+        # the stored None here, not the default, so guard explicitly — indexing
+        # None["min"] would raise and crash feed generation for every new user.
+        price_range = user_preferences.get("price_range")
+        if price_range and not (
+            price_range["min"] <= product.price <= price_range["max"]
+        ):
             return False
 
         # Check category preferences
@@ -3342,7 +3477,7 @@ class FeedService:
                 "popular_posts", 0, 99, withscores=True
             )
             trending_products = redis_client.zrevrange(
-                "popular_products", 0, 99, withscores=True
+                "trending_products", 0, 99, withscores=True
             )
 
             feed_items = []
