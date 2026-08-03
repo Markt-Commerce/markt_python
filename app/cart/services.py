@@ -297,20 +297,25 @@ class CartService:
         import uuid
 
         with session_scope() as session:
-            # Check idempotency if key provided
-            if idempotency_key:
-                existing_order = (
-                    session.query(Order)
-                    .filter_by(idempotency_key=idempotency_key)
-                    .first()
-                )
-                if existing_order:
-                    return existing_order
-
             # Validate user
             user = session.query(User).get(user_id)
             if not user or not user.is_buyer:
                 raise ForbiddenError("Only buyers can checkout")
+
+            # Check idempotency if key provided — scoped to this buyer so a
+            # key reused by (or leaked from) another account can never return
+            # someone else's order.
+            if idempotency_key:
+                existing_order = (
+                    session.query(Order)
+                    .filter_by(
+                        idempotency_key=idempotency_key,
+                        buyer_id=user.buyer_account.id,
+                    )
+                    .first()
+                )
+                if existing_order:
+                    return existing_order
 
             # Get cart
             cart = CartService.get_cart(user_id)

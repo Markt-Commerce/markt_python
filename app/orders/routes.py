@@ -78,8 +78,26 @@ class OrderDetail(MethodView):
     @login_required
     @bp.response(200, OrderSchema)
     def get(self, order_id):
-        """Get order details"""
-        return OrderService.get_order(order_id)
+        """Get order details (buyer who placed it, or a seller with items in it)"""
+        order = OrderService.get_order(order_id)
+        if not order:
+            abort(404, message="Order not found")
+
+        is_buyer_owner = bool(
+            current_user.buyer_account
+            and order.buyer_id == current_user.buyer_account.id
+        )
+        is_involved_seller = bool(
+            current_user.seller_account
+            and any(
+                item.seller_id == current_user.seller_account.id
+                for item in order.items
+            )
+        )
+        if not (is_buyer_owner or is_involved_seller):
+            # 404 (not 403) so order ids can't be probed for existence
+            abort(404, message="Order not found")
+        return order
 
 
 @bp.route("/seller")
