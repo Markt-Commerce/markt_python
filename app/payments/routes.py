@@ -44,9 +44,12 @@ class PaymentCreate(MethodView):
     @bp.response(201, PaymentSchema)
     def post(self, payment_data):
         """Create a new payment"""
+        # .get(): `amount` is optional in PaymentCreateSchema with no default,
+        # so bracket access raised KeyError (-> 500) whenever a client omitted
+        # it. The service already resolves a missing amount from order.total.
         return PaymentService.create_payment(
             order_id=payment_data["order_id"],
-            amount=payment_data["amount"],
+            amount=payment_data.get("amount"),
             currency=payment_data.get("currency", "NGN"),
             method=payment_data.get("method", "card"),
             metadata=payment_data.get("metadata"),
@@ -130,9 +133,11 @@ class PaymentInitialize(MethodView):
     def post(self, payment_data):
         """Initialize Paystack payment (for frontend integration)"""
         try:
+            # .get(): see PaymentCreate — omitting the optional `amount` must
+            # not 500; the service falls back to order.total.
             payment = PaymentService.create_payment(
                 order_id=payment_data["order_id"],
-                amount=payment_data["amount"],
+                amount=payment_data.get("amount"),
                 currency=payment_data.get("currency", "NGN"),
                 method=payment_data.get("method", "card"),
                 metadata=payment_data.get("metadata"),
