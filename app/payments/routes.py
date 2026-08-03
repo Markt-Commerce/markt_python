@@ -221,8 +221,27 @@ class PaymentCallback(MethodView):
                 )
 
         except Exception as e:
-            current_app.logger.error(f"Payment callback error: {str(e)}")
-            return client_redirect("failed", error="server_error")
+            current_app.logger.error(
+                f"Payment callback error: {str(e)}", exc_info=True
+            )
+            # Verification can fail transiently (gateway timeout, race with the
+            # charge.success webhook). If the webhook already completed this
+            # payment, the money is confirmed — never show the user "failed".
+            try:
+                from .models import PaymentStatus
+
+                payment = PaymentService.get_payment(payment_id)
+                if payment and payment.status == PaymentStatus.COMPLETED:
+                    return client_redirect(
+                        "success",
+                        payment_id=payment_id,
+                        reference=request.args.get("reference"),
+                    )
+            except Exception:
+                pass
+            return client_redirect(
+                "failed", payment_id=payment_id, error="server_error"
+            )
 
 
 # Admin routes for payment management
