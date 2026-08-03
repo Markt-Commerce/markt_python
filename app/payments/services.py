@@ -76,12 +76,16 @@ class PaymentService:
             return False
 
         with session_scope() as session:
-            query = session.query(Payment).options(
-                joinedload(Payment.order).joinedload(Order.items),
-                joinedload(Payment.order).joinedload(Order.buyer),
-            )
+            # Row-lock the payment: Paystack's charge.success webhook and the
+            # browser callback's verify both land here within the same second.
+            # Without the lock both read status=PENDING, both reduce inventory,
+            # and the loser can blow up with "Insufficient stock" — turning a
+            # gateway-confirmed success into a failed redirect for the user.
+            # (No joinedload here: FOR UPDATE can't be combined with the outer
+            # joins eager loading generates; relations lazy-load fine below.)
+            query = session.query(Payment).with_for_update()
             if payment_id:
-                payment = query.get(payment_id)
+                payment = query.filter_by(id=payment_id).first()
             else:
                 payment = query.filter_by(transaction_id=reference).first()
 
@@ -357,15 +361,28 @@ class PaymentService:
                 headers={
                     "Authorization": f"Bearer {PaymentService.PAYSTACK_SECRET_KEY}"
                 },
+                timeout=20,
             )
 
             if response.status_code == 200:
                 data = response.json()
                 if data["status"] and data["data"]["status"] == "success":
-                    PaymentService.complete_payment(
-                        payment_id=payment_id,
-                        gateway_response=data,
-                    )
+                    # The gateway confirmed the charge — from here on the user
+                    # must see success. Local completion (inventory, ledger,
+                    # notifications) can fail transiently (e.g. losing the race
+                    # with the webhook); log it and let the webhook/verify
+                    # retry reconcile instead of telling a paid user "failed".
+                    try:
+                        PaymentService.complete_payment(
+                            payment_id=payment_id,
+                            gateway_response=data,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Local completion failed after gateway-confirmed "
+                            "success (payment %s); webhook will reconcile",
+                            payment_id,
+                        )
                     return {
                         "verified": True,
                         "amount": data["data"]["amount"] / 100,
@@ -548,6 +565,7 @@ class PaymentService:
                 headers={
                     "Authorization": f"Bearer {PaymentService.PAYSTACK_SECRET_KEY}"
                 },
+                timeout=20,
             )
 
             if response.status_code == 200:
@@ -583,6 +601,7 @@ class PaymentService:
                 headers={
                     "Authorization": f"Bearer {PaymentService.PAYSTACK_SECRET_KEY}"
                 },
+                timeout=20,
             )
 
             if response.status_code == 200:
@@ -649,6 +668,7 @@ class PaymentService:
                 headers={
                     "Authorization": f"Bearer {PaymentService.PAYSTACK_SECRET_KEY}"
                 },
+                timeout=20,
             )
 
             if response.status_code != 200:
