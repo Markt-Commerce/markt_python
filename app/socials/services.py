@@ -2317,9 +2317,10 @@ class FeedService:
                         .all()
                     )
                     # Counts via GROUP BY instead of loading every like/comment row.
-                    likes_counts, comments_counts = (
-                        FeedService._batch_post_engagement_counts(session, post_ids)
-                    )
+                    (
+                        likes_counts,
+                        comments_counts,
+                    ) = FeedService._batch_post_engagement_counts(session, post_ids)
 
             if product_ids:
                 with session_scope() as session:
@@ -2336,9 +2337,10 @@ class FeedService:
                         .all()
                     )
                     # Counts/avg via GROUP BY instead of loading every review row.
-                    review_counts, avg_ratings = (
-                        FeedService._batch_product_review_stats(session, product_ids)
-                    )
+                    (
+                        review_counts,
+                        avg_ratings,
+                    ) = FeedService._batch_product_review_stats(session, product_ids)
 
             # Create lookup dictionaries
             posts_dict = {post.id: post for post in posts}
@@ -2699,8 +2701,10 @@ class FeedService:
                 price_range
                 and not (price_range["min"] <= product.price <= price_range["max"])
             )
-            matches_preferences = price_ok and bool(category_ids) and any(
-                cid in category_preferences for cid in category_ids
+            matches_preferences = (
+                price_ok
+                and bool(category_ids)
+                and any(cid in category_preferences for cid in category_ids)
             )
 
             context[product.id] = {
@@ -3949,7 +3953,10 @@ class FeedService:
                 filtered_posts.append(post)
                 continue
             niche = post.niche_posts[0].niche
-            if niche.visibility == NicheVisibility.PUBLIC or niche.id in member_niche_ids:
+            if (
+                niche.visibility == NicheVisibility.PUBLIC
+                or niche.id in member_niche_ids
+            ):
                 filtered_posts.append(post)
         return filtered_posts
 
