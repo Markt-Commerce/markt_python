@@ -221,9 +221,7 @@ class PaymentCallback(MethodView):
                 )
 
         except Exception as e:
-            current_app.logger.error(
-                f"Payment callback error: {str(e)}", exc_info=True
-            )
+            current_app.logger.error(f"Payment callback error: {str(e)}", exc_info=True)
             # Verification can fail transiently (gateway timeout, race with the
             # charge.success webhook). If the webhook already completed this
             # payment, the money is confirmed — never show the user "failed".

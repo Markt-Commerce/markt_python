@@ -300,9 +300,11 @@ class MediaStatus(MethodView):
                 return {
                     "media_id": media_id,
                     "processing_status": media.processing_status,
-                    "processing_error": media.processing_error
-                    if hasattr(media, "processing_error")
-                    else None,
+                    "processing_error": (
+                        media.processing_error
+                        if hasattr(media, "processing_error")
+                        else None
+                    ),
                     "variants_count": len(variants),
                     "variants": [
                         {
@@ -318,9 +320,11 @@ class MediaStatus(MethodView):
                     ],
                     "urls": media_service.get_media_urls(media, include_variants=True),
                     "created_at": media.created_at,
-                    "updated_at": media.updated_at
-                    if hasattr(media, "updated_at") and media.updated_at
-                    else None,
+                    "updated_at": (
+                        media.updated_at
+                        if hasattr(media, "updated_at") and media.updated_at
+                        else None
+                    ),
                 }
         except Exception as e:
             logger.error(f"Error getting media status: {e}")
@@ -411,9 +415,9 @@ class MediaDelete(MethodView):
                 return {
                     "success": True,
                     "message": "Media deleted successfully",
-                    "deleted_files": 1 + len(media.variants)
-                    if hasattr(media, "variants")
-                    else 1,
+                    "deleted_files": (
+                        1 + len(media.variants) if hasattr(media, "variants") else 1
+                    ),
                 }
             else:
                 abort(500, message="Failed to delete media")

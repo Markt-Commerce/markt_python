@@ -281,9 +281,11 @@ class MediaService:
                         original_img = original_img.convert("RGBA")
                     background.paste(
                         original_img,
-                        mask=original_img.split()[-1]
-                        if original_img.mode == "RGBA"
-                        else None,
+                        mask=(
+                            original_img.split()[-1]
+                            if original_img.mode == "RGBA"
+                            else None
+                        ),
                     )
                     original_img = background
                 elif original_img.mode != "RGB":

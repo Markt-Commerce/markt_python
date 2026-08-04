@@ -43,7 +43,6 @@ from app.orders.models import OrderItem
 from app.media.services import media_service
 from app.media.models import Media, ProductImage, MediaVariantType
 
-
 logger = logging.getLogger(__name__)
 
 

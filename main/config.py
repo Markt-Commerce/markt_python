@@ -78,9 +78,11 @@ class Config:
         # For development: http://localhost:3000
         self.WEB_APP_BASE_URL = config(
             "WEB_APP_BASE_URL",
-            default="http://localhost:3000"
-            if self.ENV == "development"
-            else "https://marktcommerce.com/app",
+            default=(
+                "http://localhost:3000"
+                if self.ENV == "development"
+                else "https://marktcommerce.com/app"
+            ),
         )
 
         # Mobile app deep link scheme for payment redirects (e.g. markt://)
