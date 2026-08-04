@@ -90,8 +90,7 @@ class OrderDetail(MethodView):
         is_involved_seller = bool(
             current_user.seller_account
             and any(
-                item.seller_id == current_user.seller_account.id
-                for item in order.items
+                item.seller_id == current_user.seller_account.id for item in order.items
             )
         )
         if not (is_buyer_owner or is_involved_seller):

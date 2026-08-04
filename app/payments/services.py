@@ -162,17 +162,19 @@ class PaymentService:
                 {
                     "payment_id": payment.id,
                     "order_id": payment.order_id,
-                    "user_id": payment.order.buyer.user_id
-                    if payment.order and payment.order.buyer
-                    else None,
+                    "user_id": (
+                        payment.order.buyer.user_id
+                        if payment.order and payment.order.buyer
+                        else None
+                    ),
                     "amount": payment.amount,
                     "status": payment.status.value,
                     "transaction_id": payment.transaction_id,
                     "metadata": {
                         "method": payment.method.value if payment.method else None,
-                        "order_number": payment.order.order_number
-                        if payment.order
-                        else None,
+                        "order_number": (
+                            payment.order.order_number if payment.order else None
+                        ),
                     },
                 },
             )
@@ -903,12 +905,12 @@ class PaymentService:
                 "transaction_id": payment.transaction_id,
                 "gateway_response": payment.gateway_response,
                 "paid_at": payment.paid_at.isoformat() if payment.paid_at else None,
-                "created_at": payment.created_at.isoformat()
-                if payment.created_at
-                else None,
-                "updated_at": payment.updated_at.isoformat()
-                if payment.updated_at
-                else None,
+                "created_at": (
+                    payment.created_at.isoformat() if payment.created_at else None
+                ),
+                "updated_at": (
+                    payment.updated_at.isoformat() if payment.updated_at else None
+                ),
             }
             redis_client.setex(
                 cache_key, PaymentService.CACHE_EXPIRY, str(payment_data)

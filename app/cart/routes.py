@@ -19,7 +19,6 @@ from .schemas import (
     CartSummarySchema,
 )
 
-
 bp = Blueprint(
     "cart", __name__, description="Shopping cart operations", url_prefix="/cart"
 )

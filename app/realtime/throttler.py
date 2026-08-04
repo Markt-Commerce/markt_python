@@ -2,6 +2,7 @@
 Event throttler for optimizing real-time event broadcasting
 This module implements debouncing and throttling for high-frequency events
 """
+
 import time
 import logging
 from collections import defaultdict

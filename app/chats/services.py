@@ -308,42 +308,48 @@ class ChatService:
                             "profile_picture": other_user.profile_picture,
                             "is_seller": hasattr(other_user, "seller_account"),
                         },
-                        "product": {
-                            "id": room.product.id,
-                            "name": room.product.name,
-                            "price": float(room.product.price),
-                            "image": (
-                                room.product.images[0].media.get_url()
-                                if (
-                                    room.product.images
-                                    and len(room.product.images) > 0
-                                    and room.product.images[0].media
-                                )
-                                else None
-                            ),
-                        }
-                        if room.product
-                        else None,
-                        "request": {
-                            "id": room.request.id,
-                            "title": room.request.title,
-                            "description": room.request.description,
-                        }
-                        if room.request
-                        else None,
-                        "last_message": {
-                            "id": last_message.id,
-                            "sender_id": last_message.sender_id,
-                            "content": last_message.content,
-                            "message_type": last_message.message_type,
-                            "created_at": last_message.created_at,
-                        }
-                        if last_message
-                        else None,
+                        "product": (
+                            {
+                                "id": room.product.id,
+                                "name": room.product.name,
+                                "price": float(room.product.price),
+                                "image": (
+                                    room.product.images[0].media.get_url()
+                                    if (
+                                        room.product.images
+                                        and len(room.product.images) > 0
+                                        and room.product.images[0].media
+                                    )
+                                    else None
+                                ),
+                            }
+                            if room.product
+                            else None
+                        ),
+                        "request": (
+                            {
+                                "id": room.request.id,
+                                "title": room.request.title,
+                                "description": room.request.description,
+                            }
+                            if room.request
+                            else None
+                        ),
+                        "last_message": (
+                            {
+                                "id": last_message.id,
+                                "sender_id": last_message.sender_id,
+                                "content": last_message.content,
+                                "message_type": last_message.message_type,
+                                "created_at": last_message.created_at,
+                            }
+                            if last_message
+                            else None
+                        ),
                         "unread_count": unread_count,
-                        "last_message_at": room.last_message_at
-                        if room.last_message_at
-                        else None,
+                        "last_message_at": (
+                            room.last_message_at if room.last_message_at else None
+                        ),
                     }
 
                     enhanced_rooms.append(room_data)
@@ -532,29 +538,33 @@ class ChatService:
                         "profile_picture": other_user.profile_picture,
                         "is_seller": hasattr(other_user, "seller_account"),
                     },
-                    "product": {
-                        "id": room.product.id,
-                        "name": room.product.name,
-                        "price": float(room.product.price),
-                        "image": (
-                            room.product.images[0].media.get_url()
-                            if (
-                                room.product.images
-                                and len(room.product.images) > 0
-                                and room.product.images[0].media
-                            )
-                            else None
-                        ),
-                    }
-                    if room.product
-                    else None,
-                    "request": {
-                        "id": room.request.id,
-                        "title": room.request.title,
-                        "description": room.request.description,
-                    }
-                    if room.request
-                    else None,
+                    "product": (
+                        {
+                            "id": room.product.id,
+                            "name": room.product.name,
+                            "price": float(room.product.price),
+                            "image": (
+                                room.product.images[0].media.get_url()
+                                if (
+                                    room.product.images
+                                    and len(room.product.images) > 0
+                                    and room.product.images[0].media
+                                )
+                                else None
+                            ),
+                        }
+                        if room.product
+                        else None
+                    ),
+                    "request": (
+                        {
+                            "id": room.request.id,
+                            "title": room.request.title,
+                            "description": room.request.description,
+                        }
+                        if room.request
+                        else None
+                    ),
                     "messages": ChatService._format_room_messages(
                         reversed(messages), session
                     ),
@@ -1307,13 +1317,15 @@ class DiscountService:
                     "discount_message": discount.discount_message,
                     "discount_code": discount.discount_code,
                     "created_at": discount.created_at.isoformat(),
-                    "product": {
-                        "id": room.product.id,
-                        "name": room.product.name,
-                        "price": float(room.product.price),
-                    }
-                    if room.product
-                    else None,
+                    "product": (
+                        {
+                            "id": room.product.id,
+                            "name": room.product.name,
+                            "price": float(room.product.price),
+                        }
+                        if room.product
+                        else None
+                    ),
                     "offered_to": {
                         "id": room.buyer.id,
                         "username": room.buyer.username,
@@ -1549,13 +1561,15 @@ class DiscountService:
                             "discount_code": discount.discount_code,
                             "created_at": discount.created_at.isoformat(),
                             "is_valid": discount.is_valid(),
-                            "product": {
-                                "id": discount.product.id,
-                                "name": discount.product.name,
-                                "price": float(discount.product.price),
-                            }
-                            if discount.product
-                            else None,
+                            "product": (
+                                {
+                                    "id": discount.product.id,
+                                    "name": discount.product.name,
+                                    "price": float(discount.product.price),
+                                }
+                                if discount.product
+                                else None
+                            ),
                             "created_by": {
                                 "id": discount.created_by.id,
                                 "username": discount.created_by.username,

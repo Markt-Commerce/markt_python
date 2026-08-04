@@ -451,12 +451,12 @@ class CartService:
                     "product_id": item.product_id,
                     "variant_id": item.variant_id,
                     "quantity": item.quantity,
-                    "product_price": float(item.product_price)
-                    if item.product_price
-                    else 0.0,
-                    "created_at": item.created_at.isoformat()
-                    if item.created_at
-                    else None,
+                    "product_price": (
+                        float(item.product_price) if item.product_price else 0.0
+                    ),
+                    "created_at": (
+                        item.created_at.isoformat() if item.created_at else None
+                    ),
                 }
                 cart_data["items"].append(item_data)
 

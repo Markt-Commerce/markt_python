@@ -81,9 +81,9 @@ class ChatRooms(MethodView):
                 "seller_id": room.seller_id,
                 "product_id": room.product_id,
                 "request_id": room.request_id,
-                "last_message_at": room.last_message_at
-                if room.last_message_at
-                else None,
+                "last_message_at": (
+                    room.last_message_at if room.last_message_at else None
+                ),
                 "unread_count_buyer": room.unread_count_buyer,
                 "unread_count_seller": room.unread_count_seller,
             }

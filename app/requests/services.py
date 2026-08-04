@@ -91,15 +91,15 @@ class BuyerRequestService:
                 "status": request.status.value if request.status else None,
                 "views": request.views,
                 "upvotes": request.upvotes,
-                "created_at": request.created_at.isoformat()
-                if request.created_at
-                else None,
-                "updated_at": request.updated_at.isoformat()
-                if request.updated_at
-                else None,
-                "expires_at": request.expires_at.isoformat()
-                if request.expires_at
-                else None,
+                "created_at": (
+                    request.created_at.isoformat() if request.created_at else None
+                ),
+                "updated_at": (
+                    request.updated_at.isoformat() if request.updated_at else None
+                ),
+                "expires_at": (
+                    request.expires_at.isoformat() if request.expires_at else None
+                ),
                 "images": [
                     {
                         "id": img.id,
@@ -134,12 +134,12 @@ class BuyerRequestService:
                         "status": item.status.value if item.status else None,
                         "views": item.views,
                         "upvotes": item.upvotes,
-                        "created_at": item.created_at.isoformat()
-                        if item.created_at
-                        else None,
-                        "expires_at": item.expires_at.isoformat()
-                        if item.expires_at
-                        else None,
+                        "created_at": (
+                            item.created_at.isoformat() if item.created_at else None
+                        ),
+                        "expires_at": (
+                            item.expires_at.isoformat() if item.expires_at else None
+                        ),
                         "images_count": len(item.images or []),
                         "offers_count": len(item.offers or []),
                     }

@@ -75,9 +75,9 @@ class WalletService:
                         "reference_type": entry.reference_type.value,
                         "reference_id": entry.reference_id,
                         "description": entry.description,
-                        "created_at": entry.created_at.isoformat()
-                        if entry.created_at
-                        else None,
+                        "created_at": (
+                            entry.created_at.isoformat() if entry.created_at else None
+                        ),
                     }
                     for entry in entries
                 ],
@@ -300,9 +300,9 @@ class WalletService:
                         ),
                         "paystack_transfer_ref": row.paystack_transfer_ref,
                         "failure_reason": row.failure_reason,
-                        "created_at": row.created_at.isoformat()
-                        if row.created_at
-                        else None,
+                        "created_at": (
+                            row.created_at.isoformat() if row.created_at else None
+                        ),
                     }
                     for row in rows
                 ],

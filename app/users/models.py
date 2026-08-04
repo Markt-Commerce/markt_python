@@ -7,7 +7,6 @@ from app.libs.helpers import UniqueIdMixin
 from external.database import db
 from external.redis import redis_client
 
-
 CURRENT_ROLE_CACHE_KEY = "user:current_role:{user_id}"
 CURRENT_ROLE_CACHE_TTL = 60 * 60 * 24  # 24 hours
 
