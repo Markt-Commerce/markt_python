@@ -58,8 +58,9 @@ def test_complete_payment_is_idempotent(
 
     session = MagicMock()
     mock_session_scope.return_value.__enter__.return_value = session
-    session.query.return_value.options.return_value.get.return_value = payment
-    session.query.return_value.filter_by.return_value.first.return_value = None
+    session.query.return_value.with_for_update.return_value.filter_by.return_value.first.return_value = (
+        payment
+    )
 
     assert PaymentService.complete_payment(payment_id="PAY_TEST01") is True
     mock_reduce_inventory.assert_not_called()
