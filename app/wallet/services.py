@@ -21,7 +21,9 @@ from .paystack_subaccounts import PaystackSubaccountClient
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_COMMISSION_RATE = 0.10
+# Sellers keep 100% of item price for now — Markt earns only via the buyer-facing
+# service fee, not a seller-side commission.
+DEFAULT_COMMISSION_RATE = 0.0
 MIN_WITHDRAWAL_AMOUNT = 1000.0
 
 
