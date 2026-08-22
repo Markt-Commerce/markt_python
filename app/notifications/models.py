@@ -27,6 +27,8 @@ class NotificationType(Enum):
     ORDER_PLACED = "order_placed"
     PAYMENT_SUCCESS = "payment_success"
     PAYMENT_FAILED = "payment_failed"
+    # Seller fulfilment notifications (§12.1-12.2)
+    FULFILMENT_REQUEST = "fulfilment_request"
     # Social notifications
     NICHE_INVITATION = "niche_invitation"
     NICHE_POST_APPROVED = "niche_post_approved"

@@ -76,4 +76,9 @@ CELERYBEAT_SCHEDULE = {
         "schedule": crontab(hour="*/1"),  # Hourly -- settlement hold is 12h
         "options": {"queue": "default"},
     },
+    "expire-stale-fulfilment-allocations": {
+        "task": "app.fulfilment.tasks.expire_stale_allocations",
+        "schedule": crontab(minute="*/1"),  # Every minute -- 3-min response window
+        "options": {"queue": "default"},
+    },
 }
