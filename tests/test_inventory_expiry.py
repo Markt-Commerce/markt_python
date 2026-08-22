@@ -1,10 +1,12 @@
-"""Tests for the inventory reservation expiry task (§8.1: HELD -> EXPIRED)."""
+"""Tests for the inventory maintenance tasks: reservation expiry
+(§8.1: HELD -> EXPIRED) and scheduled confidence-score recomputation
+(§8.3)."""
 
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 from app.inventory.models import InventoryReservation
-from app.inventory.tasks import expire_stale_reservations
+from app.inventory.tasks import expire_stale_reservations, recompute_confidence_scores
 
 
 def _reservation(status, expires_at):
@@ -62,3 +64,42 @@ def test_expire_stale_reservations_no_op_when_none_stale(mock_session_scope):
     result = expire_stale_reservations()
 
     assert result == {"expired": 0}
+
+
+@patch("app.inventory.confidence.InventoryConfidenceService.calculate_score")
+@patch("app.inventory.tasks.session_scope")
+def test_recompute_confidence_scores_recomputes_every_active_product(
+    mock_session_scope, mock_calculate
+):
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = [
+        ("PRD_1",),
+        ("PRD_2",),
+    ]
+    mock_session_scope.return_value.__enter__.return_value = session
+
+    result = recompute_confidence_scores()
+
+    assert result == {"recomputed": 2, "failed": 0}
+    assert mock_calculate.call_count == 2
+    mock_calculate.assert_any_call("PRD_1")
+    mock_calculate.assert_any_call("PRD_2")
+
+
+@patch("app.inventory.confidence.InventoryConfidenceService.calculate_score")
+@patch("app.inventory.tasks.session_scope")
+def test_recompute_confidence_scores_counts_failures_without_aborting(
+    mock_session_scope, mock_calculate
+):
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = [
+        ("PRD_1",),
+        ("PRD_2",),
+    ]
+    mock_session_scope.return_value.__enter__.return_value = session
+    mock_calculate.side_effect = [Exception("boom"), None]
+
+    result = recompute_confidence_scores()
+
+    assert result == {"recomputed": 1, "failed": 1}
+    assert mock_calculate.call_count == 2

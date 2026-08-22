@@ -5,7 +5,9 @@ from datetime import datetime
 
 from main.workers import celery_app
 from app.libs.session import session_scope
+from app.inventory.confidence import InventoryConfidenceService
 from app.inventory.models import InventoryReservation
+from app.products.models import Product, ProductStatus
 
 logger = logging.getLogger(__name__)
 
@@ -40,3 +42,38 @@ def expire_stale_reservations():
 
     logger.info("Expired %s stale inventory reservations", expired_count)
     return {"expired": expired_count}
+
+
+@celery_app.task(
+    name="app.inventory.tasks.recompute_confidence_scores", queue="default"
+)
+def recompute_confidence_scores():
+    """Recompute Inventory Confidence (§8.3) for every active product.
+    Scheduled rather than computed on read, per the checklist -- the score
+    only needs to be roughly fresh (recency decays over days, not minutes)."""
+    with session_scope() as session:
+        product_ids = [
+            row[0]
+            for row in session.query(Product.id)
+            .filter(Product.status == ProductStatus.ACTIVE)
+            .all()
+        ]
+
+    recomputed = 0
+    failed = 0
+    for product_id in product_ids:
+        try:
+            InventoryConfidenceService.calculate_score(product_id)
+            recomputed += 1
+        except Exception:
+            failed += 1
+            logger.exception(
+                "Failed to recompute confidence score for product %s", product_id
+            )
+
+    logger.info(
+        "Recomputed confidence scores for %s products (%s failed)",
+        recomputed,
+        failed,
+    )
+    return {"recomputed": recomputed, "failed": failed}

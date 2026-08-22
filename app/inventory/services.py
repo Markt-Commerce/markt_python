@@ -6,6 +6,7 @@ from app.libs.errors import ConflictError, NotFoundError, ValidationError
 from app.libs.session import session_scope
 from app.products.models import Product, ProductInventory
 
+from .confidence import ConfidenceBand, InventoryConfidenceService
 from .models import InventoryReservation
 
 # Reservations that still hold stock against a product/variant. CONSUMED,
@@ -87,6 +88,14 @@ class InventoryService:
         act on the same "available" figure -- the second call blocks until
         the first's transaction commits, then re-reads with the first
         reservation already counted.
+
+        Confidence-gated securing (§8.3): High -> reserve normally (HELD
+        immediately). Medium -> reserve, but flag needs_verification so a
+        follow-up check can happen (no verification workflow consumes this
+        flag yet). Low -> left at REQUESTED rather than promoted to HELD,
+        since Low confidence means stock isn't secured until the seller
+        confirms it (no seller-confirmation endpoint exists yet either --
+        this only gets the state representation right, not the workflow).
         """
         if quantity <= 0:
             raise ValidationError("Reservation quantity must be positive")
@@ -121,16 +130,20 @@ class InventoryService:
                     f"Only {available} unit(s) available for product {product_id}"
                 )
 
+            band = InventoryConfidenceService.get_band_for_product(product_id)
+
             reservation = InventoryReservation(
                 product_id=product_id,
                 variant_id=variant_id,
                 buyer_id=buyer_id,
                 quantity=quantity,
                 status=InventoryReservation.Status.REQUESTED,
+                needs_verification=(band == ConfidenceBand.MEDIUM),
                 expires_at=datetime.utcnow()
                 + timedelta(minutes=RESERVATION_TTL_MINUTES),
             )
-            reservation.transition_to(InventoryReservation.Status.HELD)
+            if band != ConfidenceBand.LOW:
+                reservation.transition_to(InventoryReservation.Status.HELD)
             session.add(reservation)
             session.flush()
             return reservation
