@@ -86,6 +86,19 @@ class OrderItem(BaseModel, StatusMixin):
         DELIVERED = "delivered"
         CANCELLED = "cancelled"
 
+    # Single source of truth for legal status transitions, used by every code
+    # path that moves an item forward (seller self-reported shipping,
+    # Markt-rider pickup/POD) so none of them can drift out of sync with the
+    # others. PROCESSING->DELIVERED is allowed directly because a
+    # rider-confirmed POD is authoritative even if the pickup step was never
+    # separately recorded -- the buyer having the item in hand shouldn't be
+    # blocked on earlier bookkeeping.
+    VALID_STATUS_TRANSITIONS = {
+        Status.PENDING: [Status.PROCESSING, Status.CANCELLED],
+        Status.PROCESSING: [Status.SHIPPED, Status.DELIVERED, Status.CANCELLED],
+        Status.SHIPPED: [Status.DELIVERED],
+    }
+
     id = db.Column(db.Integer, primary_key=True)
     order_id = db.Column(db.String(12), db.ForeignKey("orders.id"))
     product_id = db.Column(db.String(12), db.ForeignKey("products.id"))
@@ -101,6 +114,13 @@ class OrderItem(BaseModel, StatusMixin):
     product = db.relationship("Product")
     variant = db.relationship("ProductVariant")
     seller = db.relationship("Seller")
+
+    def transition_to(self, new_status: "OrderItem.Status") -> None:
+        """Apply a status change, raising ValueError if it isn't a legal transition."""
+        allowed = OrderItem.VALID_STATUS_TRANSITIONS.get(self.status, [])
+        if new_status not in allowed:
+            raise ValueError(f"Cannot transition from {self.status} to {new_status}")
+        self.status = new_status
 
 
 class ShippingAddress(BaseModel):
