@@ -24,6 +24,7 @@ from app.libs.errors import (
 # app imports
 from .models import Payment, Transaction, PaymentStatus, PaymentMethod
 from app.orders.models import Order, OrderStatus, OrderItem
+from app.orders.fees import build_fee_breakdown
 from app.users.models import User, Seller, Buyer
 from app.cart.models import Cart
 from app.notifications.services import NotificationService
@@ -420,9 +421,19 @@ class PaymentService:
             shipping_fee = CartService._calculate_shipping_fee(
                 cart, shipping_normalized
             )
-            tax = CartService._calculate_tax(subtotal, shipping_normalized)
-            discount = CartService._calculate_discount(subtotal, cart.coupon_code)
-            total = subtotal + shipping_fee + tax - discount
+            # No tax/discount line here: Phase 0 deferred VAT (the old
+            # flow's hardcoded 5% charge is a placeholder that contradicts
+            # that decision) and there's no coupon system to discount
+            # against yet. See app.orders.fees for the real Phase 0 fee
+            # model (Service Fee, Reliability Fee estimate, capture ceiling).
+            breakdown = build_fee_breakdown(
+                subtotal,
+                shipping_fee,
+                reliability_fee_opted_in=bool(
+                    checkout_data.get("reliability_fee_opted_in")
+                ),
+            )
+            total = breakdown["total"]
 
             items_snapshot = []
             reserved_ids = []
@@ -459,11 +470,7 @@ class PaymentService:
                 pending_checkout_data={
                     "items": items_snapshot,
                     "shipping_address": shipping_normalized,
-                    "subtotal": subtotal,
-                    "shipping_fee": shipping_fee,
-                    "tax": tax,
-                    "discount": discount,
-                    "total": total,
+                    **breakdown,
                 },
                 idempotency_key=idempotency_key or str(uuid.uuid4()),
             )
@@ -1050,10 +1057,26 @@ class PaymentService:
                 # failure notification as a no-op instead of erroring, and
                 # let transition_to reject a stale failure arriving after
                 # the payment already completed elsewhere.
-                if payment.status != PaymentStatus.FAILED:
+                already_failed = payment.status == PaymentStatus.FAILED
+                if not already_failed:
                     payment.transition_to(PaymentStatus.FAILED)
                 payment.gateway_response = data
                 session.flush()
+
+                # Payment-first checkout (§14.6: release reservations on
+                # payment failure): the order was never created, so free
+                # the stock immediately rather than waiting out the TTL.
+                snapshot = payment.pending_checkout_data
+                if not already_failed and snapshot:
+                    from app.inventory.services import InventoryService
+
+                    InventoryService.release_reservations(
+                        [
+                            item["reservation_id"]
+                            for item in snapshot.get("items", [])
+                            if item.get("reservation_id")
+                        ]
+                    )
 
                 # Send failure notification
                 PaymentService._send_payment_notifications(

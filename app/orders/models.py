@@ -118,6 +118,15 @@ class OrderItem(BaseModel, StatusMixin):
     seller_id = db.Column(db.Integer, db.ForeignKey("sellers.id"))
     quantity = db.Column(db.Integer)
     price = db.Column(db.Float)
+    # When this item was marked DELIVERED -- starts the settlement hold
+    # (Phase 0: 12h). Set by whichever path transitions the item, never by
+    # WalletService itself.
+    delivered_at = db.Column(db.DateTime, nullable=True)
+    # Set once WalletService.settle_order_item has actually run for this
+    # item (regardless of whether it paid out or determined nothing was
+    # owed) -- lets the settlement worker query "still pending" cheaply
+    # without re-deriving that from the wallet ledger.
+    settled_at = db.Column(db.DateTime, nullable=True)
 
     # Relationships
     order = db.relationship("Order", back_populates="items")

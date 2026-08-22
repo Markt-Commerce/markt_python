@@ -71,4 +71,9 @@ CELERYBEAT_SCHEDULE = {
         "schedule": crontab(hour="*/6"),  # Every 6 hours -- recency decays over days
         "options": {"queue": "default"},
     },
+    "settle-eligible-order-items": {
+        "task": "app.wallet.tasks.settle_eligible_order_items",
+        "schedule": crontab(hour="*/1"),  # Hourly -- settlement hold is 12h
+        "options": {"queue": "default"},
+    },
 }

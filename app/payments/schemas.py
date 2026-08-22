@@ -89,18 +89,43 @@ class CheckoutPaymentInitializeSchema(Schema):
     shipping_address = fields.Dict(required=True)
     use_saved_address = fields.Bool(missing=False)
     platform = fields.Str(missing="web")
+    reliability_fee_opted_in = fields.Bool(
+        missing=False,
+        metadata={
+            "description": (
+                "Opt-in only; only ever actually charged if a reroute "
+                "fires (§11.2). Not captured today."
+            )
+        },
+    )
     idempotency_key = fields.Str(allow_none=True)
 
 
 class CheckoutPaymentResponseSchema(Schema):
     """Response for CheckoutPaymentInitializeSchema -- no order_id yet,
-    since the order is only created once payment succeeds."""
+    since the order is only created once payment succeeds. Includes the
+    full itemised breakdown (§11.5) so the client can render it before the
+    buyer is sent to Paystack."""
 
     payment_id = fields.Str(required=True)
     authorization_url = fields.Str(allow_none=True)
     reference = fields.Str(allow_none=True)
     access_code = fields.Str(allow_none=True)
     amount = fields.Float(required=True)
+    subtotal = fields.Float(required=True)
+    shipping_fee = fields.Float(required=True)
+    service_fee = fields.Float(required=True)
+    reliability_fee_opted_in = fields.Bool(required=True)
+    reliability_fee_estimate = fields.Float(required=True)
+    capture_ceiling = fields.Float(
+        required=True,
+        metadata={
+            "description": (
+                "Max the buyer could be charged today, informational only "
+                "(§11.4) -- not a PSP authorization hold."
+            )
+        },
+    )
 
 
 class PaymentCallbackSchema(Schema):
