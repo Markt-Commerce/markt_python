@@ -191,6 +191,9 @@ class WalletService:
         if gross <= 0:
             return None
 
+        if not 0 <= commission_rate <= 1:
+            raise ValidationError(f"Invalid commission rate: {commission_rate}")
+
         net = round(gross * (1 - commission_rate), 2)
         if net <= 0:
             return None

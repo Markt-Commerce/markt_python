@@ -26,7 +26,9 @@ def test_approve_return_credits_buyer_wallet(mock_credit):
         total=8000.0,
         buyer=SimpleNamespace(user_id="USR_BUYER1"),
         items=[SimpleNamespace(seller_id=7, status=SimpleNamespace(value="delivered"))],
-        payments=[SimpleNamespace(status=SimpleNamespace(value="completed"))],
+        payments=[
+            SimpleNamespace(status=SimpleNamespace(value="completed"), amount=8000.0)
+        ],
     )
     order_return = SimpleNamespace(
         id="RET_TEST01",
@@ -52,6 +54,37 @@ def test_approve_return_credits_buyer_wallet(mock_credit):
 
     mock_credit.assert_called_once()
     assert mock_credit.call_args.kwargs["idempotency_key"] == "return-refund:RET_TEST01"
+
+
+@patch("app.wallet.services.WalletService.credit")
+def test_approve_return_rejects_refund_exceeding_captured_payment(mock_credit):
+    """Escrow invariant: a return refund can never exceed what was actually captured."""
+    from app.payments.models import PaymentStatus
+
+    order = SimpleNamespace(
+        id="ORD_RET002",
+        total=50000.0,
+        buyer=SimpleNamespace(user_id="USR_BUYER1"),
+        items=[SimpleNamespace(seller_id=7, status=SimpleNamespace(value="delivered"))],
+        payments=[SimpleNamespace(status=PaymentStatus.COMPLETED, amount=8000.0)],
+    )
+    order_return = SimpleNamespace(
+        id="RET_TEST02",
+        status=OrderReturnStatus.REQUESTED,
+        refund_amount=50000.0,
+        order=order,
+        seller_notes=None,
+    )
+
+    session = MagicMock()
+    session.query.return_value.options.return_value.get.return_value = order_return
+
+    with patch("app.orders.services.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        with pytest.raises(ValidationError):
+            OrderService.approve_return("RET_TEST02", seller_id=7)
+
+    mock_credit.assert_not_called()
 
 
 @patch("app.wallet.services.WalletService.credit")
