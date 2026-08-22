@@ -26,6 +26,7 @@ def create_celery_app(app: Flask = None) -> Celery:
             "app.realtime.tasks",
             "app.orders.tasks",
             "app.wallet.tasks",
+            "app.inventory.tasks",
         ]
     )
 
