@@ -232,6 +232,76 @@ def test_accept_auto_preference_ignores_price_difference(mock_scope, mock_notify
     mock_notify.assert_not_called()
 
 
+@patch("app.fulfilment.rerouting.ReroutingService.attempt_reroute")
+@patch("app.fulfilment.services.session_scope")
+def test_cancel_after_accept_transitions_to_cancelled_by_seller(
+    mock_scope, mock_reroute
+):
+    allocation = _allocation(FulfilmentAllocationStatus.ACCEPTED)
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.first.return_value = allocation
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = FulfilmentService.cancel_after_accept(1, seller_id=7)
+
+    assert result.status == FulfilmentAllocationStatus.CANCELLED_BY_SELLER
+
+
+@patch("app.fulfilment.rerouting.ReroutingService.attempt_reroute")
+@patch("app.fulfilment.services.session_scope")
+def test_cancel_after_accept_allowed_from_preparing(mock_scope, mock_reroute):
+    allocation = _allocation(FulfilmentAllocationStatus.PREPARING)
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.first.return_value = allocation
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = FulfilmentService.cancel_after_accept(1, seller_id=7)
+
+    assert result.status == FulfilmentAllocationStatus.CANCELLED_BY_SELLER
+
+
+@patch("app.fulfilment.rerouting.ReroutingService.attempt_reroute")
+@patch("app.inventory.services.InventoryService.release_reservations")
+@patch("app.fulfilment.services.session_scope")
+def test_cancel_after_accept_releases_reservation_and_reroutes(
+    mock_scope, mock_release, mock_reroute
+):
+    allocation = _allocation(
+        FulfilmentAllocationStatus.ACCEPTED, reservation_id="RSV_1"
+    )
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.first.return_value = allocation
+    mock_scope.return_value.__enter__.return_value = session
+
+    FulfilmentService.cancel_after_accept(1, seller_id=7)
+
+    mock_release.assert_called_once_with(["RSV_1"])
+    mock_reroute.assert_called_once_with(1)
+
+
+@patch("app.fulfilment.services.session_scope")
+def test_cancel_after_accept_raises_not_found_for_missing_allocation(mock_scope):
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.first.return_value = None
+    mock_scope.return_value.__enter__.return_value = session
+
+    with pytest.raises(NotFoundError):
+        FulfilmentService.cancel_after_accept(1, seller_id=7)
+
+
+@patch("app.fulfilment.services.session_scope")
+def test_cancel_after_accept_rejects_from_awaiting_seller(mock_scope):
+    """Only a seller who has actually accepted can "accept-then-cancel" --
+    an AWAITING_SELLER allocation should use decline() instead."""
+    allocation = _allocation(FulfilmentAllocationStatus.AWAITING_SELLER)
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.first.return_value = allocation
+    mock_scope.return_value.__enter__.return_value = session
+
+    with pytest.raises(ValueError):
+        FulfilmentService.cancel_after_accept(1, seller_id=7)
+
+
 @patch("app.fulfilment.services.session_scope")
 def test_buyer_approve_reroute_transitions_to_accepted(mock_scope):
     allocation = _allocation(FulfilmentAllocationStatus.AWAITING_BUYER_APPROVAL)
@@ -455,3 +525,58 @@ def test_expire_stale_allocations_no_op_when_none_stale(mock_scope):
     result = FulfilmentService.expire_stale_allocations()
 
     assert result == {"timed_out": 0}
+
+
+@patch("app.fulfilment.rerouting.ReroutingService.attempt_reroute")
+@patch("app.orders.services.OrderService.refund_unresolved_item")
+@patch("app.inventory.services.InventoryService.release_reservations")
+@patch("app.fulfilment.services.session_scope")
+def test_expire_stale_buyer_approvals_times_out_and_refunds(
+    mock_scope, mock_release, mock_refund, mock_reroute
+):
+    allocation = _allocation(
+        FulfilmentAllocationStatus.AWAITING_BUYER_APPROVAL, reservation_id="RSV_1"
+    )
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = [allocation]
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = FulfilmentService.expire_stale_buyer_approvals()
+
+    assert result == {"timed_out": 1}
+    assert allocation.status == FulfilmentAllocationStatus.UNFULFILLED
+    mock_release.assert_called_once_with(["RSV_1"])
+    mock_refund.assert_called_once()
+    assert mock_refund.call_args.args[0] == allocation.order_item_id
+    # §9.1: no substitution retry on an ASK timeout, unlike decline/timeout.
+    mock_reroute.assert_not_called()
+
+
+@patch("app.orders.services.OrderService.refund_unresolved_item")
+@patch("app.inventory.services.InventoryService.release_reservations")
+@patch("app.fulfilment.services.session_scope")
+def test_expire_stale_buyer_approvals_skips_release_without_reservation(
+    mock_scope, mock_release, mock_refund
+):
+    allocation = _allocation(FulfilmentAllocationStatus.AWAITING_BUYER_APPROVAL)
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = [allocation]
+    mock_scope.return_value.__enter__.return_value = session
+
+    FulfilmentService.expire_stale_buyer_approvals()
+
+    mock_release.assert_not_called()
+    mock_refund.assert_called_once()
+
+
+@patch("app.orders.services.OrderService.refund_unresolved_item")
+@patch("app.fulfilment.services.session_scope")
+def test_expire_stale_buyer_approvals_no_op_when_none_stale(mock_scope, mock_refund):
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = []
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = FulfilmentService.expire_stale_buyer_approvals()
+
+    assert result == {"timed_out": 0}
+    mock_refund.assert_not_called()

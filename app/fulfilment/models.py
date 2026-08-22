@@ -24,6 +24,15 @@ class FulfilmentAllocationStatus(Enum):
     # Response Rate (app.fulfilment.reliability._RESOLVED excludes it) --
     # only that this particular substitution wasn't acceptable to the buyer.
     BUYER_REJECTED = "buyer_rejected"
+    # §13.4 anti-gaming: a seller backs out AFTER accepting (or even
+    # starting prep) -- distinct from DECLINED, which happens before any
+    # commitment. This is the "accept-then-cancel" pattern the spec names
+    # explicitly; see FulfilmentService.cancel_after_accept and
+    # reliability.py's cancellation-penalty component. Still pre-dispatch
+    # (§10.1: nothing dispatches until fulfilment is locked), so a plain
+    # reroute is always possible from here -- there's no rider/pickup
+    # complication to unwind.
+    CANCELLED_BY_SELLER = "cancelled_by_seller"
 
 
 class FulfilmentAllocation(BaseModel):
@@ -68,17 +77,32 @@ class FulfilmentAllocation(BaseModel):
         FulfilmentAllocationStatus.AWAITING_BUYER_APPROVAL: [
             FulfilmentAllocationStatus.ACCEPTED,
             FulfilmentAllocationStatus.BUYER_REJECTED,
+            # §9.1 ASK timeout: straight to UNFULFILLED, not REROUTING --
+            # the MVP policy is "do not substitute after an ASK timeout,"
+            # so there is deliberately no next-candidate retry from here
+            # (contrast BUYER_REJECTED, an explicit "not that one" which
+            # DOES retry). See FulfilmentService.expire_stale_buyer_approvals.
+            FulfilmentAllocationStatus.UNFULFILLED,
         ],
         FulfilmentAllocationStatus.DECLINED: [FulfilmentAllocationStatus.REROUTING],
         FulfilmentAllocationStatus.TIMEOUT: [FulfilmentAllocationStatus.REROUTING],
         FulfilmentAllocationStatus.BUYER_REJECTED: [
             FulfilmentAllocationStatus.REROUTING
         ],
+        FulfilmentAllocationStatus.CANCELLED_BY_SELLER: [
+            FulfilmentAllocationStatus.REROUTING
+        ],
         FulfilmentAllocationStatus.REROUTING: [
             FulfilmentAllocationStatus.ACCEPTED,
             FulfilmentAllocationStatus.UNFULFILLED,
         ],
-        FulfilmentAllocationStatus.ACCEPTED: [FulfilmentAllocationStatus.PREPARING],
+        FulfilmentAllocationStatus.ACCEPTED: [
+            FulfilmentAllocationStatus.PREPARING,
+            FulfilmentAllocationStatus.CANCELLED_BY_SELLER,
+        ],
+        FulfilmentAllocationStatus.PREPARING: [
+            FulfilmentAllocationStatus.CANCELLED_BY_SELLER,
+        ],
     }
 
     id = db.Column(db.Integer, primary_key=True)
@@ -113,6 +137,12 @@ class FulfilmentAllocation(BaseModel):
         nullable=False,
     )
     seller_response_deadline = db.Column(db.DateTime, nullable=False)
+    # §9.1: set only when this allocation enters AWAITING_BUYER_APPROVAL
+    # (see FulfilmentService.accept's §6.1 ASK gate) -- how long Markt
+    # waits for the buyer to approve/reject a material substitution before
+    # giving up on it entirely (distinct clock from seller_response_deadline,
+    # same "earliest relevant deadline wins" principle as §9's other two).
+    buyer_response_deadline = db.Column(db.DateTime, nullable=True)
 
     order_item = db.relationship("OrderItem")
     seller = db.relationship("Seller")
@@ -161,6 +191,21 @@ class SellerReliabilityScore(BaseModel):
     fulfilment_rate_component = db.Column(db.Float, nullable=False)
     inventory_accuracy_component = db.Column(db.Float, nullable=False)
     response_time_component = db.Column(db.Float, nullable=False)
+    # §13.4 anti-gaming layer, applied ON TOP of the §13.2 weighted formula
+    # above (that formula's five weights are spec-mandated and untouched;
+    # this is a separate multiplicative penalty -- see reliability.py's
+    # module docstring). Fraction of the seller's accepted allocations in
+    # the lookback window that were CANCELLED_BY_SELLER (accept-then-cancel).
+    cancellation_penalty = db.Column(db.Float, nullable=False, default=0.0)
+    # Crossed a §13.4 anti-gaming threshold (chronic accept-then-cancel
+    # and/or suspiciously last-second responses -- see
+    # reliability.py's GAMING_FLAG_* constants). Mirrors
+    # MarketVerificationStatus.FLAGGED's pattern: a flagged seller is
+    # excluded from automated rerouting candidate lookup
+    # (app.fulfilment.rerouting.find_candidate_products) until an admin
+    # clears it -- "advanced detection" is explicitly deferred by the spec,
+    # this is the MVP mitigation, not an auto-ban.
+    gaming_flagged = db.Column(db.Boolean, nullable=False, default=False)
     score_version = db.Column(db.Integer, nullable=False, default=1)
     calculated_at = db.Column(db.DateTime, nullable=False)
 

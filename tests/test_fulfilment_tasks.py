@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from app.fulfilment.tasks import (
     expire_stale_allocations,
+    expire_stale_buyer_approvals,
     recompute_seller_reliability_scores,
 )
 
@@ -16,6 +17,16 @@ def test_expire_stale_allocations_task_delegates_to_service(mock_expire):
     result = expire_stale_allocations()
 
     assert result == {"timed_out": 3}
+    mock_expire.assert_called_once()
+
+
+@patch("app.fulfilment.services.FulfilmentService.expire_stale_buyer_approvals")
+def test_expire_stale_buyer_approvals_task_delegates_to_service(mock_expire):
+    mock_expire.return_value = {"timed_out": 2}
+
+    result = expire_stale_buyer_approvals()
+
+    assert result == {"timed_out": 2}
     mock_expire.assert_called_once()
 
 

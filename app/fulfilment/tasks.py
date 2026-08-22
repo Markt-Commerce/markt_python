@@ -21,6 +21,24 @@ def expire_stale_allocations():
 
 
 @celery_app.task(
+    name="app.fulfilment.tasks.expire_stale_buyer_approvals", queue="default"
+)
+def expire_stale_buyer_approvals():
+    """§9.1: move AWAITING_BUYER_APPROVAL allocations past their buyer
+    response deadline to UNFULFILLED, refunding just that item -- no
+    substitution retry (see FulfilmentService.expire_stale_buyer_approvals'
+    own docstring for why this is deliberately unlike the seller-timeout
+    task above)."""
+    from app.fulfilment.services import FulfilmentService
+
+    result = FulfilmentService.expire_stale_buyer_approvals()
+    logger.info(
+        "Timed out %s stale buyer-approval allocation(s) (§9.1)", result["timed_out"]
+    )
+    return result
+
+
+@celery_app.task(
     name="app.fulfilment.tasks.recompute_seller_reliability_scores", queue="default"
 )
 def recompute_seller_reliability_scores():

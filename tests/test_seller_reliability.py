@@ -8,7 +8,10 @@ import pytest
 
 from app.fulfilment.models import FulfilmentAllocationStatus
 from app.fulfilment.reliability import (
+    CANCELLATION_PENALTY_WEIGHT,
     DEFAULT_PRIOR,
+    LAST_SECOND_WINDOW_RATE,
+    MIN_GAMING_SAMPLE_SIZE,
     SCORE_VERSION,
     SellerReliabilityService,
     _response_time_decay,
@@ -113,6 +116,197 @@ def test_response_time_component_averages_decay_scores():
     )
 
     assert result == pytest.approx(0.5)
+
+
+def test_cancellation_stats_zero_when_no_accepted_allocations():
+    session = MagicMock()
+    session.query.return_value.filter.return_value.group_by.return_value.all.return_value = (
+        []
+    )
+
+    rate, sample_size = SellerReliabilityService._cancellation_stats(
+        session, seller_id=7, cutoff=datetime.utcnow()
+    )
+
+    assert rate == 0.0
+    assert sample_size == 0
+
+
+def test_cancellation_stats_computes_rate():
+    session = MagicMock()
+    session.query.return_value.filter.return_value.group_by.return_value.all.return_value = [
+        (FulfilmentAllocationStatus.ACCEPTED, 6),
+        (FulfilmentAllocationStatus.CANCELLED_BY_SELLER, 4),
+    ]
+
+    rate, sample_size = SellerReliabilityService._cancellation_stats(
+        session, seller_id=7, cutoff=datetime.utcnow()
+    )
+
+    assert rate == 0.4
+    assert sample_size == 10
+
+
+def test_last_second_response_stats_zero_when_no_responses():
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = []
+
+    rate, sample_size = SellerReliabilityService._last_second_response_stats(
+        session, seller_id=7, cutoff=datetime.utcnow()
+    )
+
+    assert rate == 0.0
+    assert sample_size == 0
+
+
+def test_last_second_response_stats_flags_late_responses():
+    now = datetime.utcnow()
+    window = timedelta(minutes=3)
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = [
+        # Responded almost immediately -- not last-second.
+        (now, now + timedelta(seconds=1), now + window),
+        # Responded right at the edge of the final window fraction --
+        # last-second.
+        (
+            now,
+            now + window * (1 - LAST_SECOND_WINDOW_RATE),
+            now + window,
+        ),
+    ]
+
+    rate, sample_size = SellerReliabilityService._last_second_response_stats(
+        session, seller_id=7, cutoff=now
+    )
+
+    assert sample_size == 2
+    assert rate == 0.5
+
+
+def test_last_second_response_stats_skips_non_positive_window():
+    now = datetime.utcnow()
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = [
+        (now, now, now),  # deadline == created_at -> zero window, skipped
+    ]
+
+    rate, sample_size = SellerReliabilityService._last_second_response_stats(
+        session, seller_id=7, cutoff=now
+    )
+
+    assert sample_size == 0
+    assert rate == 0.0
+
+
+@patch.object(SellerReliabilityService, "_last_second_response_stats")
+@patch.object(SellerReliabilityService, "_cancellation_stats")
+@patch.object(SellerReliabilityService, "_response_time_component")
+@patch.object(SellerReliabilityService, "_fulfilment_rate")
+@patch.object(SellerReliabilityService, "_status_counts")
+@patch("app.fulfilment.reliability.session_scope")
+def test_calculate_score_applies_cancellation_penalty(
+    mock_scope,
+    mock_counts,
+    mock_fulfilment,
+    mock_response_time,
+    mock_cancellation,
+    mock_last_second,
+):
+    seller = SimpleNamespace(id=7)
+    session = MagicMock()
+    session.query.return_value.get.return_value = seller
+    session.query.return_value.filter_by.return_value.first.return_value = None
+    mock_scope.return_value.__enter__.return_value = session
+
+    mock_counts.return_value = {
+        FulfilmentAllocationStatus.ACCEPTED: 8,
+        FulfilmentAllocationStatus.DECLINED: 1,
+        FulfilmentAllocationStatus.TIMEOUT: 1,
+    }
+    mock_fulfilment.return_value = 0.9
+    mock_response_time.return_value = 0.8
+    mock_cancellation.return_value = (0.4, 10)
+    mock_last_second.return_value = (0.0, 0)
+
+    record = SellerReliabilityService.calculate_score(7)
+
+    base_score = (
+        0.30 * 0.8 + 0.20 * 0.9 + 0.20 * 0.9 + 0.15 * DEFAULT_PRIOR + 0.15 * 0.8
+    )
+    expected_penalty = round(0.4 * CANCELLATION_PENALTY_WEIGHT, 4)
+    expected_score = round(base_score * (1 - expected_penalty), 4)
+
+    assert record.cancellation_penalty == expected_penalty
+    assert record.score == expected_score
+    # 0.4 >= GAMING_FLAG_CANCELLATION_THRESHOLD(0.3) with sample 10 >= MIN(5).
+    assert record.gaming_flagged is True
+
+
+@patch.object(SellerReliabilityService, "_last_second_response_stats")
+@patch.object(SellerReliabilityService, "_cancellation_stats")
+@patch.object(SellerReliabilityService, "_response_time_component")
+@patch.object(SellerReliabilityService, "_fulfilment_rate")
+@patch.object(SellerReliabilityService, "_status_counts")
+@patch("app.fulfilment.reliability.session_scope")
+def test_calculate_score_flags_last_second_pattern(
+    mock_scope,
+    mock_counts,
+    mock_fulfilment,
+    mock_response_time,
+    mock_cancellation,
+    mock_last_second,
+):
+    seller = SimpleNamespace(id=7)
+    session = MagicMock()
+    session.query.return_value.get.return_value = seller
+    session.query.return_value.filter_by.return_value.first.return_value = None
+    mock_scope.return_value.__enter__.return_value = session
+
+    mock_counts.return_value = {}
+    mock_fulfilment.return_value = None
+    mock_response_time.return_value = None
+    mock_cancellation.return_value = (0.0, 0)
+    mock_last_second.return_value = (0.6, 8)
+
+    record = SellerReliabilityService.calculate_score(7)
+
+    # 0.6 >= GAMING_FLAG_LAST_SECOND_THRESHOLD(0.5) with sample 8 >= MIN(5).
+    assert record.gaming_flagged is True
+    assert record.cancellation_penalty == 0.0
+
+
+@patch.object(SellerReliabilityService, "_last_second_response_stats")
+@patch.object(SellerReliabilityService, "_cancellation_stats")
+@patch.object(SellerReliabilityService, "_response_time_component")
+@patch.object(SellerReliabilityService, "_fulfilment_rate")
+@patch.object(SellerReliabilityService, "_status_counts")
+@patch("app.fulfilment.reliability.session_scope")
+def test_calculate_score_not_flagged_below_minimum_sample_size(
+    mock_scope,
+    mock_counts,
+    mock_fulfilment,
+    mock_response_time,
+    mock_cancellation,
+    mock_last_second,
+):
+    """A tiny sample shouldn't flag a seller even at a high raw rate --
+    MIN_GAMING_SAMPLE_SIZE guards against noise on a brand-new seller."""
+    seller = SimpleNamespace(id=7)
+    session = MagicMock()
+    session.query.return_value.get.return_value = seller
+    session.query.return_value.filter_by.return_value.first.return_value = None
+    mock_scope.return_value.__enter__.return_value = session
+
+    mock_counts.return_value = {}
+    mock_fulfilment.return_value = None
+    mock_response_time.return_value = None
+    assert MIN_GAMING_SAMPLE_SIZE > 1
+    mock_cancellation.return_value = (1.0, 1)
+    mock_last_second.return_value = (1.0, 1)
+
+    record = SellerReliabilityService.calculate_score(7)
+
+    assert record.gaming_flagged is False
 
 
 @patch.object(SellerReliabilityService, "_response_time_component")

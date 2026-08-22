@@ -77,6 +77,10 @@ class NotificationService:
             "title": "New offer",
             "message": "{seller_name} made an offer on your request: {request_title}",
         },
+        NotificationType.NEW_REQUEST_MATCH: {
+            "title": "New request in your category",
+            "message": "{message}",
+        },
         NotificationType.OFFER_ACCEPTED: {
             "title": "Offer accepted",
             "message": "Your offer for {request_title} was accepted!",
@@ -205,6 +209,12 @@ class NotificationService:
             "immediate_websocket": True,
             "push_when_offline": True,
             "always_email": True,  # Important business notification
+        },
+        NotificationType.NEW_REQUEST_MATCH: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": False,  # High-volume for an active seller; push is enough
         },
         NotificationType.OFFER_ACCEPTED: {
             "channels": [

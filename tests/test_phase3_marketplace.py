@@ -33,7 +33,7 @@ def test_approve_return_credits_buyer_wallet(mock_credit):
         id="ORD_RET001",
         total=8000.0,
         buyer=SimpleNamespace(user_id="USR_BUYER1"),
-        items=[SimpleNamespace(seller_id=7, status=OrderItem.Status.DELIVERED)],
+        items=[SimpleNamespace(id=1, seller_id=7, status=OrderItem.Status.DELIVERED)],
         payments=[payment],
     )
     order_return = SimpleNamespace(
@@ -46,6 +46,8 @@ def test_approve_return_credits_buyer_wallet(mock_credit):
 
     session = MagicMock()
     session.query.return_value.options.return_value.get.return_value = order_return
+    # No prior refunds against this order -- _get_total_refunded's sum query.
+    session.query.return_value.filter.return_value.scalar.return_value = 0.0
 
     with patch("app.orders.services.session_scope") as mock_scope:
         mock_scope.return_value.__enter__.return_value = session
@@ -65,7 +67,11 @@ def test_approve_return_rejects_refund_exceeding_captured_payment(mock_credit):
         id="ORD_RET002",
         total=50000.0,
         buyer=SimpleNamespace(user_id="USR_BUYER1"),
-        items=[SimpleNamespace(seller_id=7, status=SimpleNamespace(value="delivered"))],
+        items=[
+            SimpleNamespace(
+                id=1, seller_id=7, status=SimpleNamespace(value="delivered")
+            )
+        ],
         payments=[SimpleNamespace(status=PaymentStatus.COMPLETED, amount=8000.0)],
     )
     order_return = SimpleNamespace(
@@ -78,6 +84,7 @@ def test_approve_return_rejects_refund_exceeding_captured_payment(mock_credit):
 
     session = MagicMock()
     session.query.return_value.options.return_value.get.return_value = order_return
+    session.query.return_value.filter.return_value.scalar.return_value = 0.0
 
     with patch("app.orders.services.session_scope") as mock_scope:
         mock_scope.return_value.__enter__.return_value = session

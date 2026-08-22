@@ -68,6 +68,26 @@ class AllocationDecline(MethodView):
             abort(status_code, message=message)
 
 
+@bp.route("/allocations/<int:allocation_id>/cancel")
+class AllocationCancelAfterAccept(MethodView):
+    @login_required
+    @seller_required
+    @bp.response(200, FulfilmentAllocationSchema)
+    def post(self, allocation_id):
+        """Seller backs out of an accepted/preparing allocation (§13.4
+        anti-gaming "accept-then-cancel") -- worse than decline() and
+        scored accordingly by Seller Reliability's cancellation penalty."""
+        try:
+            allocation = FulfilmentService.cancel_after_accept(
+                allocation_id, current_user.seller_account.id
+            )
+            return _dump(allocation)
+        except (APIError, ValueError) as e:
+            message = getattr(e, "message", str(e))
+            status_code = getattr(e, "status_code", 400)
+            abort(status_code, message=message)
+
+
 @bp.route("/allocations/<int:allocation_id>/approve-substitution")
 class AllocationApproveSubstitution(MethodView):
     @login_required

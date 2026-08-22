@@ -12,6 +12,7 @@ from app.fulfilment.rerouting import (
     MAX_REROUTE_ATTEMPTS,
     PRICE_HEADROOM_RATE,
     ReroutingService,
+    _escalate_unfulfilled_item,
     _tokenize,
     filter_eligible_candidates,
     find_candidate_products,
@@ -88,6 +89,7 @@ def test_find_candidate_products_returns_query_results_when_scoped():
             # Chain every builder method back to the same mock so the
             # exact number of .filter() calls in the loop doesn't matter.
             mock.join.return_value = mock
+            mock.outerjoin.return_value = mock
             mock.filter.return_value = mock
             mock.all.return_value = expected
         return mock
@@ -222,8 +224,9 @@ def test_attempt_reroute_no_op_when_not_declined_or_timeout(mock_scope):
     assert failed.status == FulfilmentAllocationStatus.ACCEPTED
 
 
+@patch("app.fulfilment.rerouting._escalate_unfulfilled_item")
 @patch("app.fulfilment.rerouting.session_scope")
-def test_attempt_reroute_starts_from_buyer_rejected(mock_scope):
+def test_attempt_reroute_starts_from_buyer_rejected(mock_scope, mock_escalate):
     """§6.1: a buyer-rejected substitution can be retried like any other
     failure, not just DECLINED/TIMEOUT."""
     failed = _failed_allocation(FulfilmentAllocationStatus.BUYER_REJECTED)
@@ -248,10 +251,16 @@ def test_attempt_reroute_starts_from_buyer_rejected(mock_scope):
     # BUYER_REJECTED is accepted as a valid starting status.
     assert result is None
     assert failed.status == FulfilmentAllocationStatus.UNFULFILLED
+    # SELLER_ONLY must never escalate to Buyer Requests either -- the
+    # buyer explicitly opted out of rerouting altogether.
+    mock_escalate.assert_not_called()
 
 
+@patch("app.fulfilment.rerouting._escalate_unfulfilled_item")
 @patch("app.fulfilment.rerouting.session_scope")
-def test_attempt_reroute_seller_only_skips_straight_to_unfulfilled(mock_scope):
+def test_attempt_reroute_seller_only_skips_straight_to_unfulfilled(
+    mock_scope, mock_escalate
+):
     failed = _failed_allocation(FulfilmentAllocationStatus.DECLINED)
     order_item = _order_item(fulfilment_preference=FulfilmentPreference.SELLER_ONLY)
 
@@ -274,10 +283,12 @@ def test_attempt_reroute_seller_only_skips_straight_to_unfulfilled(mock_scope):
     # Never got as far as computing the deadline/retry-limit or looking up
     # candidates -- SELLER_ONLY short-circuits before any of that.
     fa_mock.filter_by.assert_not_called()
+    mock_escalate.assert_not_called()
 
 
+@patch("app.fulfilment.rerouting._escalate_unfulfilled_item")
 @patch("app.fulfilment.rerouting.session_scope")
-def test_attempt_reroute_marks_unfulfilled_past_deadline(mock_scope):
+def test_attempt_reroute_marks_unfulfilled_past_deadline(mock_scope, mock_escalate):
     failed = _failed_allocation(FulfilmentAllocationStatus.DECLINED)
     order_item = _order_item()
     first_attempt = SimpleNamespace(
@@ -305,10 +316,12 @@ def test_attempt_reroute_marks_unfulfilled_past_deadline(mock_scope):
 
     assert result is None
     assert failed.status == FulfilmentAllocationStatus.UNFULFILLED
+    mock_escalate.assert_called_once_with(1)
 
 
+@patch("app.fulfilment.rerouting._escalate_unfulfilled_item")
 @patch("app.fulfilment.rerouting.session_scope")
-def test_attempt_reroute_marks_unfulfilled_past_retry_limit(mock_scope):
+def test_attempt_reroute_marks_unfulfilled_past_retry_limit(mock_scope, mock_escalate):
     failed = _failed_allocation(FulfilmentAllocationStatus.TIMEOUT)
     order_item = _order_item()
     first_attempt = SimpleNamespace(created_at=datetime.utcnow())
@@ -333,12 +346,14 @@ def test_attempt_reroute_marks_unfulfilled_past_retry_limit(mock_scope):
 
     assert result is None
     assert failed.status == FulfilmentAllocationStatus.UNFULFILLED
+    mock_escalate.assert_called_once_with(1)
 
 
+@patch("app.fulfilment.rerouting._escalate_unfulfilled_item")
 @patch("app.fulfilment.rerouting.filter_eligible_candidates")
 @patch("app.fulfilment.rerouting.session_scope")
 def test_attempt_reroute_marks_unfulfilled_when_no_eligible_candidates(
-    mock_scope, mock_filter
+    mock_scope, mock_filter, mock_escalate
 ):
     failed = _failed_allocation(FulfilmentAllocationStatus.DECLINED)
     order_item = _order_item()
@@ -372,6 +387,7 @@ def test_attempt_reroute_marks_unfulfilled_when_no_eligible_candidates(
 
     assert result is None
     assert failed.status == FulfilmentAllocationStatus.UNFULFILLED
+    mock_escalate.assert_called_once_with(1)
 
 
 @patch("app.fulfilment.services.FulfilmentService.create_allocation")
@@ -422,13 +438,14 @@ def test_attempt_reroute_reserves_top_ranked_candidate(
     )
 
 
+@patch("app.fulfilment.rerouting._escalate_unfulfilled_item")
 @patch("app.fulfilment.services.FulfilmentService.create_allocation")
 @patch("app.inventory.services.InventoryService.reserve_stock")
 @patch("app.fulfilment.ranking.rank_candidates")
 @patch("app.fulfilment.rerouting.filter_eligible_candidates")
 @patch("app.fulfilment.rerouting.session_scope")
 def test_attempt_reroute_marks_unfulfilled_when_every_candidate_loses_race(
-    mock_scope, mock_filter, mock_rank, mock_reserve, mock_create
+    mock_scope, mock_filter, mock_rank, mock_reserve, mock_create, mock_escalate
 ):
     from app.libs.errors import ConflictError
 
@@ -467,3 +484,150 @@ def test_attempt_reroute_marks_unfulfilled_when_every_candidate_loses_race(
     assert result is None
     mock_create.assert_not_called()
     assert failed.status == FulfilmentAllocationStatus.UNFULFILLED
+    mock_escalate.assert_called_once_with(1)
+
+
+def _escalate_query_side_effect(
+    fa_mock, oi_mock, buyer_request_mock, product_mock, seller_mock, category_mock
+):
+    def side_effect(model):
+        name = getattr(model, "__name__", None)
+        return {
+            "FulfilmentAllocation": fa_mock,
+            "OrderItem": oi_mock,
+            "BuyerRequest": buyer_request_mock,
+            "Product": product_mock,
+            "Seller": seller_mock,
+            "ProductCategory": category_mock,
+        }.get(name, MagicMock())
+
+    return side_effect
+
+
+@patch("app.requests.services.BuyerRequestService.create_reroute_request")
+@patch("app.fulfilment.rerouting.session_scope")
+def test_escalate_unfulfilled_item_creates_reroute_request(mock_scope, mock_create):
+    failed = SimpleNamespace(
+        status=FulfilmentAllocationStatus.UNFULFILLED, order_item_id=10
+    )
+    order_item = _order_item(
+        order=SimpleNamespace(buyer=SimpleNamespace(user_id="USR_BUYER1"))
+    )
+    product = SimpleNamespace(id="PRD_1", name="Rice 5kg")
+    seller = SimpleNamespace(market_id=5)
+    category = SimpleNamespace(category_id=3)
+
+    fa_mock = MagicMock()
+    fa_mock.get.return_value = failed
+    oi_mock = MagicMock()
+    oi_mock.get.return_value = order_item
+    buyer_request_mock = MagicMock()
+    buyer_request_mock.filter_by.return_value.first.return_value = None
+    product_mock = MagicMock()
+    product_mock.get.return_value = product
+    seller_mock = MagicMock()
+    seller_mock.get.return_value = seller
+    category_mock = MagicMock()
+    category_mock.filter_by.return_value.first.return_value = category
+
+    session = MagicMock()
+    session.query.side_effect = _escalate_query_side_effect(
+        fa_mock, oi_mock, buyer_request_mock, product_mock, seller_mock, category_mock
+    )
+    mock_scope.return_value.__enter__.return_value = session
+
+    _escalate_unfulfilled_item(1)
+
+    mock_create.assert_called_once_with(
+        buyer_user_id="USR_BUYER1",
+        order_item_id=10,
+        market_id=5,
+        category_id=3,
+        product_name="Rice 5kg",
+        quantity=2,
+        price=1000.0,
+    )
+
+
+@patch("app.requests.services.BuyerRequestService.create_reroute_request")
+@patch("app.fulfilment.rerouting.session_scope")
+def test_escalate_unfulfilled_item_no_op_when_not_unfulfilled(mock_scope, mock_create):
+    failed = SimpleNamespace(
+        status=FulfilmentAllocationStatus.DECLINED, order_item_id=10
+    )
+    fa_mock = MagicMock()
+    fa_mock.get.return_value = failed
+    session = MagicMock()
+    session.query.side_effect = _escalate_query_side_effect(
+        fa_mock, MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock()
+    )
+    mock_scope.return_value.__enter__.return_value = session
+
+    _escalate_unfulfilled_item(1)
+
+    mock_create.assert_not_called()
+
+
+@patch("app.requests.services.BuyerRequestService.create_reroute_request")
+@patch("app.fulfilment.rerouting.session_scope")
+def test_escalate_unfulfilled_item_no_op_for_seller_only(mock_scope, mock_create):
+    failed = SimpleNamespace(
+        status=FulfilmentAllocationStatus.UNFULFILLED, order_item_id=10
+    )
+    order_item = _order_item(fulfilment_preference=FulfilmentPreference.SELLER_ONLY)
+
+    fa_mock = MagicMock()
+    fa_mock.get.return_value = failed
+    oi_mock = MagicMock()
+    oi_mock.get.return_value = order_item
+
+    session = MagicMock()
+    session.query.side_effect = _escalate_query_side_effect(
+        fa_mock, oi_mock, MagicMock(), MagicMock(), MagicMock(), MagicMock()
+    )
+    mock_scope.return_value.__enter__.return_value = session
+
+    _escalate_unfulfilled_item(1)
+
+    mock_create.assert_not_called()
+
+
+@patch("app.requests.services.BuyerRequestService.create_reroute_request")
+@patch("app.fulfilment.rerouting.session_scope")
+def test_escalate_unfulfilled_item_no_op_when_already_escalated(
+    mock_scope, mock_create
+):
+    failed = SimpleNamespace(
+        status=FulfilmentAllocationStatus.UNFULFILLED, order_item_id=10
+    )
+    order_item = _order_item()
+
+    fa_mock = MagicMock()
+    fa_mock.get.return_value = failed
+    oi_mock = MagicMock()
+    oi_mock.get.return_value = order_item
+    buyer_request_mock = MagicMock()
+    buyer_request_mock.filter_by.return_value.first.return_value = SimpleNamespace(
+        id="REQ_EXISTING"
+    )
+
+    session = MagicMock()
+    session.query.side_effect = _escalate_query_side_effect(
+        fa_mock, oi_mock, buyer_request_mock, MagicMock(), MagicMock(), MagicMock()
+    )
+    mock_scope.return_value.__enter__.return_value = session
+
+    _escalate_unfulfilled_item(1)
+
+    mock_create.assert_not_called()
+
+
+@patch("app.requests.services.BuyerRequestService.create_reroute_request")
+@patch("app.fulfilment.rerouting.session_scope")
+def test_escalate_unfulfilled_item_swallows_exceptions(mock_scope, mock_create):
+    mock_scope.side_effect = RuntimeError("db exploded")
+
+    # Must not raise -- escalation failures are logged, not propagated.
+    _escalate_unfulfilled_item(1)
+
+    mock_create.assert_not_called()

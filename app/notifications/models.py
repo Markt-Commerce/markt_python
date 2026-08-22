@@ -22,6 +22,10 @@ class NotificationType(Enum):
     REQUEST_CLOSED = "request_closed"
     REQUEST_STATUS_CHANGE = "request_status_change"
     REQUEST_EXPIRED = "request_expired"
+    # §7.4: a new request matching a seller's category (and, for a
+    # REROUTE_ENGINE request, their market) has opened -- distinct from
+    # REQUEST_OFFER, which notifies the *buyer* that a seller responded.
+    NEW_REQUEST_MATCH = "new_request_match"
     # Cart and order notifications
     CART_ITEM_ADDED = "cart_item_added"
     ORDER_PLACED = "order_placed"

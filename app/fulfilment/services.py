@@ -40,6 +40,10 @@ from .models import FulfilmentAllocation, FulfilmentAllocationStatus
 # Phase 0 decision.
 SELLER_RESPONSE_TIMEOUT_MINUTES = 3
 
+# §9.1: how long an ASK buyer is given to approve/reject a material
+# substitution before Markt gives up on it (spec's own example figure).
+ASK_APPROVAL_TIMEOUT_MINUTES = 5
+
 
 class FulfilmentService:
     @staticmethod
@@ -146,6 +150,9 @@ class FulfilmentService:
                 allocation.transition_to(
                     FulfilmentAllocationStatus.AWAITING_BUYER_APPROVAL
                 )
+                allocation.buyer_response_deadline = datetime.utcnow() + timedelta(
+                    minutes=ASK_APPROVAL_TIMEOUT_MINUTES
+                )
             else:
                 allocation.transition_to(FulfilmentAllocationStatus.ACCEPTED)
             session.flush()
@@ -170,6 +177,47 @@ class FulfilmentService:
                     )
                 },
             )
+
+        return allocation
+
+    @staticmethod
+    def cancel_after_accept(allocation_id: int, seller_id: int) -> FulfilmentAllocation:
+        """§13.4 anti-gaming: a seller backs out of an ACCEPTED or
+        PREPARING allocation -- the "accept-then-cancel" pattern the spec
+        names explicitly, worse than a plain decline() because the buyer
+        (and Markt's own downstream sequencing) already relied on the
+        commitment. Still safe pre-dispatch (§10.1: nothing dispatches
+        until fulfilment is locked), so this always reroutes rather than
+        needing to unwind a rider/pickup. No `reason` param yet -- there's
+        nowhere to persist one until the §14.2 event log (Phase 7) exists;
+        add it then rather than accepting and silently dropping it now.
+
+        Deliberately its own status (CANCELLED_BY_SELLER) rather than
+        DECLINED -- reliability.py's cancellation-penalty component reads
+        this specifically, on top of the §13.2 formula's own Acceptance
+        Rate (which would otherwise keep counting this as a plain "yes,
+        they accepted" with no memory of the later reversal)."""
+        with session_scope() as session:
+            allocation = (
+                session.query(FulfilmentAllocation)
+                .filter_by(id=allocation_id, seller_id=seller_id)
+                .first()
+            )
+            if not allocation:
+                raise NotFoundError("Fulfilment allocation not found")
+
+            allocation.transition_to(FulfilmentAllocationStatus.CANCELLED_BY_SELLER)
+            reservation_id = allocation.reservation_id
+            session.flush()
+
+        if reservation_id:
+            from app.inventory.services import InventoryService
+
+            InventoryService.release_reservations([reservation_id])
+
+        from .rerouting import ReroutingService
+
+        ReroutingService.attempt_reroute(allocation_id)
 
         return allocation
 
@@ -345,5 +393,59 @@ class FulfilmentService:
 
             for allocation_id in timed_out_allocation_ids:
                 ReroutingService.attempt_reroute(allocation_id)
+
+        return {"timed_out": timed_out}
+
+    @staticmethod
+    def expire_stale_buyer_approvals() -> dict:
+        """§9.1 ASK timeout worker: AWAITING_BUYER_APPROVAL past its
+        buyer_response_deadline -> UNFULFILLED. Deliberately does NOT call
+        ReroutingService.attempt_reroute -- the MVP policy is "do not
+        substitute after an ASK timeout," so unlike a seller TIMEOUT/DECLINE
+        or an explicit BUYER_REJECTED, there's no next-candidate retry here.
+        Instead: release the reservation (nothing more to hold it for) and
+        refund just this item (OrderService.refund_unresolved_item),
+        leaving the rest of the order untouched. "This never violates the
+        buyer's explicit choice" (spec's own reasoning) -- an ASK buyer who
+        never responded doesn't get auto-substituted regardless.
+
+        Push notifications are unreliable (spec's own caveat) -- the
+        in-app surfacing this implies (a visible pending-approval banner,
+        not just a notification) is a mobile-side concern, out of scope
+        here."""
+        from app.orders.services import OrderService
+
+        now = datetime.utcnow()
+        timed_out = 0
+        with session_scope() as session:
+            stale = (
+                session.query(FulfilmentAllocation)
+                .filter(
+                    FulfilmentAllocation.status
+                    == FulfilmentAllocationStatus.AWAITING_BUYER_APPROVAL,
+                    FulfilmentAllocation.buyer_response_deadline < now,
+                )
+                .all()
+            )
+            resolved = [
+                (allocation.id, allocation.order_item_id, allocation.reservation_id)
+                for allocation in stale
+            ]
+            for allocation in stale:
+                allocation.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
+                timed_out += 1
+            session.flush()
+
+        for _allocation_id, order_item_id, reservation_id in resolved:
+            if reservation_id:
+                from app.inventory.services import InventoryService
+
+                InventoryService.release_reservations([reservation_id])
+
+            OrderService.refund_unresolved_item(
+                order_item_id,
+                reason="Buyer did not respond to the substitution approval "
+                "request in time (§9.1 ASK timeout)",
+            )
 
         return {"timed_out": timed_out}
