@@ -19,6 +19,32 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: markt
+          POSTGRES_PASSWORD: markt123
+          POSTGRES_DB: markt_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U markt"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DB_HOST: localhost
+      DB_PORT: 5432
+      DB_USER: markt
+      DB_PASSWORD: markt123
+      DB_NAME: markt_db
+      # Only set here: this job's Postgres is a fresh, disposable service
+      # container. Tests gated on this must never run against a real
+      # developer's configured database (see test_inventory_concurrency.py).
+      RUN_DB_TESTS: "1"
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

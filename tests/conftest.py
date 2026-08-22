@@ -4,16 +4,23 @@ import pytest
 
 
 def pytest_configure():
-    """Eager-import ORM modules so string-based relationships resolve in unit tests."""
+    """Eager-import every ORM module so string-based relationships resolve
+    regardless of which test file happens to trigger SQLAlchemy's mapper
+    configuration first. Mirrors (and should stay in sync with) the
+    import list in external/database.py's Database.init_app."""
     import app.cart.models  # noqa: F401
+    import app.categories.models  # noqa: F401
     import app.chats.models  # noqa: F401
     import app.deliveries.models  # noqa: F401
+    import app.gamification.models  # noqa: F401
+    import app.inventory.models  # noqa: F401
     import app.media.models  # noqa: F401
     import app.notifications.models  # noqa: F401
     import app.orders.models  # noqa: F401
     import app.payments.models  # noqa: F401
     import app.products.models  # noqa: F401
     import app.requests.models  # noqa: F401
+    import app.socials.models  # noqa: F401
     import app.users.models  # noqa: F401
     import app.wallet.models  # noqa: F401
 
