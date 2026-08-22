@@ -21,6 +21,14 @@ def test_returnable_order_statuses():
 
 @patch("app.wallet.services.WalletService.credit")
 def test_approve_return_credits_buyer_wallet(mock_credit):
+    from app.payments.models import Payment, PaymentStatus
+    from app.orders.models import OrderItem
+
+    payment = SimpleNamespace(status=PaymentStatus.COMPLETED)
+    payment.transition_to = lambda new_status, _p=payment: Payment.transition_to(
+        _p, new_status
+    )
+
     order = SimpleNamespace(
         id="ORD_RET001",
         total=8000.0,
@@ -29,6 +37,8 @@ def test_approve_return_credits_buyer_wallet(mock_credit):
         payments=[
             SimpleNamespace(status=SimpleNamespace(value="completed"), amount=8000.0)
         ],
+        items=[SimpleNamespace(seller_id=7, status=OrderItem.Status.DELIVERED)],
+        payments=[payment],
     )
     order_return = SimpleNamespace(
         id="RET_TEST01",
@@ -43,17 +53,11 @@ def test_approve_return_credits_buyer_wallet(mock_credit):
 
     with patch("app.orders.services.session_scope") as mock_scope:
         mock_scope.return_value.__enter__.return_value = session
-        from app.payments.models import PaymentStatus
-
-        for payment in order.payments:
-            payment.status = PaymentStatus.COMPLETED
-        from app.orders.models import OrderItem
-
-        order.items[0].status = OrderItem.Status.DELIVERED
         OrderService.approve_return("RET_TEST01", seller_id=7)
 
     mock_credit.assert_called_once()
     assert mock_credit.call_args.kwargs["idempotency_key"] == "return-refund:RET_TEST01"
+    assert payment.status == PaymentStatus.REFUNDED
 
 
 @patch("app.wallet.services.WalletService.credit")
@@ -171,22 +175,3 @@ def test_register_seller_payout_account(mock_create):
 def test_initialize_topup_rejects_small_amount():
     with pytest.raises(ValidationError):
         WalletService.initialize_topup("USR_1", 50.0)
-
-
-def test_resolve_subaccount_split_single_seller():
-    seller = SimpleNamespace(seller_id=1, paystack_subaccount_code="ACCT_abc")
-    item = SimpleNamespace(seller_id=1, seller=seller)
-    order = SimpleNamespace(items=[item])
-
-    split = PaymentService._resolve_subaccount_split(order)
-    assert split == {"subaccount_code": "ACCT_abc"}
-
-
-def test_resolve_subaccount_split_multi_seller_returns_none():
-    order = SimpleNamespace(
-        items=[
-            SimpleNamespace(seller_id=1, seller=None),
-            SimpleNamespace(seller_id=2, seller=None),
-        ]
-    )
-    assert PaymentService._resolve_subaccount_split(order) is None

@@ -690,6 +690,19 @@ class DeliveryService:
                 )
 
             assignment.logistical_status = logistical_status
+
+            # Pickup is the item-level equivalent of "shipped" for orders
+            # fulfilled through Markt's own delivery network -- keep OrderItem
+            # in step so a rider-managed order reaches DELIVERED through the
+            # same validated SHIPPED->DELIVERED transition as a seller-managed
+            # one, instead of needing a special case at POD time.
+            if logistical_status == LogisticalStatus.PICKED_UP:
+                order = session.query(Order).filter_by(id=assignment.order_id).first()
+                if order:
+                    for item in order.items:
+                        if item.status == OrderItem.Status.PROCESSING:
+                            item.transition_to(OrderItem.Status.SHIPPED)
+
             session.commit()
 
             return {"status": assignment.logistical_status.value}
@@ -719,6 +732,8 @@ class DeliveryService:
 
     @staticmethod
     def confirm_order_qr_code(user_id: str, order_id: str, qr_code: str) -> Dict:
+        from app.wallet.services import WalletService
+
         with session_scope() as session:
             # query the assignment to get the escrow QR code
             assignment = (
@@ -742,17 +757,41 @@ class DeliveryService:
                 )
                 raise ValidationError("Invalid QR code")
 
-            # Mark the order as delivered
             order = session.query(Order).filter_by(id=order_id).first()
             if not order:
                 logger.warning(f"No order found with ID {order_id}")
                 raise NotFoundError("Order not found")
 
-            order.status = OrderStatus.DELIVERED
+            if not DeliveryService.is_valid_status_transition(
+                assignment.logistical_status, LogisticalStatus.COMPLETED
+            ):
+                logger.warning(
+                    f"QR confirm attempted for order {order_id} while assignment "
+                    f"is at {assignment.logistical_status}, not DELIVERED_PENDING_QR"
+                )
+                raise ValidationError(
+                    "Delivery is not ready for proof-of-delivery confirmation"
+                )
+
+            # POD is the trigger for escrow release: settle every item's seller now,
+            # not just items a seller separately marked shipped/delivered themselves.
+            # Cancelled items are skipped entirely -- never transitioned, never paid.
+            for item in order.items:
+                if item.status == OrderItem.Status.CANCELLED:
+                    continue
+                if item.status != OrderItem.Status.DELIVERED:
+                    item.transition_to(OrderItem.Status.DELIVERED)
+                WalletService.settle_order_item(item)
+
             assignment.logistical_status = LogisticalStatus.COMPLETED
             session.commit()
 
-            return {"status": "success", "message": "Order marked as delivered"}
+        # Delegate order-level completion (status, realtime event, gamification)
+        # to the single source of truth so the QR path gets the same side effects
+        # as every other way an order can be marked delivered.
+        OrderService.update_order_status(order_id, OrderStatus.DELIVERED)
+
+        return {"status": "success", "message": "Order marked as delivered"}
 
     @staticmethod
     def find_delivery_order_buyer(user_id: str, room_id: str) -> bool:
