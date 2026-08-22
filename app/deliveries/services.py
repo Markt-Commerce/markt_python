@@ -34,6 +34,7 @@ from .models import (
     LocationUpdateRoom,
     OrderLocationMapping,
 )
+from app.orders.events import ActorType, OrderEventService, OrderEventType
 from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
 from app.orders.services import OrderService
 
@@ -783,6 +784,14 @@ class DeliveryService:
                     continue
                 if item.status != OrderItem.Status.DELIVERED:
                     item.transition_to(OrderItem.Status.DELIVERED)
+                    OrderEventService.emit(
+                        session,
+                        order_id=order.id,
+                        order_item_id=item.id,
+                        event_type=OrderEventType.ITEM_DELIVERED,
+                        actor_type=ActorType.RIDER,
+                        actor_id=user_id,
+                    )
                 if item.delivered_at is None:
                     item.delivered_at = datetime.utcnow()
 

@@ -1,5 +1,5 @@
 """Unit tests for the rerouting engine's candidate-seller lookup, hard
-eligibility filter (§7.1-7.2), and the attempt loop (§7.1 steps 3-9)."""
+eligibility filter (7.1-7.2), and the attempt loop (7.1 steps 3-9)."""
 
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -178,6 +178,7 @@ def _failed_allocation(status, **overrides):
 def _order_item(**overrides):
     defaults = dict(
         id=10,
+        order_id="ORD_1",
         product_id="PRD_1",
         price=1000.0,
         quantity=2,
@@ -227,7 +228,7 @@ def test_attempt_reroute_no_op_when_not_declined_or_timeout(mock_scope):
 @patch("app.fulfilment.rerouting._escalate_unfulfilled_item")
 @patch("app.fulfilment.rerouting.session_scope")
 def test_attempt_reroute_starts_from_buyer_rejected(mock_scope, mock_escalate):
-    """§6.1: a buyer-rejected substitution can be retried like any other
+    """6.1: a buyer-rejected substitution can be retried like any other
     failure, not just DECLINED/TIMEOUT."""
     failed = _failed_allocation(FulfilmentAllocationStatus.BUYER_REJECTED)
     order_item = _order_item(fulfilment_preference=FulfilmentPreference.SELLER_ONLY)

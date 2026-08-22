@@ -1,6 +1,6 @@
-"""Checkout fee calculation (§11): the buyer-facing Service Fee, the
+"""Checkout fee calculation (11): the buyer-facing Service Fee, the
 opt-in Reliability Fee estimate, and the itemised breakdown / capture-
-ceiling figures required by §11.4-11.5.
+ceiling figures required by 11.4-11.5.
 
 Used by the payment-first checkout flow
 (PaymentService.initialize_checkout_payment). The pre-existing order-first
@@ -11,22 +11,22 @@ bundled into this module.
 
 from typing import Any, Dict
 
-# §11.3 / Phase 0 decision.
+# 11.3 / Phase 0 decision.
 SERVICE_FEE_RATE = 0.025
 SERVICE_FEE_FLOOR = 25.0
 SERVICE_FEE_CEILING = 1000.0
 
-# §11.2 / Phase 0 decision.
+# 11.2 / Phase 0 decision.
 RELIABILITY_FEE_RATE = 0.10
 RELIABILITY_FEE_CEILING = 1500.0
 
-# §11.4: permitted AUTO price variation before requiring ASK approval
+# 11.4: permitted AUTO price variation before requiring ASK approval
 # (Phase 0 decision).
 SUBSTITUTION_HEADROOM_RATE = 0.05
 
 
 def calculate_service_fee(subtotal: float) -> float:
-    """§11.3: a capped percentage -- floor so tiny orders still cover
+    """11.3: a capped percentage -- floor so tiny orders still cover
     cost, ceiling so large baskets don't feel gouged."""
     if subtotal <= 0:
         return 0.0
@@ -35,7 +35,7 @@ def calculate_service_fee(subtotal: float) -> float:
 
 
 def calculate_reliability_fee_estimate(subtotal: float) -> float:
-    """§11.2: 10% of order value, capped flat. This is an ESTIMATE shown
+    """11.2: 10% of order value, capped flat. This is an ESTIMATE shown
     to the buyer at checkout for transparency -- it must never be added
     into the captured total. It's only actually charged if a reroute
     fires, and rerouting doesn't exist yet (Phase 6)."""
@@ -50,7 +50,7 @@ def calculate_capture_ceiling(
     service_fee: float,
     reliability_fee_opted_in: bool,
 ) -> float:
-    """§11.4: the max the buyer could ever be charged today, covering the
+    """11.4: the max the buyer could ever be charged today, covering the
     permitted substitution headroom plus the reliability fee if toggled.
 
     There's no auth/capture split (Phase 0: full capture immediately at
@@ -69,12 +69,12 @@ def build_fee_breakdown(
     shipping_fee: float,
     reliability_fee_opted_in: bool = False,
 ) -> Dict[str, Any]:
-    """§11.5: every component itemised and visible before payment.
+    """11.5: every component itemised and visible before payment.
 
     `total` is what's actually captured today (item prices + shipping +
     service fee only -- VAT is deferred per Phase 0, so no tax line, and
     the reliability fee is never captured, only estimated/toggled).
-    `capture_ceiling` is the separate, larger figure for §11.4 transparency
+    `capture_ceiling` is the separate, larger figure for 11.4 transparency
     about the worst case if a reroute happens.
     """
     service_fee = calculate_service_fee(subtotal)

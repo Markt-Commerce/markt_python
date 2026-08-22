@@ -12,7 +12,7 @@ from app.products.models import Product, ProductStatus
 logger = logging.getLogger(__name__)
 
 # Reservations that are still TTL-bound (not yet CONFIRMED into an order,
-# which is indefinite until CONSUMED/RELEASED -- see §8.1).
+# which is indefinite until CONSUMED/RELEASED -- see 8.1).
 TTL_BOUND_STATUSES = (
     InventoryReservation.Status.REQUESTED,
     InventoryReservation.Status.HELD,
@@ -22,7 +22,7 @@ TTL_BOUND_STATUSES = (
 @celery_app.task(name="app.inventory.tasks.expire_stale_reservations", queue="default")
 def expire_stale_reservations():
     """Move reservations past their TTL to EXPIRED, releasing the stock
-    they were holding (§8.1) so it counts as available again."""
+    they were holding (8.1) so it counts as available again."""
     now = datetime.utcnow()
     expired_count = 0
 
@@ -48,7 +48,7 @@ def expire_stale_reservations():
     name="app.inventory.tasks.recompute_confidence_scores", queue="default"
 )
 def recompute_confidence_scores():
-    """Recompute Inventory Confidence (§8.3) for every active product.
+    """Recompute Inventory Confidence (8.3) for every active product.
     Scheduled rather than computed on read, per the checklist -- the score
     only needs to be roughly fresh (recency decays over days, not minutes)."""
     with session_scope() as session:

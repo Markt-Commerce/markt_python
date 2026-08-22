@@ -1,5 +1,5 @@
 """Market/Area assignment and the geocode-distance sanity check on a
-seller's claimed Market (§7.2, Phase 6's cross-cutting blocker).
+seller's claimed Market (7.2, Phase 6's cross-cutting blocker).
 
 A seller explicitly picks their Market (like Category) -- this module
 never infers membership from coordinates. What it does do is check the

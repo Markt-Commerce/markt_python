@@ -94,7 +94,7 @@ class CheckoutPaymentInitializeSchema(Schema):
         metadata={
             "description": (
                 "Opt-in only; only ever actually charged if a reroute "
-                "fires (§11.2). Not captured today."
+                "fires (11.2). Not captured today."
             )
         },
     )
@@ -103,7 +103,7 @@ class CheckoutPaymentInitializeSchema(Schema):
         validate=validate.OneOf(["auto", "ask", "seller_only"]),
         metadata={
             "description": (
-                "§6 substitution preference for this order's items: auto "
+                "6 substitution preference for this order's items: auto "
                 "(silent rerouting), ask (buyer approval required for a "
                 "material substitution), or seller_only (no rerouting)."
             )
@@ -115,7 +115,7 @@ class CheckoutPaymentInitializeSchema(Schema):
 class CheckoutPaymentResponseSchema(Schema):
     """Response for CheckoutPaymentInitializeSchema -- no order_id yet,
     since the order is only created once payment succeeds. Includes the
-    full itemised breakdown (§11.5) so the client can render it before the
+    full itemised breakdown (11.5) so the client can render it before the
     buyer is sent to Paystack."""
 
     payment_id = fields.Str(required=True)
@@ -133,7 +133,7 @@ class CheckoutPaymentResponseSchema(Schema):
         metadata={
             "description": (
                 "Max the buyer could be charged today, informational only "
-                "(§11.4) -- not a PSP authorization hold."
+                "(11.4) -- not a PSP authorization hold."
             )
         },
     )

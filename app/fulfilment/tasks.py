@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 @celery_app.task(name="app.fulfilment.tasks.expire_stale_allocations", queue="default")
 def expire_stale_allocations():
     """Move AWAITING_SELLER allocations past their response deadline to
-    TIMEOUT (§12.2). Stops there -- the reroute loop is what advances a
+    TIMEOUT (12.2). Stops there -- the reroute loop is what advances a
     TIMEOUT (or DECLINED) allocation to REROUTING once it actually picks
     the item up."""
     from app.fulfilment.services import FulfilmentService
@@ -24,7 +24,7 @@ def expire_stale_allocations():
     name="app.fulfilment.tasks.expire_stale_buyer_approvals", queue="default"
 )
 def expire_stale_buyer_approvals():
-    """§9.1: move AWAITING_BUYER_APPROVAL allocations past their buyer
+    """9.1: move AWAITING_BUYER_APPROVAL allocations past their buyer
     response deadline to UNFULFILLED, refunding just that item -- no
     substitution retry (see FulfilmentService.expire_stale_buyer_approvals'
     own docstring for why this is deliberately unlike the seller-timeout
@@ -33,7 +33,7 @@ def expire_stale_buyer_approvals():
 
     result = FulfilmentService.expire_stale_buyer_approvals()
     logger.info(
-        "Timed out %s stale buyer-approval allocation(s) (§9.1)", result["timed_out"]
+        "Timed out %s stale buyer-approval allocation(s) (9.1)", result["timed_out"]
     )
     return result
 
@@ -42,7 +42,7 @@ def expire_stale_buyer_approvals():
     name="app.fulfilment.tasks.recompute_seller_reliability_scores", queue="default"
 )
 def recompute_seller_reliability_scores():
-    """Recompute Seller Reliability (§13.2) for every active seller.
+    """Recompute Seller Reliability (13.2) for every active seller.
     Scheduled rather than computed on read, same as Phase 3's inventory
     confidence recompute."""
     from app.fulfilment.reliability import SellerReliabilityService

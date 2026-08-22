@@ -1,6 +1,6 @@
-"""Rerouting engine (§7.1): candidate-seller lookup, the hard eligibility
-filter (§7.2), and the attempt loop that ties them together with ranking
-(§13.1) to actually retry a failed item against the next-best seller. Now
+"""Rerouting engine (7.1): candidate-seller lookup, the hard eligibility
+filter (7.2), and the attempt loop that ties them together with ranking
+(13.1) to actually retry a failed item against the next-best seller. Now
 that Market/Area exist (feat/market-area-foundation) to scope "same
 market" by.
 
@@ -17,19 +17,19 @@ plausible matches given today's catalog. A real fix (a shared
 canonical-product concept sellers link their listings to) is bigger,
 separate catalog work.
 
-Buyer fulfilment preference (§6): SELLER_ONLY is gated here (attempt_reroute
+Buyer fulfilment preference (6): SELLER_ONLY is gated here (attempt_reroute
 never looks for candidates at all). ASK's material-substitution gate is
 NOT here -- it lives in FulfilmentService.accept(), since "material" only
 becomes knowable once a specific replacement seller has actually accepted
 (their product's price is what's compared against the original). See that
 method's docstring, and FulfilmentAllocationStatus.AWAITING_BUYER_APPROVAL.
 
-§13.4 anti-gaming: find_candidate_products excludes a seller whose
+13.4 anti-gaming: find_candidate_products excludes a seller whose
 SellerReliabilityScore.gaming_flagged is set (chronic accept-then-cancel
 and/or last-second responses -- see reliability.py), same enforcement
 pattern as a market-verification-FLAGGED seller.
 
-§7.4 Buyer Requests tie-in: when attempt_reroute genuinely exhausts the
+7.4 Buyer Requests tie-in: when attempt_reroute genuinely exhausts the
 direct candidate lookup above (deadline/retry limit, no eligible
 candidates, or every candidate losing the stock race -- NOT a SELLER_ONLY
 buyer's deliberate no-rerouting choice, which never reaches this), it
@@ -37,7 +37,7 @@ reuses the existing app.requests rail as a wider, asynchronous net rather
 than building a parallel matching path -- see _escalate_unfulfilled_item
 and app.requests.services.BuyerRequestService.create_reroute_request.
 This is a genuine COMPLEMENT to the ranked-candidate algorithm above, not
-a replacement for it: §7.1's numbered steps describe a synchronous
+a replacement for it: 7.1's numbered steps describe a synchronous
 rank-then-contact process that a SellerOffer response can't give you
 (offers arrive whenever a seller gets around to it), so the direct lookup
 stays the primary mechanism and this only fires once it's given up.
@@ -52,6 +52,7 @@ from app.categories.models import ProductCategory
 from app.inventory.confidence import ConfidenceBand, InventoryConfidenceService
 from app.libs.errors import ConflictError, NotFoundError
 from app.libs.session import session_scope
+from app.orders.events import ActorType, OrderEventService, OrderEventType
 from app.orders.models import FulfilmentPreference, OrderItem
 from app.products.models import Product
 from app.users.models import MarketVerificationStatus, Seller
@@ -68,7 +69,7 @@ from .models import (
 
 STOPWORDS = {"the", "a", "an", "of", "and", "or", "for", "with", "in", "on", "to"}
 
-# §7.2: "sufficient inventory confidence" -- Low-confidence sellers don't
+# 7.2: "sufficient inventory confidence" -- Low-confidence sellers don't
 # qualify as automatic reroute candidates (they'd need seller confirmation
 # before stock counts as secured at all -- see InventoryService.reserve_stock).
 MIN_CONFIDENCE_BAND = ConfidenceBand.MEDIUM
@@ -90,13 +91,13 @@ def _tokenize(name: str) -> List[str]:
 def find_candidate_products(
     session, original_product: Product, exclude_seller_id: int
 ) -> List[Product]:
-    """§7.1 step 3: candidate sellers in the same market selling
+    """7.1 step 3: candidate sellers in the same market selling
     (approximately) the same product. Returns their `Product` rows.
 
     Empty results (rather than raising) whenever there isn't enough to
     work with -- no keywords extracted from the name, no primary
     category, or the original seller has no verified market -- since a
-    genuinely un-matchable item should fall through to escalation (§7.3),
+    genuinely un-matchable item should fall through to escalation (7.3),
     not error out.
     """
     keywords = _tokenize(original_product.name)
@@ -133,7 +134,7 @@ def find_candidate_products(
             ProductCategory.category_id == primary_category.category_id,
             Seller.market_id == original_seller.market_id,
             Seller.market_verification_status == MarketVerificationStatus.VERIFIED,
-            # §13.4 anti-gaming: a gaming-flagged seller is excluded from
+            # 13.4 anti-gaming: a gaming-flagged seller is excluded from
             # automated candidate lookup, same enforcement pattern as a
             # market-verification-FLAGGED seller above.
             SellerReliabilityScore.gaming_flagged.isnot(True),
@@ -152,7 +153,7 @@ def filter_eligible_candidates(
     exclude_seller_id: int,
     variant_id: Optional[int] = None,
 ) -> List[Product]:
-    """§7.2 hard eligibility filter, applied before ranking -- a high
+    """7.2 hard eligibility filter, applied before ranking -- a high
     score never overrides a failed eligibility check.
 
     Evaluates: same product/variant (via find_candidate_products, which
@@ -202,7 +203,7 @@ logger = logging.getLogger(__name__)
 
 
 def _escalate_unfulfilled_item(failed_allocation_id: int) -> None:
-    """§7.4: auto-generate a market-scoped BuyerRequest (see
+    """7.4: auto-generate a market-scoped BuyerRequest (see
     app.requests.services.BuyerRequestService.create_reroute_request) for
     an item that genuinely exhausted the direct candidate lookup. Called
     from attempt_reroute right before each UNFULFILLED return that
@@ -259,6 +260,7 @@ def _escalate_unfulfilled_item(failed_allocation_id: int) -> None:
             )
             category_id = primary_category.category_id if primary_category else None
 
+            order_id = order_item.order_id
             order_item_id = order_item.id
             product_name = original_product.name
             quantity = order_item.quantity
@@ -275,6 +277,16 @@ def _escalate_unfulfilled_item(failed_allocation_id: int) -> None:
             quantity=quantity,
             price=price,
         )
+
+        with session_scope() as session:
+            OrderEventService.emit(
+                session,
+                order_id=order_id,
+                order_item_id=order_item_id,
+                event_type=OrderEventType.ITEM_ESCALATED,
+                actor_type=ActorType.SYSTEM,
+                metadata={"market_id": market_id, "category_id": category_id},
+            )
     except Exception:
         logger.exception(
             "Failed to escalate unfulfilled allocation %s to Buyer Requests",
@@ -285,10 +297,10 @@ def _escalate_unfulfilled_item(failed_allocation_id: int) -> None:
 class ReroutingService:
     @staticmethod
     def attempt_reroute(failed_allocation_id: int) -> Optional[FulfilmentAllocation]:
-        """§7.1 steps 2-9: called when an allocation lands at DECLINED,
-        TIMEOUT, BUYER_REJECTED (§6.1's ASK-gate rejection -- see
+        """7.1 steps 2-9: called when an allocation lands at DECLINED,
+        TIMEOUT, BUYER_REJECTED (6.1's ASK-gate rejection -- see
         FulfilmentService.buyer_reject_reroute), or CANCELLED_BY_SELLER
-        (§13.4 anti-gaming "accept-then-cancel" -- see
+        (13.4 anti-gaming "accept-then-cancel" -- see
         FulfilmentService.cancel_after_accept). Finds and ranks eligible
         in-market candidates (excluding every seller already tried for
         this item) and reserves stock against the top-ranked one, retrying
@@ -296,9 +308,9 @@ class ReroutingService:
         new AWAITING_SELLER allocation on success.
 
         Returns None if the item couldn't be rerouted -- SELLER_ONLY
-        preference (§7.1 step 2), fulfilment deadline or retry limit
+        preference (7.1 step 2), fulfilment deadline or retry limit
         reached, or no eligible candidates at all -- after marking the
-        failed allocation UNFULFILLED. §7.3's escalation flow (surfacing
+        failed allocation UNFULFILLED. 7.3's escalation flow (surfacing
         that to the buyer) isn't built yet; this only gets the state
         honestly to where escalation would pick it up.
 
@@ -323,13 +335,21 @@ class ReroutingService:
             if not order_item:
                 return None
 
-            # §7.1 step 2: SELLER_ONLY means no rerouting at all -- skip
-            # straight to the same UNFULFILLED end state §7.3's (unbuilt)
+            # 7.1 step 2: SELLER_ONLY means no rerouting at all -- skip
+            # straight to the same UNFULFILLED end state 7.3's (unbuilt)
             # escalation flow would pick up from, without even looking for
             # candidates.
             if order_item.fulfilment_preference == FulfilmentPreference.SELLER_ONLY:
                 failed.transition_to(FulfilmentAllocationStatus.REROUTING)
                 failed.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
+                OrderEventService.emit(
+                    session,
+                    order_id=order_item.order_id,
+                    order_item_id=order_item.id,
+                    event_type=OrderEventType.ITEM_UNFULFILLED,
+                    actor_type=ActorType.SYSTEM,
+                    metadata={"reason": "seller_only_preference"},
+                )
                 session.flush()
                 return None
 
@@ -354,6 +374,14 @@ class ReroutingService:
 
             if datetime.utcnow() >= deadline or attempt_count >= MAX_REROUTE_ATTEMPTS:
                 failed.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
+                OrderEventService.emit(
+                    session,
+                    order_id=order_item.order_id,
+                    order_item_id=order_item.id,
+                    event_type=OrderEventType.ITEM_UNFULFILLED,
+                    actor_type=ActorType.SYSTEM,
+                    metadata={"reason": "deadline_or_retry_limit_reached"},
+                )
                 session.flush()
                 _escalate_unfulfilled_item(failed_allocation_id)
                 return None
@@ -361,6 +389,14 @@ class ReroutingService:
             original_product = session.query(Product).get(order_item.product_id)
             if not original_product:
                 failed.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
+                OrderEventService.emit(
+                    session,
+                    order_id=order_item.order_id,
+                    order_item_id=order_item.id,
+                    event_type=OrderEventType.ITEM_UNFULFILLED,
+                    actor_type=ActorType.SYSTEM,
+                    metadata={"reason": "original_product_missing"},
+                )
                 session.flush()
                 return None
 
@@ -382,6 +418,14 @@ class ReroutingService:
 
             if not eligible:
                 failed.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
+                OrderEventService.emit(
+                    session,
+                    order_id=order_item.order_id,
+                    order_item_id=order_item.id,
+                    event_type=OrderEventType.ITEM_UNFULFILLED,
+                    actor_type=ActorType.SYSTEM,
+                    metadata={"reason": "no_eligible_candidates"},
+                )
                 session.flush()
                 _escalate_unfulfilled_item(failed_allocation_id)
                 return None
@@ -425,6 +469,16 @@ class ReroutingService:
             failed = session.query(FulfilmentAllocation).get(failed_allocation_id)
             if failed and failed.status == FulfilmentAllocationStatus.REROUTING:
                 failed.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
+                order_item = session.query(OrderItem).get(failed.order_item_id)
+                if order_item:
+                    OrderEventService.emit(
+                        session,
+                        order_id=order_item.order_id,
+                        order_item_id=order_item.id,
+                        event_type=OrderEventType.ITEM_UNFULFILLED,
+                        actor_type=ActorType.SYSTEM,
+                        metadata={"reason": "every_candidate_lost_stock_race"},
+                    )
 
         _escalate_unfulfilled_item(failed_allocation_id)
         return None

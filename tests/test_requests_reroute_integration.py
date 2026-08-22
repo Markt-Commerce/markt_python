@@ -1,4 +1,4 @@
-"""Unit tests for §7.4's Buyer Requests tie-in: the previously-no-op
+"""Unit tests for 7.4's Buyer Requests tie-in: the previously-no-op
 seller-notification fix, the auto-generated reroute request, and
 accept_offer's stock-reservation/fulfilment-reopening hook for it."""
 

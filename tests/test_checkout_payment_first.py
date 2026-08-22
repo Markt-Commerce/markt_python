@@ -148,7 +148,8 @@ def test_create_order_from_checkout_snapshot_builds_paid_order():
     assert order.items[0].status == OrderItem.Status.PROCESSING
     assert order.items[0].quantity == 2
     assert order.items[0].seller_id == 7
-    assert session.add.call_count == 3  # order, shipping address, order item
+    # order, shipping address, order item, 14.2 ORDER_CREATED event
+    assert session.add.call_count == 4
 
 
 # ---------------------------------------------------------------------------

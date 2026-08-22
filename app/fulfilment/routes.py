@@ -38,7 +38,7 @@ class AllocationAccept(MethodView):
     @seller_required
     @bp.response(200, FulfilmentAllocationSchema)
     def post(self, allocation_id):
-        """Seller accepts a fulfilment allocation (§12.2)."""
+        """Seller accepts a fulfilment allocation (12.2)."""
         try:
             allocation = FulfilmentService.accept(
                 allocation_id, current_user.seller_account.id
@@ -56,7 +56,7 @@ class AllocationDecline(MethodView):
     @seller_required
     @bp.response(200, FulfilmentAllocationSchema)
     def post(self, allocation_id):
-        """Seller declines a fulfilment allocation (§12.2)."""
+        """Seller declines a fulfilment allocation (12.2)."""
         try:
             allocation = FulfilmentService.decline(
                 allocation_id, current_user.seller_account.id
@@ -74,7 +74,7 @@ class AllocationCancelAfterAccept(MethodView):
     @seller_required
     @bp.response(200, FulfilmentAllocationSchema)
     def post(self, allocation_id):
-        """Seller backs out of an accepted/preparing allocation (§13.4
+        """Seller backs out of an accepted/preparing allocation (13.4
         anti-gaming "accept-then-cancel") -- worse than decline() and
         scored accordingly by Seller Reliability's cancellation penalty."""
         try:
@@ -95,7 +95,7 @@ class AllocationApproveSubstitution(MethodView):
     @bp.response(200, FulfilmentAllocationSchema)
     def post(self, allocation_id):
         """Buyer approves a material substitution pending under their ASK
-        preference (§6.1)."""
+        preference (6.1)."""
         try:
             allocation = FulfilmentService.buyer_approve_reroute(
                 allocation_id, current_user.buyer_account.id
@@ -114,7 +114,7 @@ class AllocationRejectSubstitution(MethodView):
     @bp.response(200, FulfilmentAllocationSchema)
     def post(self, allocation_id):
         """Buyer rejects a material substitution pending under their ASK
-        preference (§6.1) -- the reroute loop tries the next candidate."""
+        preference (6.1) -- the reroute loop tries the next candidate."""
         try:
             allocation = FulfilmentService.buyer_reject_reroute(
                 allocation_id, current_user.buyer_account.id
@@ -132,7 +132,7 @@ class AllocationStartPreparing(MethodView):
     @seller_required
     @bp.response(200, FulfilmentAllocationSchema)
     def post(self, allocation_id):
-        """Seller starts preparing an accepted allocation (§12.2)."""
+        """Seller starts preparing an accepted allocation (12.2)."""
         try:
             allocation = FulfilmentService.start_preparing(
                 allocation_id, current_user.seller_account.id

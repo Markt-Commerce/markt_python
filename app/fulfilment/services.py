@@ -1,5 +1,5 @@
 """Seller fulfilment: accept/decline/timeout of an item allocation
-(§12.1-12.2).
+(12.1-12.2).
 
 Distinct from OrderItem's own PENDING/PROCESSING/SHIPPED/DELIVERED/
 CANCELLED lifecycle (Phase 1) -- this tracks the seller-facing negotiation
@@ -15,7 +15,7 @@ own session. attempt_reroute() is a no-op if the allocation isn't at one
 of those three statuses when it looks it up, so this is safe to call
 unconditionally rather than needing its own success check here.
 
-accept()'s §6.1 ASK gate (AWAITING_BUYER_APPROVAL) and its resolution
+accept()'s 6.1 ASK gate (AWAITING_BUYER_APPROVAL) and its resolution
 (buyer_approve_reroute()/buyer_reject_reroute()) are the buyer-facing
 counterpart to the seller-facing accept/decline/timeout negotiation above
 -- see accept()'s own docstring for why the gate lives there rather than
@@ -30,6 +30,7 @@ from app.libs.errors import ConflictError, ForbiddenError, NotFoundError
 from app.libs.session import session_scope
 from app.notifications.models import NotificationType
 from app.notifications.services import NotificationService
+from app.orders.events import ActorType, OrderEventService, OrderEventType
 from app.orders.models import FulfilmentPreference, Order, OrderItem
 from app.payments.models import PaymentStatus
 from app.products.models import Product
@@ -40,7 +41,7 @@ from .models import FulfilmentAllocation, FulfilmentAllocationStatus
 # Phase 0 decision.
 SELLER_RESPONSE_TIMEOUT_MINUTES = 3
 
-# §9.1: how long an ASK buyer is given to approve/reject a material
+# 9.1: how long an ASK buyer is given to approve/reject a material
 # substitution before Markt gives up on it (spec's own example figure).
 ASK_APPROVAL_TIMEOUT_MINUTES = 5
 
@@ -68,9 +69,15 @@ class FulfilmentService:
         given, is released automatically if this allocation ends up
         DECLINED/TIMEOUT (see decline()/expire_stale_allocations())."""
         with session_scope() as session:
+            # Captured before product_id is possibly overwritten below --
+            # an explicitly-passed product_id is exactly what marks this as
+            # a reroute-created allocation rather than the original one.
+            is_reroute = product_id is not None
+
+            order_item = session.query(OrderItem).get(order_item_id)
             if product_id is None:
-                order_item = session.query(OrderItem).get(order_item_id)
                 product_id = order_item.product_id if order_item else None
+            order_id = order_item.order_id if order_item else None
 
             allocation = FulfilmentAllocation(
                 order_item_id=order_item_id,
@@ -88,6 +95,21 @@ class FulfilmentService:
             seller = session.query(Seller).get(seller_id)
             seller_user_id = seller.user_id if seller else None
             allocation_id = allocation.id
+
+            if order_id:
+                OrderEventService.emit(
+                    session,
+                    order_id=order_id,
+                    order_item_id=order_item_id,
+                    event_type=(
+                        OrderEventType.ITEM_REROUTED
+                        if is_reroute
+                        else OrderEventType.ITEM_ALLOCATED
+                    ),
+                    actor_type=ActorType.SYSTEM,
+                    actor_id=str(seller_id),
+                    metadata={"quantity": quantity, "product_id": product_id},
+                )
 
         if seller_user_id:
             NotificationService.create_notification(
@@ -108,15 +130,15 @@ class FulfilmentService:
 
     @staticmethod
     def accept(allocation_id: int, seller_id: int) -> FulfilmentAllocation:
-        """§12.2 row 1: seller accepts. Required conditions ("reservation
+        """12.2 row 1: seller accepts. Required conditions ("reservation
         still active; item not already owned") are enforced structurally --
         the transition guard only allows this from AWAITING_SELLER, and the
         partial unique index guarantees at most one active allocation ever
         exists per item, so there's nothing else to double-own.
 
-        §6.1 ASK gate: if the buyer's preference is ASK and this seller's
+        6.1 ASK gate: if the buyer's preference is ASK and this seller's
         product price differs from the item's originally negotiated price,
-        this is a material substitution (§6.1's own definition also covers
+        this is a material substitution (6.1's own definition also covers
         a product/variant change or a second delivery fee, but those can't
         happen here -- the eligibility filter already enforces the same
         variant, and a second delivery fee doesn't exist as a concept for a
@@ -155,6 +177,21 @@ class FulfilmentService:
                 )
             else:
                 allocation.transition_to(FulfilmentAllocationStatus.ACCEPTED)
+
+            if order_item:
+                OrderEventService.emit(
+                    session,
+                    order_id=order_item.order_id,
+                    order_item_id=order_item.id,
+                    event_type=(
+                        OrderEventType.ITEM_SUBSTITUTION_PENDING
+                        if requires_approval
+                        else OrderEventType.ITEM_ACCEPTED
+                    ),
+                    actor_type=ActorType.SELLER,
+                    actor_id=str(seller_id),
+                )
+
             session.flush()
 
             buyer_user_id = None
@@ -182,19 +219,20 @@ class FulfilmentService:
 
     @staticmethod
     def cancel_after_accept(allocation_id: int, seller_id: int) -> FulfilmentAllocation:
-        """§13.4 anti-gaming: a seller backs out of an ACCEPTED or
+        """13.4 anti-gaming: a seller backs out of an ACCEPTED or
         PREPARING allocation -- the "accept-then-cancel" pattern the spec
         names explicitly, worse than a plain decline() because the buyer
         (and Markt's own downstream sequencing) already relied on the
-        commitment. Still safe pre-dispatch (§10.1: nothing dispatches
+        commitment. Still safe pre-dispatch (10.1: nothing dispatches
         until fulfilment is locked), so this always reroutes rather than
-        needing to unwind a rider/pickup. No `reason` param yet -- there's
-        nowhere to persist one until the §14.2 event log (Phase 7) exists;
-        add it then rather than accepting and silently dropping it now.
+        needing to unwind a rider/pickup. No `reason` param yet -- the
+        14.2 event log now exists, but its `metadata` still needs a
+        reason to actually put there; add the param when a route surfaces
+        one rather than accepting and silently dropping it now.
 
         Deliberately its own status (CANCELLED_BY_SELLER) rather than
         DECLINED -- reliability.py's cancellation-penalty component reads
-        this specifically, on top of the §13.2 formula's own Acceptance
+        this specifically, on top of the 13.2 formula's own Acceptance
         Rate (which would otherwise keep counting this as a plain "yes,
         they accepted" with no memory of the later reversal)."""
         with session_scope() as session:
@@ -208,6 +246,18 @@ class FulfilmentService:
 
             allocation.transition_to(FulfilmentAllocationStatus.CANCELLED_BY_SELLER)
             reservation_id = allocation.reservation_id
+
+            order_item = session.query(OrderItem).get(allocation.order_item_id)
+            if order_item:
+                OrderEventService.emit(
+                    session,
+                    order_id=order_item.order_id,
+                    order_item_id=order_item.id,
+                    event_type=OrderEventType.ITEM_CANCELLED_BY_SELLER,
+                    actor_type=ActorType.SELLER,
+                    actor_id=str(seller_id),
+                )
+
             session.flush()
 
         if reservation_id:
@@ -223,12 +273,12 @@ class FulfilmentService:
 
     @staticmethod
     def decline(allocation_id: int, seller_id: int) -> FulfilmentAllocation:
-        """§12.2 row 2: seller declines. Stops at DECLINED rather than
+        """12.2 row 2: seller declines. Stops at DECLINED rather than
         auto-advancing to REROUTING (an earlier version of this did, but
         that made a decline and a timeout indistinguishable at rest --
         both landed on REROUTING with nothing left recording *how* the
         allocation got there. Seller Reliability's Response Rate component
-        (§13.2) needs that distinction: declining is a response, timing
+        (13.2) needs that distinction: declining is a response, timing
         out is the absence of one. The reroute loop itself is what moves
         this on to REROUTING once it actually picks the item up."""
         with session_scope() as session:
@@ -242,6 +292,18 @@ class FulfilmentService:
 
             allocation.transition_to(FulfilmentAllocationStatus.DECLINED)
             reservation_id = allocation.reservation_id
+
+            order_item = session.query(OrderItem).get(allocation.order_item_id)
+            if order_item:
+                OrderEventService.emit(
+                    session,
+                    order_id=order_item.order_id,
+                    order_item_id=order_item.id,
+                    event_type=OrderEventType.ITEM_DECLINED,
+                    actor_type=ActorType.SELLER,
+                    actor_id=str(seller_id),
+                )
+
             session.flush()
 
         if reservation_id:
@@ -259,7 +321,7 @@ class FulfilmentService:
     def buyer_approve_reroute(
         allocation_id: int, buyer_id: int
     ) -> FulfilmentAllocation:
-        """§6.1: buyer approves a material substitution -- AWAITING_BUYER_APPROVAL
+        """6.1: buyer approves a material substitution -- AWAITING_BUYER_APPROVAL
         -> ACCEPTED. The reservation was never released, so nothing else
         needs to happen; the allocation just continues as any other
         accepted one would (start_preparing etc.)."""
@@ -279,12 +341,22 @@ class FulfilmentService:
                 raise ForbiddenError("Not authorized to act on this allocation")
 
             allocation.transition_to(FulfilmentAllocationStatus.ACCEPTED)
+
+            OrderEventService.emit(
+                session,
+                order_id=order_item.order_id,
+                order_item_id=order_item.id,
+                event_type=OrderEventType.ITEM_SUBSTITUTION_APPROVED,
+                actor_type=ActorType.BUYER,
+                actor_id=str(buyer_id),
+            )
+
             session.flush()
             return allocation
 
     @staticmethod
     def buyer_reject_reroute(allocation_id: int, buyer_id: int) -> FulfilmentAllocation:
-        """§6.1: buyer rejects a material substitution --
+        """6.1: buyer rejects a material substitution --
         AWAITING_BUYER_APPROVAL -> BUYER_REJECTED, release the reservation
         (same discipline as decline()), and let the reroute loop try the
         next candidate. Distinct status from DECLINED specifically so this
@@ -308,6 +380,16 @@ class FulfilmentService:
 
             allocation.transition_to(FulfilmentAllocationStatus.BUYER_REJECTED)
             reservation_id = allocation.reservation_id
+
+            OrderEventService.emit(
+                session,
+                order_id=order_item.order_id,
+                order_item_id=order_item.id,
+                event_type=OrderEventType.ITEM_SUBSTITUTION_REJECTED,
+                actor_type=ActorType.BUYER,
+                actor_id=str(buyer_id),
+            )
+
             session.flush()
 
         if reservation_id:
@@ -323,7 +405,7 @@ class FulfilmentService:
 
     @staticmethod
     def start_preparing(allocation_id: int, seller_id: int) -> FulfilmentAllocation:
-        """§12.2: ACCEPTED -> PREPARING. Gated on Payment.status ==
+        """12.2: ACCEPTED -> PREPARING. Gated on Payment.status ==
         COMPLETED rather than the spec's "escrow authorized" -- re-scoped
         per the Phase 4 cross-cutting blocker: Markt captures the full
         payment before the order even exists, so by the time any
@@ -356,7 +438,7 @@ class FulfilmentService:
 
     @staticmethod
     def expire_stale_allocations() -> dict:
-        """Worker (§12.2 row 3): AWAITING_SELLER past its response
+        """Worker (12.2 row 3): AWAITING_SELLER past its response
         deadline -> TIMEOUT. Stops there rather than auto-advancing to
         REROUTING -- see decline()'s docstring for why: the reroute loop
         itself makes that transition once it actually picks the item up,
@@ -383,6 +465,18 @@ class FulfilmentService:
                 timed_out_allocation_ids.append(allocation.id)
                 timed_out += 1
 
+                order_item = session.query(OrderItem).get(allocation.order_item_id)
+                if order_item:
+                    OrderEventService.emit(
+                        session,
+                        order_id=order_item.order_id,
+                        order_item_id=allocation.order_item_id,
+                        event_type=OrderEventType.ITEM_TIMED_OUT,
+                        actor_type=ActorType.SYSTEM,
+                        actor_id=str(allocation.seller_id),
+                        idempotency_key=f"event:item_timed_out:{allocation.id}",
+                    )
+
         if reservation_ids_to_release:
             from app.inventory.services import InventoryService
 
@@ -398,7 +492,7 @@ class FulfilmentService:
 
     @staticmethod
     def expire_stale_buyer_approvals() -> dict:
-        """§9.1 ASK timeout worker: AWAITING_BUYER_APPROVAL past its
+        """9.1 ASK timeout worker: AWAITING_BUYER_APPROVAL past its
         buyer_response_deadline -> UNFULFILLED. Deliberately does NOT call
         ReroutingService.attempt_reroute -- the MVP policy is "do not
         substitute after an ASK timeout," so unlike a seller TIMEOUT/DECLINE
@@ -434,6 +528,18 @@ class FulfilmentService:
             for allocation in stale:
                 allocation.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
                 timed_out += 1
+
+                order_item = session.query(OrderItem).get(allocation.order_item_id)
+                if order_item:
+                    OrderEventService.emit(
+                        session,
+                        order_id=order_item.order_id,
+                        order_item_id=allocation.order_item_id,
+                        event_type=OrderEventType.ITEM_UNFULFILLED,
+                        actor_type=ActorType.SYSTEM,
+                        metadata={"reason": "ask_approval_timeout"},
+                        idempotency_key=f"event:item_unfulfilled_ask_timeout:{allocation.id}",
+                    )
             session.flush()
 
         for _allocation_id, order_item_id, reservation_id in resolved:
@@ -445,7 +551,7 @@ class FulfilmentService:
             OrderService.refund_unresolved_item(
                 order_item_id,
                 reason="Buyer did not respond to the substitution approval "
-                "request in time (§9.1 ASK timeout)",
+                "request in time (9.1 ASK timeout)",
             )
 
         return {"timed_out": timed_out}

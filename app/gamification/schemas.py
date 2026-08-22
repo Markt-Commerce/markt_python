@@ -1,4 +1,4 @@
-"""Marshmallow schemas for the gamification REST contract (spec §5.5).
+"""Marshmallow schemas for the gamification REST contract (spec 5.5).
 
 Responses are built as plain dicts in services.py; these schemas shape the
 OpenAPI output and serialise datetimes.

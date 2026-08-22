@@ -1,4 +1,4 @@
-"""Unit tests for SellerReliabilityService: the §13.2 formula."""
+"""Unit tests for SellerReliabilityService: the 13.2 formula."""
 
 from datetime import datetime, timedelta
 from types import SimpleNamespace

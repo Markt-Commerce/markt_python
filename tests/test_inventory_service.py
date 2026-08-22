@@ -1,5 +1,5 @@
 """Unit tests for InventoryService: available-quantity query and the
-atomic reserve_stock endpoint (§8)."""
+atomic reserve_stock endpoint (8)."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch

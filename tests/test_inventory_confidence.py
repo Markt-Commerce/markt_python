@@ -1,4 +1,4 @@
-"""Unit tests for InventoryConfidenceService: the §8.3 formula, §8.4
+"""Unit tests for InventoryConfidenceService: the 8.3 formula, 8.4
 cold-start prior, and confidence-band gating."""
 
 from datetime import datetime, timedelta

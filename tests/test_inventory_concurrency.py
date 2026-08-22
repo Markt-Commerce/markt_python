@@ -1,4 +1,4 @@
-"""Real-database concurrency test for InventoryService.reserve_stock (§8.2).
+"""Real-database concurrency test for InventoryService.reserve_stock (8.2).
 
 Every other test in this suite mocks the DB session, which can prove the
 code *calls* with_for_update() but can't prove the lock actually serializes

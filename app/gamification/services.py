@@ -294,7 +294,7 @@ def award_by_reason(user_id, reason, ref_type=None, ref_id=None, **kw):
 
 
 def reverse_award(user_id, reason, ref_type, ref_id, reversal_reason):
-    """Claw back a prior award with a negative ledger entry (spec §4.1).
+    """Claw back a prior award with a negative ledger entry (spec 4.1).
 
     Looks up the original positive award(s) for (reason, ref) and writes the
     negated total. Idempotent on the reversal ref.

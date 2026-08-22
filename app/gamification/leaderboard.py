@@ -1,4 +1,4 @@
-"""Redis-backed leaderboard ranking utilities (spec §4.4, §5.4).
+"""Redis-backed leaderboard ranking utilities (spec 4.4, 5.4).
 
 Live ranks live in sorted sets, updated atomically on every award. Score is the
 user's points in the period (lifetime for all-time, weekly for weekly). The

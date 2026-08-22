@@ -1,4 +1,4 @@
-"""Gamification REST endpoints (spec §5.5).
+"""Gamification REST endpoints (spec 5.5).
 
 Session auth via Flask-Login; Marshmallow schemas drive the OpenAPI contract.
 Importing `events` here wires the domain-signal handlers when the blueprint

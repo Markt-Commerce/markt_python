@@ -40,7 +40,7 @@ class Payment(BaseModel, UniqueIdMixin):
             PaymentStatus.PARTIALLY_REFUNDED,
         ],
         # A second (or third...) per-item refund against the same payment
-        # (see OrderService.refund_unresolved_item, §11.8) needs to be able
+        # (see OrderService.refund_unresolved_item, 11.8) needs to be able
         # to land here again -- self-transition, not a no-op guard, since
         # transition_to always validates against the graph regardless of
         # whether old == new. Whole-order cancel/return can still refund

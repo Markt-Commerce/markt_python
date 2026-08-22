@@ -126,7 +126,7 @@ class Config:
         self.PLATFORM_COMMISSION_RATE = config(
             "PLATFORM_COMMISSION_RATE", default=0.10, cast=float
         )
-        # §11.1 / Phase 0: seller payout is eligible this long after POD,
+        # 11.1 / Phase 0: seller payout is eligible this long after POD,
         # not immediately.
         self.SETTLEMENT_HOLD_HOURS = config(
             "SETTLEMENT_HOLD_HOURS", default=12, cast=int

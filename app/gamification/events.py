@@ -1,5 +1,5 @@
 """Signal handlers that translate domain events into point awards and badge
-evaluations (spec §5.3).
+evaluations (spec 5.3).
 
 Every handler is wrapped so a gamification failure can never break the host
 action that emitted the signal — awarding points is strictly a side-effect.

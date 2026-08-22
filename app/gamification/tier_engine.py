@@ -1,4 +1,4 @@
-"""Pure functions mapping lifetime points to a tier (spec §4.2).
+"""Pure functions mapping lifetime points to a tier (spec 4.2).
 
 No database or Redis access here so these are trivially unit-testable. Callers
 pass in the tier rows (from gam_tier_config, cached) as a list of dicts:

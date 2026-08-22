@@ -1,6 +1,6 @@
-"""Inventory Confidence (§8.3): a transparent, deterministic estimate of
+"""Inventory Confidence (8.3): a transparent, deterministic estimate of
 whether a seller can actually supply a listed product right now, and the
-cold-start prior (§8.4) used before a product/seller has enough observed
+cold-start prior (8.4) used before a product/seller has enough observed
 history to score for real.
 """
 
@@ -16,7 +16,7 @@ from app.products.models import Product
 
 from .models import CategoryConfidencePrior, InventoryConfidenceScore
 
-# §8.3 weights -- confirmed as spec defaults in Phase 0.
+# 8.3 weights -- confirmed as spec defaults in Phase 0.
 WEIGHTS = {
     "recency": 0.40,
     "accuracy": 0.30,
@@ -38,7 +38,7 @@ FULFILMENT_LOOKBACK_DAYS = 30
 # must not get the lowest score."
 DEFAULT_PRIOR = 0.6
 
-# Confidence bands gate how Markt secures stock (§8.3).
+# Confidence bands gate how Markt secures stock (8.3).
 HIGH_THRESHOLD = 0.7
 MEDIUM_THRESHOLD = 0.4
 
@@ -69,7 +69,7 @@ def _decay(age_hours: float) -> float:
 class InventoryConfidenceService:
     @staticmethod
     def get_category_prior(session, product_id: str) -> float:
-        """§8.4 cold start: seed from the product's primary category (or
+        """8.4 cold start: seed from the product's primary category (or
         any category it has), or the global default if it has none or no
         prior has been seeded for that category yet."""
         product_category = (
@@ -256,7 +256,7 @@ class InventoryConfidenceService:
 
     @staticmethod
     def get_band_for_product(product_id: str) -> str:
-        """Confidence band for gating (§8.3). See get_score_for_product."""
+        """Confidence band for gating (8.3). See get_score_for_product."""
         return get_confidence_band(
             InventoryConfidenceService.get_score_for_product(product_id)
         )

@@ -250,8 +250,8 @@ class BuyerRequestService:
 
             return request
 
-    # §7.4: how long an auto-generated reroute request stays open before
-    # sellers stop being able to respond. Not on the same clock as §9's
+    # 7.4: how long an auto-generated reroute request stays open before
+    # sellers stop being able to respond. Not on the same clock as 9's
     # fulfilment deadline (10 min) -- SellerOffer responses are
     # asynchronous by nature, so this is a genuine complement to the
     # direct-candidate reroute engine (app.fulfilment.rerouting), not
@@ -269,7 +269,7 @@ class BuyerRequestService:
         quantity: int,
         price: float,
     ) -> BuyerRequest:
-        """§7.4: auto-generate a BuyerRequest for an order item the direct
+        """7.4: auto-generate a BuyerRequest for an order item the direct
         reroute engine has genuinely exhausted (see
         app.fulfilment.rerouting's `_escalate_unfulfilled_item`) -- reuses
         this existing rail as a wider, asynchronous net for sellers the
@@ -502,7 +502,7 @@ class BuyerRequestService:
     def accept_offer(offer_id: int, user_id: str) -> SellerOffer:
         """Accept seller offer with conflict resolution.
 
-        §7.4: for a REROUTE_ENGINE-sourced request (see
+        7.4: for a REROUTE_ENGINE-sourced request (see
         create_reroute_request), accepting an offer must actually reopen
         fulfilment for the order item the request exists for -- reserve
         stock against the offer's product BEFORE touching any
@@ -1171,13 +1171,13 @@ class BuyerRequestService:
     def _notify_relevant_sellers(request: BuyerRequest):
         """Notify sellers who might respond to this request -- sellers with
         an active product in the request's primary category. This was a
-        no-op TODO stub before (found while wiring §7.4's reroute
+        no-op TODO stub before (found while wiring 7.4's reroute
         escalation, which depends on it); real geographic/rating-based
         ranking of *which* matching sellers to prioritise is future work,
         this is the MVP "does anyone even get told" fix.
 
         Scoped to `request.market_id` + VERIFIED market membership when
-        set -- only true for a REROUTE_ENGINE request (§18.2: rerouting is
+        set -- only true for a REROUTE_ENGINE request (18.2: rerouting is
         within-market only). A buyer-posted request has no market_id and
         reaches every matching seller regardless of market, matching this
         feature's general-purpose, social nature.

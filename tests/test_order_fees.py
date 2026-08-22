@@ -1,4 +1,4 @@
-"""Unit tests for the checkout fee model (§11.2-11.5, Phase 0 decisions)."""
+"""Unit tests for the checkout fee model (11.2-11.5, Phase 0 decisions)."""
 
 import pytest
 

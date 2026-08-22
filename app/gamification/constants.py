@@ -26,7 +26,7 @@ POINT_VALUES = {
 # Reason written when a previously-awarded order is refunded/cancelled.
 REASON_ORDER_REVERSED = "order_reversed"
 
-# --- Daily anti-abuse caps (Appendix A / §5.8) ---------------------------------
+# --- Daily anti-abuse caps (Appendix A / 5.8) ---------------------------------
 # reason_key -> max number of point-eligible awards per user per calendar day.
 # Further events still succeed (e.g. the post publishes) but award 0 points.
 DAILY_CAPS = {
@@ -232,7 +232,7 @@ BADGE_SEED = [
     },
 ]
 
-# --- Redis key patterns (§5.4) -------------------------------------------------
+# --- Redis key patterns (5.4) -------------------------------------------------
 # Namespaced under "gam:" so gamification data can be flushed independently.
 LB_SCOPE_GLOBAL = "global"
 LB_SCOPE_BUYERS = "buyers"

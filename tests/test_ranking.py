@@ -1,5 +1,5 @@
-"""Unit tests for the seller ranking scorer (§13.1) and quantity-split
-penalty (§13.3)."""
+"""Unit tests for the seller ranking scorer (13.1) and quantity-split
+penalty (13.3)."""
 
 from types import SimpleNamespace
 from unittest.mock import patch

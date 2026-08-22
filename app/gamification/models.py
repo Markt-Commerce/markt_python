@@ -1,6 +1,6 @@
 """Gamification ORM models (all tables prefixed gam_).
 
-Design notes (spec §5.2):
+Design notes (spec 5.2):
 - No existing table is modified. Foreign keys point *into* users only, so the
   whole feature can be rolled forward/back independently.
 - The ledger carries a unique partial index on

@@ -1,5 +1,5 @@
 """Unit tests for FulfilmentAllocation.transition_to, the single source of
-truth for seller accept/decline/timeout state changes (§12.1-12.2)."""
+truth for seller accept/decline/timeout state changes (12.1-12.2)."""
 
 import pytest
 

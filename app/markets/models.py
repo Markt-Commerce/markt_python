@@ -1,5 +1,5 @@
 """Market and Area: pulled forward from Phase 9 to unblock Phase 6's
-rerouting engine, which is explicitly within-market only (ADR §18.2).
+rerouting engine, which is explicitly within-market only (ADR 18.2).
 
 Market = "a defined cluster of many sellers (a digitised physical
 market)" -- a real, named place (e.g. "Bodija Market"). Sellers are
@@ -10,7 +10,7 @@ Area = "a delivery-target region (a campus at launch)" -- also named and
 explicitly assigned, not geo-computed. Buyers resolve to an Area; a
 DeliveryRun (Phase 9, not built yet) serves one Market -> one Area.
 
-Both keep latitude/longitude for reference and future use (e.g. §13.1's
+Both keep latitude/longitude for reference and future use (e.g. 13.1's
 Distance/Delivery Cost ranking component), but geographic coordinates are
 never the membership mechanism -- see app.markets.services for the
 geocode-distance *verification* check on a seller's market claim, which

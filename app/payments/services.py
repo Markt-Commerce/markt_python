@@ -249,7 +249,7 @@ class PaymentService:
                 for item in order.items
             ]
 
-        # Open the seller-acceptance window (§12.1-12.2, Phase 5) only
+        # Open the seller-acceptance window (12.1-12.2, Phase 5) only
         # after the order has actually committed -- an allocation (and its
         # seller notification) must never be created for an order that
         # turned out not to persist.
@@ -1081,7 +1081,7 @@ class PaymentService:
                 payment.gateway_response = data
                 session.flush()
 
-                # Payment-first checkout (§14.6: release reservations on
+                # Payment-first checkout (14.6: release reservations on
                 # payment failure): the order was never created, so free
                 # the stock immediately rather than waiting out the TTL.
                 snapshot = payment.pending_checkout_data
