@@ -31,6 +31,7 @@ class Database:
             from app.products.models import Product, ProductVariant, ProductInventory
             from app.inventory.models import InventoryReservation
             from app.fulfilment.models import FulfilmentAllocation
+            from app.markets.models import Market, Area
             from app.categories.models import (
                 Category,
                 ProductCategory,

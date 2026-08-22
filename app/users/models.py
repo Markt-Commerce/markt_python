@@ -205,6 +205,17 @@ class SellerVerificationStatus(Enum):
     SUSPENDED = "suspended"
 
 
+class MarketVerificationStatus(Enum):
+    """Separate from SellerVerificationStatus (business/KYC identity) --
+    this is specifically about whether a seller's claimed Market matches
+    where their shop address actually geocodes to. See
+    app.markets.services.MarketService.assign_seller_market."""
+
+    UNVERIFIED = "unverified"  # no market claimed yet, or nothing to check against
+    VERIFIED = "verified"  # geocoded shop address within tolerance of the market
+    FLAGGED = "flagged"  # outside tolerance -- excluded from rerouting until reviewed
+
+
 class Seller(BaseModel):
     __tablename__ = "sellers"
 
@@ -225,6 +236,20 @@ class Seller(BaseModel):
     payout_bank_code = db.Column(db.String(10), nullable=True)
     payout_account_number = db.Column(db.String(20), nullable=True)
     payout_account_name = db.Column(db.String(100), nullable=True)
+    # Market membership (§7.2, Phase 6) -- explicit assignment, not
+    # geofenced. shop_address/lat/lng are only used to sanity-check the
+    # claim (see market_verification_status), never to derive it.
+    market_id = db.Column(db.Integer, db.ForeignKey("markets.id"), nullable=True)
+    shop_address = db.Column(db.JSON, nullable=True)
+    shop_latitude = db.Column(db.Float, nullable=True)
+    shop_longitude = db.Column(db.Float, nullable=True)
+    market_verification_status = db.Column(
+        db.Enum(MarketVerificationStatus),
+        default=MarketVerificationStatus.UNVERIFIED,
+        nullable=False,
+    )
+
+    market = db.relationship("Market")
 
     # Relationships
     user = db.relationship("User", back_populates="seller_account")
