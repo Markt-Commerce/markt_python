@@ -61,4 +61,9 @@ CELERYBEAT_SCHEDULE = {
         "schedule": crontab(hour="*/1"),  # Hourly
         "options": {"queue": "default"},
     },
+    "expire-stale-inventory-reservations": {
+        "task": "app.inventory.tasks.expire_stale_reservations",
+        "schedule": crontab(minute="*/2"),  # Every 2 minutes (10-min reservation TTL)
+        "options": {"queue": "default"},
+    },
 }
