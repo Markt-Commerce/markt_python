@@ -134,8 +134,9 @@ class OrderService:
             status=OrderStatus.READY_FOR_DELIVERY,
             subtotal=snapshot["subtotal"],
             shipping_fee=snapshot["shipping_fee"],
-            tax=snapshot["tax"],
-            discount=snapshot["discount"],
+            service_fee=snapshot.get("service_fee"),
+            reliability_fee_opted_in=snapshot.get("reliability_fee_opted_in", False),
+            reliability_fee_estimate=snapshot.get("reliability_fee_estimate"),
             total=snapshot["total"],
         )
         session.add(order)
@@ -730,9 +731,11 @@ class SellerOrderService:
                     i.status == OrderItem.Status.DELIVERED for i in order.items
                 )
 
-                from app.wallet.services import WalletService
-
-                WalletService.settle_order_item(item)
+                # Starts the settlement hold (Phase 0: 12h) rather than
+                # paying out immediately -- see
+                # WalletService.settle_eligible_order_items.
+                if item.delivered_at is None:
+                    item.delivered_at = datetime.utcnow()
 
         # Post-commit: delegate order-level completion (status, realtime
         # event, gamification) to the single source of truth once every item

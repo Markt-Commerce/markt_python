@@ -2,6 +2,7 @@
 import logging
 import uuid
 import math
+from datetime import datetime
 from random import randint
 from typing import Dict, List, Optional
 
@@ -732,8 +733,6 @@ class DeliveryService:
 
     @staticmethod
     def confirm_order_qr_code(user_id: str, order_id: str, qr_code: str) -> Dict:
-        from app.wallet.services import WalletService
-
         with session_scope() as session:
             # query the assignment to get the escrow QR code
             assignment = (
@@ -773,15 +772,19 @@ class DeliveryService:
                     "Delivery is not ready for proof-of-delivery confirmation"
                 )
 
-            # POD is the trigger for escrow release: settle every item's seller now,
-            # not just items a seller separately marked shipped/delivered themselves.
-            # Cancelled items are skipped entirely -- never transitioned, never paid.
+            # POD starts the settlement hold (Phase 0: 12h) for every
+            # item's seller, not just items a seller separately marked
+            # shipped/delivered themselves. Cancelled items are skipped
+            # entirely -- never transitioned, never paid. Settlement itself
+            # happens later, via WalletService.settle_eligible_order_items
+            # once the hold elapses -- POD no longer pays out immediately.
             for item in order.items:
                 if item.status == OrderItem.Status.CANCELLED:
                     continue
                 if item.status != OrderItem.Status.DELIVERED:
                     item.transition_to(OrderItem.Status.DELIVERED)
-                WalletService.settle_order_item(item)
+                if item.delivered_at is None:
+                    item.delivered_at = datetime.utcnow()
 
             assignment.logistical_status = LogisticalStatus.COMPLETED
             session.commit()

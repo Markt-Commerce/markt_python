@@ -201,12 +201,23 @@ class CheckoutPaymentInitialize(MethodView):
             )
             if payment.gateway_response and "data" in payment.gateway_response:
                 gateway_data = payment.gateway_response["data"]
+                breakdown = payment.pending_checkout_data or {}
                 return {
                     "payment_id": payment.id,
                     "authorization_url": gateway_data.get("authorization_url"),
                     "reference": gateway_data.get("reference"),
                     "access_code": gateway_data.get("access_code"),
                     "amount": payment.amount,
+                    "subtotal": breakdown.get("subtotal"),
+                    "shipping_fee": breakdown.get("shipping_fee"),
+                    "service_fee": breakdown.get("service_fee"),
+                    "reliability_fee_opted_in": breakdown.get(
+                        "reliability_fee_opted_in", False
+                    ),
+                    "reliability_fee_estimate": breakdown.get(
+                        "reliability_fee_estimate", 0.0
+                    ),
+                    "capture_ceiling": breakdown.get("capture_ceiling"),
                 }
             raise APIError(
                 "Failed to initialize payment: No gateway response from Paystack",

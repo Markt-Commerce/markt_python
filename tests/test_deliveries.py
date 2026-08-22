@@ -13,7 +13,7 @@ from app.orders.models import OrderItem, OrderStatus
 
 def _make_item(id, status, seller_id):
     """A SimpleNamespace that behaves like a real OrderItem for transition_to."""
-    item = SimpleNamespace(id=id, status=status, seller_id=seller_id)
+    item = SimpleNamespace(id=id, status=status, seller_id=seller_id, delivered_at=None)
     item.transition_to = lambda new_status, _item=item: OrderItem.transition_to(
         _item, new_status
     )
@@ -38,9 +38,8 @@ def _session_with(assignment, order):
 
 
 @patch("app.orders.services.OrderService.update_order_status")
-@patch("app.wallet.services.WalletService.settle_order_item")
-def test_confirm_order_qr_code_settles_every_item_and_completes_order(
-    mock_settle, mock_update_status
+def test_confirm_order_qr_code_starts_settlement_hold_and_completes_order(
+    mock_update_status,
 ):
     item_a = _make_item(1, OrderItem.Status.PROCESSING, seller_id=7)
     item_b = _make_item(2, OrderItem.Status.SHIPPED, seller_id=8)
@@ -60,14 +59,16 @@ def test_confirm_order_qr_code_settles_every_item_and_completes_order(
     assert result == {"status": "success", "message": "Order marked as delivered"}
     assert item_a.status == OrderItem.Status.DELIVERED
     assert item_b.status == OrderItem.Status.DELIVERED
-    assert mock_settle.call_count == 2
+    # POD starts the settlement hold, it doesn't pay out immediately -- see
+    # WalletService.settle_eligible_order_items (Phase 0: 12h hold).
+    assert item_a.delivered_at is not None
+    assert item_b.delivered_at is not None
     assert assignment.logistical_status == LogisticalStatus.COMPLETED
     mock_update_status.assert_called_once_with("ORD_1", OrderStatus.DELIVERED)
 
 
 @patch("app.orders.services.OrderService.update_order_status")
-@patch("app.wallet.services.WalletService.settle_order_item")
-def test_confirm_order_qr_code_skips_cancelled_items(mock_settle, mock_update_status):
+def test_confirm_order_qr_code_skips_cancelled_items(mock_update_status):
     item_a = _make_item(1, OrderItem.Status.SHIPPED, seller_id=7)
     item_b = _make_item(2, OrderItem.Status.CANCELLED, seller_id=8)
     order = SimpleNamespace(id="ORD_1", items=[item_a, item_b])
@@ -84,15 +85,13 @@ def test_confirm_order_qr_code_skips_cancelled_items(mock_settle, mock_update_st
         DeliveryService.confirm_order_qr_code("DEL_1", "ORD_1", "QR123")
 
     assert item_a.status == OrderItem.Status.DELIVERED
+    assert item_a.delivered_at is not None
     assert item_b.status == OrderItem.Status.CANCELLED
-    mock_settle.assert_called_once_with(item_a)
+    assert item_b.delivered_at is None
 
 
 @patch("app.orders.services.OrderService.update_order_status")
-@patch("app.wallet.services.WalletService.settle_order_item")
-def test_confirm_order_qr_code_rejects_when_not_pending_qr(
-    mock_settle, mock_update_status
-):
+def test_confirm_order_qr_code_rejects_when_not_pending_qr(mock_update_status):
     item_a = _make_item(1, OrderItem.Status.SHIPPED, seller_id=7)
     order = SimpleNamespace(id="ORD_1", items=[item_a])
     assignment = SimpleNamespace(
@@ -109,13 +108,12 @@ def test_confirm_order_qr_code_rejects_when_not_pending_qr(
             DeliveryService.confirm_order_qr_code("DEL_1", "ORD_1", "QR123")
 
     assert item_a.status == OrderItem.Status.SHIPPED
-    mock_settle.assert_not_called()
+    assert item_a.delivered_at is None
     mock_update_status.assert_not_called()
 
 
 @patch("app.orders.services.OrderService.update_order_status")
-@patch("app.wallet.services.WalletService.settle_order_item")
-def test_confirm_order_qr_code_rejects_wrong_code(mock_settle, mock_update_status):
+def test_confirm_order_qr_code_rejects_wrong_code(mock_update_status):
     assignment = SimpleNamespace(
         escrow_qr_code="QR123", status=AssignmentStatus.ACCEPTED
     )
@@ -126,7 +124,6 @@ def test_confirm_order_qr_code_rejects_wrong_code(mock_settle, mock_update_statu
         with pytest.raises(ValidationError):
             DeliveryService.confirm_order_qr_code("DEL_1", "ORD_1", "WRONG")
 
-    mock_settle.assert_not_called()
     mock_update_status.assert_not_called()
 
 

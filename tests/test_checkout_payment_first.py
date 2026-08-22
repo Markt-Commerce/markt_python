@@ -122,9 +122,11 @@ def test_create_order_from_checkout_snapshot_builds_paid_order():
         },
         "subtotal": 1000.0,
         "shipping_fee": 100.0,
-        "tax": 0.0,
-        "discount": 0.0,
-        "total": 1100.0,
+        "service_fee": 25.0,
+        "reliability_fee_opted_in": True,
+        "reliability_fee_estimate": 100.0,
+        "capture_ceiling": 1275.0,
+        "total": 1125.0,
     }
     session = MagicMock()
 
@@ -138,7 +140,10 @@ def test_create_order_from_checkout_snapshot_builds_paid_order():
 
     assert order.buyer_id == 42
     assert order.status == OrderStatus.READY_FOR_DELIVERY
-    assert order.total == 1100.0
+    assert order.total == 1125.0
+    assert order.service_fee == 25.0
+    assert order.reliability_fee_opted_in is True
+    assert order.reliability_fee_estimate == 100.0
     assert len(order.items) == 1
     assert order.items[0].status == OrderItem.Status.PROCESSING
     assert order.items[0].quantity == 2
@@ -218,8 +223,11 @@ def test_initialize_checkout_payment_reserves_each_item_and_snapshots_cart(
     assert payment.buyer_id == 42
     assert payment.order_id is None
     assert payment.pending_checkout_data["items"][0]["reservation_id"] == "RSV_1"
-    # subtotal=1000 + shipping_fee(flat 10.00 placeholder) + tax(5% of 1000) - discount(0)
-    assert payment.pending_checkout_data["total"] == 1060.0
+    # subtotal=1000 + shipping_fee(flat 10.00 placeholder) + service_fee(2.5% of 1000 = 25)
+    assert payment.pending_checkout_data["total"] == 1035.0
+    assert payment.pending_checkout_data["service_fee"] == 25.0
+    assert payment.pending_checkout_data["reliability_fee_opted_in"] is False
+    assert payment.pending_checkout_data["reliability_fee_estimate"] == 0.0
     mock_paystack.assert_called_once()
 
 
@@ -406,6 +414,48 @@ def test_handle_successful_charge_routes_checkout_type_to_checkout_completion(
         reference="PAY_1", gateway_response=data
     )
     mock_complete_payment.assert_not_called()
+
+
+@patch("app.inventory.services.InventoryService.release_reservations")
+@patch("app.payments.services.PaymentService._emit_payment_update")
+@patch("app.payments.services.PaymentService._send_payment_notifications")
+@patch("app.payments.services.session_scope")
+def test_handle_failed_charge_releases_checkout_reservations(
+    mock_scope, mock_notify, mock_emit, mock_release
+):
+    payment = _payment(
+        status=PaymentStatus.PENDING,
+        snapshot={"items": [{"reservation_id": "RSV_1"}, {"reservation_id": "RSV_2"}]},
+    )
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.first.return_value = payment
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = PaymentService._handle_failed_charge({"reference": "ref-1"})
+
+    assert result is True
+    assert payment.status == PaymentStatus.FAILED
+    mock_release.assert_called_once_with(["RSV_1", "RSV_2"])
+
+
+@patch("app.inventory.services.InventoryService.release_reservations")
+@patch("app.payments.services.PaymentService._emit_payment_update")
+@patch("app.payments.services.PaymentService._send_payment_notifications")
+@patch("app.payments.services.session_scope")
+def test_handle_failed_charge_is_idempotent_for_repeat_notifications(
+    mock_scope, mock_notify, mock_emit, mock_release
+):
+    payment = _payment(
+        status=PaymentStatus.FAILED,
+        snapshot={"items": [{"reservation_id": "RSV_1"}]},
+    )
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.first.return_value = payment
+    mock_scope.return_value.__enter__.return_value = session
+
+    PaymentService._handle_failed_charge({"reference": "ref-1"})
+
+    mock_release.assert_not_called()
 
 
 @patch("app.payments.services.PaymentService.complete_checkout_payment")
