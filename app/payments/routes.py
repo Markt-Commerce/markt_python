@@ -17,6 +17,8 @@ from .schemas import (
     PaymentVerifySchema,
     PaymentListSchema,
     PaymentProcessSchema,
+    CheckoutPaymentInitializeSchema,
+    CheckoutPaymentResponseSchema,
 )
 
 bp = Blueprint(
@@ -178,6 +180,40 @@ class PaymentInitialize(MethodView):
                 f"Payment initialization error: {str(e)}", exc_info=True
             )
             abort(500, message=f"Failed to initialize payment: {str(e)}")
+
+
+@bp.route("/checkout/initialize")
+class CheckoutPaymentInitialize(MethodView):
+    @login_required
+    @buyer_required
+    @bp.arguments(CheckoutPaymentInitializeSchema)
+    @bp.response(200, CheckoutPaymentResponseSchema)
+    def post(self, checkout_data):
+        """Payment-first checkout (additive alternative to POST /cart/checkout
+        + POST /payments/initialize): reserves stock and starts payment
+        before any Order exists. The Order is created only once payment
+        succeeds -- there is no order_id in this response."""
+        try:
+            payment = PaymentService.initialize_checkout_payment(
+                current_user.buyer_account.id,
+                checkout_data,
+                idempotency_key=checkout_data.get("idempotency_key"),
+            )
+            if payment.gateway_response and "data" in payment.gateway_response:
+                gateway_data = payment.gateway_response["data"]
+                return {
+                    "payment_id": payment.id,
+                    "authorization_url": gateway_data.get("authorization_url"),
+                    "reference": gateway_data.get("reference"),
+                    "access_code": gateway_data.get("access_code"),
+                    "amount": payment.amount,
+                }
+            raise APIError(
+                "Failed to initialize payment: No gateway response from Paystack",
+                500,
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
 
 
 @bp.route("/callback/<payment_id>")

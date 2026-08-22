@@ -29,6 +29,16 @@ class Order(BaseModel, UniqueIdMixin):
     shipping_fee = db.Column(db.Float)
     tax = db.Column(db.Float)
     discount = db.Column(db.Float)
+    # Buyer-facing Service Fee (§11.3, Phase 0: 2.5%, floor ₦25, ceiling
+    # ₦1,000). Nullable: orders from the pre-existing order-first checkout
+    # flow predate this fee and never set it.
+    service_fee = db.Column(db.Float, nullable=True)
+    # Reliability Fee (§11.2, Phase 0: 10% of order value, capped ₦1,500) --
+    # opt-in, and only ever actually charged if a reroute fires. Rerouting
+    # doesn't exist yet (Phase 6), so today this is toggle + estimate only;
+    # reliability_fee_estimate is NEVER added to `total`/captured amount.
+    reliability_fee_opted_in = db.Column(db.Boolean, default=False, nullable=False)
+    reliability_fee_estimate = db.Column(db.Float, nullable=True)
     total = db.Column(db.Float)
     status = db.Column(db.Enum(OrderStatus), default=OrderStatus.PENDING_PAYMENT)
     billing_address = db.Column(JSONB)

@@ -82,6 +82,27 @@ class PaymentProcessSchema(Schema):
     metadata = fields.Dict(missing={})
 
 
+class CheckoutPaymentInitializeSchema(Schema):
+    """Payment-first checkout: reserves stock and starts payment before any
+    Order exists (additive alternative to CheckoutSchema/checkout_cart)."""
+
+    shipping_address = fields.Dict(required=True)
+    use_saved_address = fields.Bool(missing=False)
+    platform = fields.Str(missing="web")
+    idempotency_key = fields.Str(allow_none=True)
+
+
+class CheckoutPaymentResponseSchema(Schema):
+    """Response for CheckoutPaymentInitializeSchema -- no order_id yet,
+    since the order is only created once payment succeeds."""
+
+    payment_id = fields.Str(required=True)
+    authorization_url = fields.Str(allow_none=True)
+    reference = fields.Str(allow_none=True)
+    access_code = fields.Str(allow_none=True)
+    amount = fields.Float(required=True)
+
+
 class PaymentCallbackSchema(Schema):
     """Payment callback schema"""
 

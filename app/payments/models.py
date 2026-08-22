@@ -39,7 +39,15 @@ class Payment(BaseModel, UniqueIdMixin):
     }
 
     id = db.Column(db.String(12), primary_key=True, default=None)
-    order_id = db.Column(db.String(12), db.ForeignKey("orders.id"))
+    order_id = db.Column(db.String(12), db.ForeignKey("orders.id"), nullable=True)
+    # Set for payment-first checkouts (see PaymentService.initialize_checkout_payment),
+    # where the buyer pays before any Order exists -- order_id is filled in
+    # once the webhook builds the order. NULL for the existing order-first
+    # flow, where payment.order.buyer is always available instead.
+    buyer_id = db.Column(db.Integer, db.ForeignKey("buyers.id"), nullable=True)
+    # Cart/shipping/fee snapshot needed to build the Order once payment
+    # succeeds. Only set for payment-first checkouts; NULL otherwise.
+    pending_checkout_data = db.Column(db.JSON, nullable=True)
     amount = db.Column(db.Float, nullable=False)
     currency = db.Column(db.String(3), default="USD")
     method = db.Column(db.Enum(PaymentMethod))
@@ -52,6 +60,7 @@ class Payment(BaseModel, UniqueIdMixin):
     )  # Prevent duplicate payments
 
     order = db.relationship("Order", back_populates="payments")
+    buyer = db.relationship("Buyer")
 
     def transition_to(self, new_status: "PaymentStatus") -> None:
         """Apply a status change, raising ValueError if it isn't a legal transition."""
