@@ -24,7 +24,8 @@ from app.libs.errors import (
 # app imports
 from .models import Payment, Transaction, PaymentStatus, PaymentMethod
 from app.orders.models import Order, OrderStatus, OrderItem
-from app.users.models import User, Seller
+from app.users.models import User, Seller, Buyer
+from app.cart.models import Cart
 from app.notifications.services import NotificationService
 from app.notifications.models import NotificationType
 
@@ -152,6 +153,101 @@ class PaymentService:
             return True
 
     @staticmethod
+    def complete_checkout_payment(
+        *,
+        payment_id: Optional[str] = None,
+        reference: Optional[str] = None,
+        gateway_response: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Completion path for payment-first checkouts (see
+        initialize_checkout_payment): mark the payment COMPLETED and, if
+        the order hasn't been built yet, build it from the stored snapshot
+        and confirm the reservations into it.
+
+        Deliberately a separate function from complete_payment rather than
+        a branch inside it: complete_payment assumes payment.order already
+        exists at every step (status updates, inventory reduction,
+        notifications), and this flow has no order until this function
+        creates one.
+
+        Idempotency is anchored on payment.order_id, not payment.status --
+        the webhook and the browser-callback verification path can both
+        reach this (see verify_payment), and only order_id reliably answers
+        "has the order already been built," since payment.status flips to
+        COMPLETED in the same call that's trying to answer that question.
+        """
+        if not payment_id and not reference:
+            return False
+
+        with session_scope() as session:
+            query = session.query(Payment).with_for_update()
+            if payment_id:
+                payment = query.filter_by(id=payment_id).first()
+            else:
+                payment = query.filter_by(transaction_id=reference).first()
+
+            if not payment:
+                logger.warning(
+                    "complete_checkout_payment: payment not found (id=%s, ref=%s)",
+                    payment_id,
+                    reference,
+                )
+                return False
+
+            if payment.status != PaymentStatus.COMPLETED:
+                payment.transition_to(PaymentStatus.COMPLETED)
+                payment.paid_at = datetime.utcnow()
+                if gateway_response is not None:
+                    payment.gateway_response = gateway_response
+                session.flush()
+
+            if payment.order_id:
+                # Already built -- the other completion path (webhook vs.
+                # browser callback) already won this race.
+                PaymentService._invalidate_payment_cache(payment.id)
+                return True
+
+            snapshot = payment.pending_checkout_data
+            if not snapshot:
+                logger.error(
+                    "complete_checkout_payment: payment %s has no checkout "
+                    "snapshot to build an order from",
+                    payment.id,
+                )
+                PaymentService._invalidate_payment_cache(payment.id)
+                return True
+
+            from app.orders.services import OrderService
+            from app.inventory.services import InventoryService
+
+            order = OrderService.create_order_from_checkout_snapshot(
+                session, snapshot, payment.buyer_id
+            )
+            payment.order_id = order.id
+
+            InventoryService.confirm_reservations(
+                session,
+                [
+                    item["reservation_id"]
+                    for item in snapshot["items"]
+                    if item.get("reservation_id")
+                ],
+                order.id,
+            )
+
+            cart = session.query(Cart).filter_by(buyer_id=payment.buyer_id).first()
+            if cart:
+                from app.cart.models import CartItem
+
+                session.query(CartItem).filter_by(cart_id=cart.id).delete()
+
+            session.flush()
+            payment_id_for_cache = payment.id
+
+        PaymentService._invalidate_payment_cache(payment_id_for_cache)
+        return True
+
+    @staticmethod
     def _emit_payment_confirmed(payment: Payment):
         try:
             from app.realtime.event_manager import EventManager
@@ -273,6 +369,117 @@ class PaymentService:
         return payment
 
     @staticmethod
+    def initialize_checkout_payment(
+        buyer_id: int,
+        checkout_data: Dict[str, Any],
+        idempotency_key: Optional[str] = None,
+    ) -> Payment:
+        """Payment-first checkout: reserve stock and start payment BEFORE
+        any Order exists. The Order is only created once payment actually
+        succeeds (see complete_checkout_payment), via the webhook or the
+        browser-callback verification path.
+
+        This is an ADDITIVE alternative to CartService.checkout_cart /
+        PaymentService.create_payment, not a replacement for either --
+        other parts of the system (mobile, background jobs, logistics) may
+        already depend on the existing order-first flow, so it's left
+        untouched and fully working.
+        """
+        import uuid
+        from app.cart.services import CartService
+        from app.orders.shipping import normalize_shipping_address
+        from app.inventory.services import InventoryService
+
+        with session_scope() as session:
+            if idempotency_key:
+                existing = (
+                    session.query(Payment)
+                    .filter_by(idempotency_key=idempotency_key)
+                    .first()
+                )
+                if existing:
+                    return existing
+
+            buyer = session.query(Buyer).options(joinedload(Buyer.user)).get(buyer_id)
+            if not buyer or not buyer.user:
+                raise NotFoundError("Buyer not found")
+
+            cart = session.query(Cart).filter_by(buyer_id=buyer_id).first()
+            if not cart or not cart.items:
+                raise ValidationError("Cart is empty")
+
+            CartService._validate_cart_items(cart.items)
+
+            shipping_normalized = normalize_shipping_address(
+                checkout_data.get("shipping_address"),
+                saved_address=buyer.shipping_address,
+                use_saved_address=checkout_data.get("use_saved_address", False),
+            )
+
+            subtotal = cart.subtotal()
+            shipping_fee = CartService._calculate_shipping_fee(
+                cart, shipping_normalized
+            )
+            tax = CartService._calculate_tax(subtotal, shipping_normalized)
+            discount = CartService._calculate_discount(subtotal, cart.coupon_code)
+            total = subtotal + shipping_fee + tax - discount
+
+            items_snapshot = []
+            reserved_ids = []
+            try:
+                for cart_item in cart.items:
+                    reservation = InventoryService.reserve_stock(
+                        cart_item.product_id,
+                        buyer_id,
+                        cart_item.quantity,
+                        variant_id=cart_item.variant_id,
+                    )
+                    reserved_ids.append(reservation.id)
+                    items_snapshot.append(
+                        {
+                            "product_id": cart_item.product_id,
+                            "variant_id": cart_item.variant_id,
+                            "seller_id": cart_item.product.seller_id,
+                            "quantity": cart_item.quantity,
+                            "price": cart_item.product_price,
+                            "reservation_id": reservation.id,
+                        }
+                    )
+            except APIError:
+                InventoryService.release_reservations(reserved_ids)
+                raise
+
+            payment = Payment(
+                buyer_id=buyer_id,
+                amount=total,
+                currency="NGN",
+                method=PaymentMethod.CARD,
+                status=PaymentStatus.PENDING,
+                gateway_response={},
+                pending_checkout_data={
+                    "items": items_snapshot,
+                    "shipping_address": shipping_normalized,
+                    "subtotal": subtotal,
+                    "shipping_fee": shipping_fee,
+                    "tax": tax,
+                    "discount": discount,
+                    "total": total,
+                },
+                idempotency_key=idempotency_key or str(uuid.uuid4()),
+            )
+            session.add(payment)
+            session.flush()
+
+            PaymentService._initialize_paystack_transaction_for_checkout(
+                payment,
+                buyer.user.email,
+                platform=checkout_data.get("platform", "web"),
+            )
+
+            PaymentService._cache_payment(payment)
+            return payment
+
+    @staticmethod
     def process_payment(payment_id: str, payment_data: Dict[str, Any]) -> Payment:
         """Process payment with Paystack"""
         resolved_id = payment_id
@@ -360,6 +567,13 @@ class PaymentService:
                 raise ValidationError("No transaction ID to verify")
 
             transaction_id = payment.transaction_id
+            # Payment-first checkouts (see initialize_checkout_payment) have
+            # no order yet -- route their completion through
+            # complete_checkout_payment instead of complete_payment, which
+            # assumes payment.order already exists at every step.
+            is_checkout_payment = (
+                payment.pending_checkout_data is not None and payment.order_id is None
+            )
 
         try:
             response = requests.get(
@@ -379,10 +593,16 @@ class PaymentService:
                     # with the webhook); log it and let the webhook/verify
                     # retry reconcile instead of telling a paid user "failed".
                     try:
-                        PaymentService.complete_payment(
-                            payment_id=payment_id,
-                            gateway_response=data,
-                        )
+                        if is_checkout_payment:
+                            PaymentService.complete_checkout_payment(
+                                payment_id=payment_id,
+                                gateway_response=data,
+                            )
+                        else:
+                            PaymentService.complete_payment(
+                                payment_id=payment_id,
+                                gateway_response=data,
+                            )
                     except Exception:
                         logger.exception(
                             "Local completion failed after gateway-confirmed "
@@ -585,6 +805,64 @@ class PaymentService:
             raise APIError("Payment initialization failed", 500)
 
     @staticmethod
+    def _initialize_paystack_transaction_for_checkout(
+        payment: Payment, buyer_email: str, platform: str = "web"
+    ):
+        """Same as _initialize_paystack_transaction, but for a payment-first
+        checkout (see initialize_checkout_payment) where no Order exists
+        yet -- can't read payment.order like the original does."""
+        try:
+            from main.config import settings
+
+            base_url = settings.API_BASE_URL
+            if not base_url:
+                try:
+                    from flask import request
+
+                    if request:
+                        base_url = f"{request.scheme}://{request.host}"
+                except:
+                    base_url = "http://localhost:8000"
+
+            callback_url = (
+                f"{base_url}/api/v1/payments/callback/{payment.id}"
+                f"?platform={platform}"
+            )
+
+            payload = {
+                "amount": int(payment.amount * 100),
+                "email": buyer_email,
+                "currency": payment.currency,
+                "reference": f"PAY_{payment.id}",
+                "callback_url": callback_url,
+                "metadata": {
+                    "payment_id": payment.id,
+                    "buyer_id": payment.buyer_id,
+                    "type": "checkout",
+                },
+            }
+
+            response = requests.post(
+                f"{PaymentService.PAYSTACK_BASE_URL}/transaction/initialize",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {PaymentService.PAYSTACK_SECRET_KEY}"
+                },
+                timeout=20,
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                payment.gateway_response = data
+                payment.transaction_id = data["data"]["reference"]
+            else:
+                raise APIError("Failed to initialize payment", 500)
+
+        except Exception as e:
+            logger.error(f"Paystack checkout initialization failed: {str(e)}")
+            raise APIError("Payment initialization failed", 500)
+
+    @staticmethod
     def _process_paystack_payment(
         payment: Payment, payment_data: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -741,6 +1019,12 @@ class PaymentService:
             from app.wallet.services import WalletService
 
             return WalletService.complete_topup(reference, data)
+
+        if metadata.get("type") == "checkout":
+            return PaymentService.complete_checkout_payment(
+                reference=reference,
+                gateway_response=data,
+            )
 
         return PaymentService.complete_payment(
             reference=reference,

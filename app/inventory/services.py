@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import List, Optional
 
 from external.database import db
 from app.libs.errors import ConflictError, NotFoundError, ValidationError
@@ -147,3 +147,46 @@ class InventoryService:
             session.add(reservation)
             session.flush()
             return reservation
+
+    @staticmethod
+    def release_reservations(reservation_ids: List[str]) -> None:
+        """Release reservations that were made but won't be used (e.g. a
+        later item in the same checkout attempt failed to reserve). Skips
+        anything already past REQUESTED/HELD rather than raising, since
+        this runs as best-effort cleanup on a failure path."""
+        if not reservation_ids:
+            return
+        with session_scope() as session:
+            reservations = (
+                session.query(InventoryReservation)
+                .filter(InventoryReservation.id.in_(reservation_ids))
+                .all()
+            )
+            for reservation in reservations:
+                if reservation.status in (
+                    InventoryReservation.Status.REQUESTED,
+                    InventoryReservation.Status.HELD,
+                ):
+                    reservation.transition_to(InventoryReservation.Status.RELEASED)
+
+    @staticmethod
+    def confirm_reservations(
+        session, reservation_ids: List[str], order_id: str
+    ) -> None:
+        """Confirm reservations into a just-created order (§8.1: -> CONFIRMED),
+        called from within the same transaction that creates the order (see
+        PaymentService.complete_checkout_payment). Idempotent: a reservation
+        already at CONFIRMED (or further along) is left alone."""
+        if not reservation_ids:
+            return
+        reservations = (
+            session.query(InventoryReservation)
+            .filter(InventoryReservation.id.in_(reservation_ids))
+            .all()
+        )
+        for reservation in reservations:
+            if reservation.status == InventoryReservation.Status.REQUESTED:
+                reservation.transition_to(InventoryReservation.Status.HELD)
+            if reservation.status == InventoryReservation.Status.HELD:
+                reservation.transition_to(InventoryReservation.Status.CONFIRMED)
+            reservation.order_id = order_id

@@ -120,6 +120,52 @@ class OrderService:
             raise APIError("Failed to create order", 500)
 
     @staticmethod
+    def create_order_from_checkout_snapshot(
+        session, snapshot: Dict[str, Any], buyer_id: int
+    ) -> Order:
+        """Build the Order + OrderItems from a payment-first checkout
+        snapshot, called from within the same transaction that just marked
+        the payment COMPLETED (see PaymentService.complete_checkout_payment).
+        Payment is already captured by the time this runs -- unlike
+        create_order/checkout_cart's PENDING_PAYMENT start, the order and
+        its items start straight at the "paid" state."""
+        order = Order(
+            buyer_id=buyer_id,
+            status=OrderStatus.READY_FOR_DELIVERY,
+            subtotal=snapshot["subtotal"],
+            shipping_fee=snapshot["shipping_fee"],
+            tax=snapshot["tax"],
+            discount=snapshot["discount"],
+            total=snapshot["total"],
+        )
+        session.add(order)
+        session.flush()
+
+        shipping_address_obj = ShippingAddress(
+            order_id=order.id,
+            **shipping_address_to_model_kwargs(snapshot["shipping_address"]),
+        )
+        session.add(shipping_address_obj)
+
+        for item in snapshot["items"]:
+            order_item = OrderItem(
+                order_id=order.id,
+                product_id=item["product_id"],
+                variant_id=item.get("variant_id"),
+                seller_id=item["seller_id"],
+                quantity=item["quantity"],
+                price=item["price"],
+                status=OrderItem.Status.PROCESSING,
+            )
+            session.add(order_item)
+            order.items.append(order_item)
+
+        session.flush()
+        order.order_number = order.generate_order_number()
+        session.flush()
+        return order
+
+    @staticmethod
     def _get_geocoordinates(address_dict):
         """Backward-compatible wrapper around shared geocoding helper."""
         from app.orders.shipping import geocode_address
