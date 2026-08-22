@@ -172,21 +172,40 @@ class InventoryService:
     @staticmethod
     def confirm_reservations(
         session, reservation_ids: List[str], order_id: str
-    ) -> None:
+    ) -> List[str]:
         """Confirm reservations into a just-created order (8.1: -> CONFIRMED),
         called from within the same transaction that creates the order (see
         PaymentService.complete_checkout_payment). Idempotent: a reservation
-        already at CONFIRMED (or further along) is left alone."""
+        already at CONFIRMED (or further along) is left alone.
+
+        Returns the ids that could NOT be confirmed -- already EXPIRED/
+        RELEASED, or missing entirely -- by the time this ran. 14.3's
+        payment/escrow reconciliation gap this closes: Payment.FAILED ->
+        COMPLETED is deliberately allowed for a late-webhook rescue (see
+        Payment's own transition-graph comment), but a rescued payment's
+        reservation may have already lapsed and its stock given to someone
+        else in the meantime -- the caller MUST NOT treat a returned id's
+        item as secured (see complete_checkout_payment's use of this)."""
         if not reservation_ids:
-            return
+            return []
         reservations = (
             session.query(InventoryReservation)
             .filter(InventoryReservation.id.in_(reservation_ids))
             .all()
         )
+        found_ids = set()
+        failed_ids = []
         for reservation in reservations:
+            found_ids.add(reservation.id)
             if reservation.status == InventoryReservation.Status.REQUESTED:
                 reservation.transition_to(InventoryReservation.Status.HELD)
             if reservation.status == InventoryReservation.Status.HELD:
                 reservation.transition_to(InventoryReservation.Status.CONFIRMED)
-            reservation.order_id = order_id
+                reservation.order_id = order_id
+            elif reservation.status == InventoryReservation.Status.CONFIRMED:
+                reservation.order_id = order_id
+            else:
+                failed_ids.append(reservation.id)
+
+        failed_ids.extend(rid for rid in reservation_ids if rid not in found_ids)
+        return failed_ids
