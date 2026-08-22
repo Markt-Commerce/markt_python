@@ -4,7 +4,7 @@ from flask.views import MethodView
 from flask_login import login_required, current_user
 
 # project imports
-from app.libs.decorators import seller_required
+from app.libs.decorators import buyer_required, seller_required
 from app.libs.errors import APIError
 
 # app imports
@@ -60,6 +60,64 @@ class AllocationDecline(MethodView):
         try:
             allocation = FulfilmentService.decline(
                 allocation_id, current_user.seller_account.id
+            )
+            return _dump(allocation)
+        except (APIError, ValueError) as e:
+            message = getattr(e, "message", str(e))
+            status_code = getattr(e, "status_code", 400)
+            abort(status_code, message=message)
+
+
+@bp.route("/allocations/<int:allocation_id>/cancel")
+class AllocationCancelAfterAccept(MethodView):
+    @login_required
+    @seller_required
+    @bp.response(200, FulfilmentAllocationSchema)
+    def post(self, allocation_id):
+        """Seller backs out of an accepted/preparing allocation (§13.4
+        anti-gaming "accept-then-cancel") -- worse than decline() and
+        scored accordingly by Seller Reliability's cancellation penalty."""
+        try:
+            allocation = FulfilmentService.cancel_after_accept(
+                allocation_id, current_user.seller_account.id
+            )
+            return _dump(allocation)
+        except (APIError, ValueError) as e:
+            message = getattr(e, "message", str(e))
+            status_code = getattr(e, "status_code", 400)
+            abort(status_code, message=message)
+
+
+@bp.route("/allocations/<int:allocation_id>/approve-substitution")
+class AllocationApproveSubstitution(MethodView):
+    @login_required
+    @buyer_required
+    @bp.response(200, FulfilmentAllocationSchema)
+    def post(self, allocation_id):
+        """Buyer approves a material substitution pending under their ASK
+        preference (§6.1)."""
+        try:
+            allocation = FulfilmentService.buyer_approve_reroute(
+                allocation_id, current_user.buyer_account.id
+            )
+            return _dump(allocation)
+        except (APIError, ValueError) as e:
+            message = getattr(e, "message", str(e))
+            status_code = getattr(e, "status_code", 400)
+            abort(status_code, message=message)
+
+
+@bp.route("/allocations/<int:allocation_id>/reject-substitution")
+class AllocationRejectSubstitution(MethodView):
+    @login_required
+    @buyer_required
+    @bp.response(200, FulfilmentAllocationSchema)
+    def post(self, allocation_id):
+        """Buyer rejects a material substitution pending under their ASK
+        preference (§6.1) -- the reroute loop tries the next candidate."""
+        try:
+            allocation = FulfilmentService.buyer_reject_reroute(
+                allocation_id, current_user.buyer_account.id
             )
             return _dump(allocation)
         except (APIError, ValueError) as e:

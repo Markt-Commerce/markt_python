@@ -98,6 +98,17 @@ class CheckoutPaymentInitializeSchema(Schema):
             )
         },
     )
+    fulfilment_preference = fields.Str(
+        missing="auto",
+        validate=validate.OneOf(["auto", "ask", "seller_only"]),
+        metadata={
+            "description": (
+                "§6 substitution preference for this order's items: auto "
+                "(silent rerouting), ask (buyer approval required for a "
+                "material substitution), or seller_only (no rerouting)."
+            )
+        },
+    )
     idempotency_key = fields.Str(allow_none=True)
 
 

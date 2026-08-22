@@ -245,7 +245,8 @@ class PaymentService:
             session.flush()
             payment_id_for_cache = payment.id
             item_specs = [
-                (item.id, item.seller_id, item.quantity) for item in order.items
+                (item.id, item.seller_id, item.quantity, item.product_id)
+                for item in order.items
             ]
 
         # Open the seller-acceptance window (§12.1-12.2, Phase 5) only
@@ -254,8 +255,10 @@ class PaymentService:
         # turned out not to persist.
         from app.fulfilment.services import FulfilmentService
 
-        for order_item_id, seller_id, quantity in item_specs:
-            FulfilmentService.create_allocation(order_item_id, seller_id, quantity)
+        for order_item_id, seller_id, quantity, product_id in item_specs:
+            FulfilmentService.create_allocation(
+                order_item_id, seller_id, quantity, product_id=product_id
+            )
 
         PaymentService._invalidate_payment_cache(payment_id_for_cache)
         return True
@@ -482,6 +485,9 @@ class PaymentService:
                 pending_checkout_data={
                     "items": items_snapshot,
                     "shipping_address": shipping_normalized,
+                    "fulfilment_preference": checkout_data.get(
+                        "fulfilment_preference", "auto"
+                    ),
                     **breakdown,
                 },
                 idempotency_key=idempotency_key or str(uuid.uuid4()),

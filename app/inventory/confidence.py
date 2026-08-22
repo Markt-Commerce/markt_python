@@ -239,19 +239,24 @@ class InventoryConfidenceService:
             return record
 
     @staticmethod
-    def get_band_for_product(product_id: str) -> str:
-        """Confidence band for gating (§8.3). Uses the last computed score
-        if one exists; otherwise falls back to the cold-start prior rather
-        than forcing a synchronous calculation on the reserve-stock path."""
+    def get_score_for_product(product_id: str) -> float:
+        """Last computed confidence score, or the cold-start prior if none
+        exists yet -- doesn't force a synchronous calculation."""
         with session_scope() as session:
             record = (
                 session.query(InventoryConfidenceScore)
                 .filter_by(product_id=product_id)
                 .first()
             )
-            score = (
+            return (
                 record.score
                 if record
                 else InventoryConfidenceService.get_category_prior(session, product_id)
             )
-            return get_confidence_band(score)
+
+    @staticmethod
+    def get_band_for_product(product_id: str) -> str:
+        """Confidence band for gating (§8.3). See get_score_for_product."""
+        return get_confidence_band(
+            InventoryConfidenceService.get_score_for_product(product_id)
+        )

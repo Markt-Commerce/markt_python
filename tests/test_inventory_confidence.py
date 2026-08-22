@@ -214,6 +214,27 @@ def test_calculate_score_updates_existing_record_in_place(mock_scope):
 
 
 @patch("app.inventory.confidence.session_scope")
+def test_get_score_for_product_uses_existing_score(mock_scope):
+    existing = SimpleNamespace(score=0.85)
+    session = _session(existing_score=existing)
+    mock_scope.return_value.__enter__.return_value = session
+
+    assert InventoryConfidenceService.get_score_for_product("PRD_1") == 0.85
+
+
+@patch("app.inventory.confidence.session_scope")
+def test_get_score_for_product_falls_back_to_prior_when_unscored(mock_scope):
+    product_category = SimpleNamespace(category_id=5)
+    prior = SimpleNamespace(prior_score=0.4)
+    session = _session(
+        existing_score=None, product_category=product_category, prior=prior
+    )
+    mock_scope.return_value.__enter__.return_value = session
+
+    assert InventoryConfidenceService.get_score_for_product("PRD_1") == 0.4
+
+
+@patch("app.inventory.confidence.session_scope")
 def test_calculate_score_raises_not_found_for_missing_product(mock_scope):
     session = _session(product=None)
     mock_scope.return_value.__enter__.return_value = session

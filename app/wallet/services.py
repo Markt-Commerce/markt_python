@@ -225,6 +225,31 @@ class WalletService:
         )
 
     @staticmethod
+    def refund_order_item_to_wallet(
+        buyer_user_id: str,
+        order_item_id: int,
+        amount: float,
+        reason: Optional[str] = None,
+    ) -> WalletEntry:
+        """§11.8: refund a single unfulfillable item -- see
+        OrderService.refund_unresolved_item. Same ORDER_REFUND reference
+        type as the whole-order refund above, just keyed by item id
+        instead of order id -- OrderService._get_total_refunded sums both
+        together per order so the escrow invariant stays cumulative-aware
+        regardless of which granularity a given refund was issued at."""
+        description = f"Refund for unfulfilled order item {order_item_id}"
+        if reason:
+            description += f": {reason}"
+        return WalletService.credit(
+            buyer_user_id,
+            amount,
+            WalletReferenceType.ORDER_REFUND,
+            str(order_item_id),
+            description=description,
+            idempotency_key=f"refund:item:{order_item_id}",
+        )
+
+    @staticmethod
     def request_withdrawal(user_id: str, data: Dict[str, Any]) -> WithdrawalRequest:
         amount = float(data["amount"])
         if amount < MIN_WITHDRAWAL_AMOUNT:

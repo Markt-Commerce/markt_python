@@ -22,14 +22,15 @@ from app.libs.errors import (
 )
 
 # app imports
-from .models import BuyerRequest, SellerOffer, RequestStatus
-from app.users.models import User, Seller
+from .models import BuyerRequest, SellerOffer, RequestStatus, RequestSource
+from app.users.models import MarketVerificationStatus, User, Seller
 from app.products.models import Product
 from app.notifications.services import NotificationService
 from app.notifications.models import NotificationType
 from app.media.services import media_service
 from app.media.models import Media, RequestImage
-from app.categories.models import Category, RequestCategory
+from app.categories.models import Category, ProductCategory, RequestCategory
+from app.orders.models import OrderItem
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +250,84 @@ class BuyerRequestService:
 
             return request
 
+    # §7.4: how long an auto-generated reroute request stays open before
+    # sellers stop being able to respond. Not on the same clock as §9's
+    # fulfilment deadline (10 min) -- SellerOffer responses are
+    # asynchronous by nature, so this is a genuine complement to the
+    # direct-candidate reroute engine (app.fulfilment.rerouting), not
+    # bound by its timing. No spec figure given for this fallback path;
+    # a few hours is a judgment call, flagged for review.
+    REROUTE_REQUEST_EXPIRY_HOURS = 6
+
+    @staticmethod
+    def create_reroute_request(
+        buyer_user_id: str,
+        order_item_id: int,
+        market_id: Optional[int],
+        category_id: Optional[int],
+        product_name: str,
+        quantity: int,
+        price: float,
+    ) -> BuyerRequest:
+        """§7.4: auto-generate a BuyerRequest for an order item the direct
+        reroute engine has genuinely exhausted (see
+        app.fulfilment.rerouting's `_escalate_unfulfilled_item`) -- reuses
+        this existing rail as a wider, asynchronous net for sellers the
+        keyword+category direct match didn't find, rather than building a
+        parallel matching path.
+
+        System-generated: unlike create_request, there's no buyer-
+        authentication check here -- the caller is trusted internal code
+        (the rerouting engine), not an HTTP request on the buyer's behalf.
+        `budget` includes the same headroom the direct-match path itself
+        allows (PRICE_HEADROOM_RATE), so an offer within that band is
+        consistent with what AUTO/ASK rerouting would already have
+        accepted silently.
+        """
+        from app.fulfilment.rerouting import PRICE_HEADROOM_RATE
+
+        with session_scope() as session:
+            request = BuyerRequest(
+                user_id=buyer_user_id,
+                title=f"Need: {product_name} (x{quantity})",
+                description=(
+                    f"Your original seller couldn't fulfil {quantity} unit(s) "
+                    f"of {product_name}. Markt is looking for a replacement "
+                    f"seller in the same market."
+                ),
+                budget=round(price * (1 + PRICE_HEADROOM_RATE), 2),
+                status=RequestStatus.OPEN,
+                request_metadata={"auto_generated": True},
+                expires_at=datetime.utcnow()
+                + timedelta(hours=BuyerRequestService.REROUTE_REQUEST_EXPIRY_HOURS),
+                source=RequestSource.REROUTE_ENGINE,
+                order_item_id=order_item_id,
+                market_id=market_id,
+            )
+            session.add(request)
+            session.flush()
+
+            if category_id:
+                session.add(
+                    RequestCategory(
+                        request_id=request.id,
+                        category_id=category_id,
+                        is_primary=True,
+                    )
+                )
+                session.flush()
+
+            request_id = request.id
+
+        with session_scope() as session:
+            request = (
+                session.query(BuyerRequest)
+                .options(joinedload(BuyerRequest.categories))
+                .get(request_id)
+            )
+            BuyerRequestService._notify_relevant_sellers(request)
+            return request
+
     @staticmethod
     def get_request(request_id: str, user_id: Optional[str] = None) -> BuyerRequest:
         """Get request details with role-based access control"""
@@ -421,7 +500,26 @@ class BuyerRequestService:
 
     @staticmethod
     def accept_offer(offer_id: int, user_id: str) -> SellerOffer:
-        """Accept seller offer with conflict resolution"""
+        """Accept seller offer with conflict resolution.
+
+        §7.4: for a REROUTE_ENGINE-sourced request (see
+        create_reroute_request), accepting an offer must actually reopen
+        fulfilment for the order item the request exists for -- reserve
+        stock against the offer's product BEFORE touching any
+        offer/request state (InventoryService.reserve_stock is its own
+        atomic row-lock transaction that commits independently the moment
+        it succeeds -- see app.libs.session.session_scope's nested-call
+        semantics -- so doing it first means a ConflictError here leaves
+        nothing else mutated). The ordinary buyer-posted-request path
+        below is unchanged from before this existed.
+        """
+        is_reroute = False
+        order_item_id = None
+        reroute_seller_id = None
+        reroute_product_id = None
+        reroute_quantity = None
+        reservation = None
+
         with session_scope() as session:
             offer = (
                 session.query(SellerOffer)
@@ -443,6 +541,28 @@ class BuyerRequestService:
             # Validate request status
             if offer.request.status != RequestStatus.OPEN:
                 raise ValidationError("Request is no longer accepting offers")
+
+            is_reroute = offer.request.source == RequestSource.REROUTE_ENGINE
+            if is_reroute:
+                if not offer.product_id:
+                    raise ValidationError(
+                        "This offer has no linked product -- cannot reserve stock"
+                    )
+                order_item_id = offer.request.order_item_id
+                order_item = session.query(OrderItem).get(order_item_id)
+                if not order_item:
+                    raise NotFoundError("Order item for this request no longer exists")
+
+                reroute_seller_id = offer.seller_id
+                reroute_product_id = offer.product_id
+                reroute_quantity = order_item.quantity
+                buyer_id = order_item.order.buyer_id
+
+                from app.inventory.services import InventoryService
+
+                reservation = InventoryService.reserve_stock(
+                    reroute_product_id, buyer_id, reroute_quantity
+                )
 
             # Reject all other offers for this request
             other_offers = (
@@ -486,7 +606,18 @@ class BuyerRequestService:
             # Cache invalidation
             BuyerRequestService._invalidate_request_cache(offer.request_id)
 
-            return offer
+        if is_reroute:
+            from app.fulfilment.services import FulfilmentService
+
+            FulfilmentService.create_allocation(
+                order_item_id,
+                reroute_seller_id,
+                reroute_quantity,
+                product_id=reroute_product_id,
+                reservation_id=reservation.id,
+            )
+
+        return offer
 
     @staticmethod
     def list_user_requests(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1038,12 +1169,55 @@ class BuyerRequestService:
 
     @staticmethod
     def _notify_relevant_sellers(request: BuyerRequest):
-        """Notify sellers who might be interested in the request"""
-        # TODO: Implement smart seller matching based on:
-        # - Category preferences
-        # - Past successful offers
-        # - Geographic proximity
-        # - Price range preferences
+        """Notify sellers who might respond to this request -- sellers with
+        an active product in the request's primary category. This was a
+        no-op TODO stub before (found while wiring §7.4's reroute
+        escalation, which depends on it); real geographic/rating-based
+        ranking of *which* matching sellers to prioritise is future work,
+        this is the MVP "does anyone even get told" fix.
+
+        Scoped to `request.market_id` + VERIFIED market membership when
+        set -- only true for a REROUTE_ENGINE request (§18.2: rerouting is
+        within-market only). A buyer-posted request has no market_id and
+        reaches every matching seller regardless of market, matching this
+        feature's general-purpose, social nature.
+        """
+        with session_scope() as session:
+            primary_rc = next((rc for rc in request.categories if rc.is_primary), None)
+            if not primary_rc:
+                return
+
+            query = (
+                session.query(Seller)
+                .join(Product, Product.seller_id == Seller.id)
+                .join(ProductCategory, ProductCategory.product_id == Product.id)
+                .filter(
+                    ProductCategory.category_id == primary_rc.category_id,
+                    Product.status == Product.Status.ACTIVE,
+                    Seller.is_active.is_(True),
+                )
+                .distinct()
+            )
+            if request.market_id:
+                query = query.filter(
+                    Seller.market_id == request.market_id,
+                    Seller.market_verification_status
+                    == MarketVerificationStatus.VERIFIED,
+                )
+
+            # Cap so one broad-category request can't fan out unboundedly.
+            sellers = query.limit(50).all()
+            seller_user_ids = [s.user_id for s in sellers if s.user_id]
+            request_title = request.title
+
+        for seller_user_id in seller_user_ids:
+            NotificationService.create_notification(
+                user_id=seller_user_id,
+                notification_type=NotificationType.NEW_REQUEST_MATCH,
+                reference_type="request",
+                reference_id=request.id,
+                metadata_={"message": f'New request: "{request_title}"'},
+            )
 
     @staticmethod
     def _handle_request_closure(request: BuyerRequest, session):

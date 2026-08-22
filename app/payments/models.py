@@ -35,7 +35,20 @@ class Payment(BaseModel, UniqueIdMixin):
     VALID_STATUS_TRANSITIONS = {
         PaymentStatus.PENDING: [PaymentStatus.COMPLETED, PaymentStatus.FAILED],
         PaymentStatus.FAILED: [PaymentStatus.COMPLETED],
-        PaymentStatus.COMPLETED: [PaymentStatus.REFUNDED],
+        PaymentStatus.COMPLETED: [
+            PaymentStatus.REFUNDED,
+            PaymentStatus.PARTIALLY_REFUNDED,
+        ],
+        # A second (or third...) per-item refund against the same payment
+        # (see OrderService.refund_unresolved_item, §11.8) needs to be able
+        # to land here again -- self-transition, not a no-op guard, since
+        # transition_to always validates against the graph regardless of
+        # whether old == new. Whole-order cancel/return can still refund
+        # the remainder from here too.
+        PaymentStatus.PARTIALLY_REFUNDED: [
+            PaymentStatus.PARTIALLY_REFUNDED,
+            PaymentStatus.REFUNDED,
+        ],
     }
 
     id = db.Column(db.String(12), primary_key=True, default=None)

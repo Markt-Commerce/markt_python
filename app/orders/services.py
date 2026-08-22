@@ -28,6 +28,7 @@ from .models import (
     Order,
     OrderStatus,
     OrderItem,
+    FulfilmentPreference,
     ShippingAddress,
     Shipment,
     OrderReturn,
@@ -148,6 +149,18 @@ class OrderService:
         )
         session.add(shipping_address_obj)
 
+        # §6: one preference per order, set at checkout, stamped onto every
+        # item -- see FulfilmentPreference's docstring for why it's stored
+        # per-item rather than requiring a join back to Order later. Falls
+        # back to AUTO for a missing/unrecognised value rather than
+        # rejecting the whole checkout over it.
+        try:
+            fulfilment_preference = FulfilmentPreference(
+                snapshot.get("fulfilment_preference", FulfilmentPreference.AUTO.value)
+            )
+        except ValueError:
+            fulfilment_preference = FulfilmentPreference.AUTO
+
         for item in snapshot["items"]:
             order_item = OrderItem(
                 order_id=order.id,
@@ -157,6 +170,7 @@ class OrderService:
                 quantity=item["quantity"],
                 price=item["price"],
                 status=OrderItem.Status.PROCESSING,
+                fulfilment_preference=fulfilment_preference,
             )
             session.add(order_item)
             order.items.append(order_item)
@@ -299,18 +313,65 @@ class OrderService:
 
     @staticmethod
     def _get_completed_payment_amount(order: Order) -> float:
+        """The amount actually captured for this order. Includes
+        PARTIALLY_REFUNDED, not just COMPLETED -- Payment.amount is never
+        mutated by a refund (only Payment.status changes; see
+        refund_unresolved_item), so a payment that's already had one
+        partial refund applied still represents the same captured amount
+        it always did. Without this, a second refund against the same
+        order (whole-order cancel after a per-item refund, or two
+        per-item refunds) would see captured=0 and skip the invariant
+        entirely."""
         for payment in order.payments or []:
-            if payment.status == PaymentStatus.COMPLETED:
+            if payment.status in (
+                PaymentStatus.COMPLETED,
+                PaymentStatus.PARTIALLY_REFUNDED,
+            ):
                 return payment.amount
         return 0.0
 
     @staticmethod
-    def _assert_refund_within_captured(order: Order, refund_amount: float) -> None:
-        """Escrow invariant: a refund can never exceed what was actually captured."""
+    def _get_total_refunded(session, order: Order) -> float:
+        """Sum of every wallet refund already issued against this order or
+        any of its items (see refund_unresolved_item) -- needed so the
+        invariant below is cumulative, not just "does this one refund fit,"
+        now that an order can be refunded more than once (whole-order
+        cancel/return, plus per-item ASK-timeout refunds)."""
+        from app.wallet.models import WalletEntry, WalletEntryType, WalletReferenceType
+
+        reference_ids = [order.id] + [item.id for item in order.items or []]
+        reference_ids = [str(ref_id) for ref_id in reference_ids]
+        total = (
+            session.query(db.func.coalesce(db.func.sum(WalletEntry.amount), 0.0))
+            .filter(
+                WalletEntry.reference_type == WalletReferenceType.ORDER_REFUND,
+                WalletEntry.reference_id.in_(reference_ids),
+                WalletEntry.entry_type == WalletEntryType.CREDIT,
+            )
+            .scalar()
+        )
+        return float(total or 0.0)
+
+    @staticmethod
+    def _assert_refund_within_captured(
+        order: Order, refund_amount: float, session=None
+    ) -> None:
+        """Escrow invariant: cumulative refunds can never exceed what was
+        actually captured. `session` is optional (existing callers that
+        only ever refund an order once didn't need it) -- pass it whenever
+        the order could plausibly already have a prior refund against it,
+        so already-refunded amounts are accounted for rather than silently
+        allowed to stack past the captured total."""
         captured = OrderService._get_completed_payment_amount(order)
-        if captured and refund_amount > captured + 0.01:
+        if not captured:
+            return
+        already_refunded = (
+            OrderService._get_total_refunded(session, order) if session else 0.0
+        )
+        if already_refunded + refund_amount > captured + 0.01:
             raise ValidationError(
-                f"Refund amount {refund_amount} exceeds captured payment amount "
+                f"Refund amount {refund_amount} (already refunded "
+                f"{already_refunded}) exceeds captured payment amount "
                 f"{captured} for order {order.id}"
             )
 
@@ -345,7 +406,12 @@ class OrderService:
                     f"Order in status '{order.status.value}' cannot be cancelled"
                 )
 
-            paid_amount = OrderService._get_completed_payment_amount(order)
+            captured_amount = OrderService._get_completed_payment_amount(order)
+            # Only refund what hasn't already gone out -- an item may have
+            # been refunded on its own earlier (see refund_unresolved_item,
+            # §11.8/§9.1) before the buyer cancels the rest of the order.
+            already_refunded = OrderService._get_total_refunded(session, order)
+            paid_amount = round(max(captured_amount - already_refunded, 0.0), 2)
             buyer_user_id = order.buyer.user_id if order.buyer else None
             order_items = list(order.items)
 
@@ -358,10 +424,15 @@ class OrderService:
                     item.status = OrderItem.Status.CANCELLED
 
             if paid_amount > 0:
-                OrderService._assert_refund_within_captured(order, paid_amount)
-                for payment in order.payments:
-                    if payment.status == PaymentStatus.COMPLETED:
-                        payment.transition_to(PaymentStatus.REFUNDED)
+                OrderService._assert_refund_within_captured(
+                    order, paid_amount, session=session
+                )
+            for payment in order.payments:
+                if payment.status in (
+                    PaymentStatus.COMPLETED,
+                    PaymentStatus.PARTIALLY_REFUNDED,
+                ):
+                    payment.transition_to(PaymentStatus.REFUNDED)
 
             session.flush()
 
@@ -607,7 +678,9 @@ class OrderService:
             if refund_amount <= 0:
                 refund_amount = order.total or 0.0
 
-            OrderService._assert_refund_within_captured(order, refund_amount)
+            OrderService._assert_refund_within_captured(
+                order, refund_amount, session=session
+            )
 
             buyer_user_id = order.buyer.user_id if order.buyer else None
             order_id = order.id
@@ -621,7 +694,10 @@ class OrderService:
                     item.status = OrderItem.Status.CANCELLED
 
             for payment in order.payments or []:
-                if payment.status == PaymentStatus.COMPLETED:
+                if payment.status in (
+                    PaymentStatus.COMPLETED,
+                    PaymentStatus.PARTIALLY_REFUNDED,
+                ):
                     payment.transition_to(PaymentStatus.REFUNDED)
 
             session.flush()
@@ -643,6 +719,81 @@ class OrderService:
             OrderService._emit_gam_order_reversed(order_id)
 
         return order_return
+
+    @staticmethod
+    def refund_unresolved_item(
+        order_item_id: int, reason: Optional[str] = None
+    ) -> Optional["WalletEntry"]:
+        """§11.8 / §9.1: refund a single item that couldn't be fulfilled,
+        without touching the rest of the order -- distinct from
+        cancel_order (whole order, buyer-initiated) and approve_return
+        (whole order, post-delivery). Today's only caller is the ASK
+        timeout worker (app.fulfilment.tasks.expire_stale_buyer_approvals,
+        §9.1's "remove the unresolved item and adjust/refund" MVP policy),
+        but this is a standalone reusable primitive -- flagged as needed
+        back in Phase 4, genuinely blocked until an item-level "couldn't
+        be fulfilled" outcome existed to call it from.
+
+        Idempotent: a no-op (returns None) if the item is already
+        CANCELLED -- safe to call more than once for the same item.
+
+        Simplification, flagged: always marks the order's payment(s)
+        PARTIALLY_REFUNDED, even in the edge case where this happens to be
+        the order's only remaining un-refunded item (which would really be
+        a full refund). Detecting that would mean summing every other
+        item's own state here; not worth it for a label that doesn't
+        change the actual money movement -- cancel_order still correctly
+        finishes the job (-> REFUNDED) if the buyer goes on to cancel the
+        rest of the order.
+        """
+        from app.wallet.services import WalletService
+
+        refund_amount = 0.0
+        buyer_user_id = None
+
+        with session_scope() as session:
+            order_item = (
+                session.query(OrderItem)
+                .options(
+                    db.joinedload(OrderItem.order).joinedload(Order.payments),
+                    db.joinedload(OrderItem.order).joinedload(Order.buyer),
+                    db.joinedload(OrderItem.order).joinedload(Order.items),
+                )
+                .get(order_item_id)
+            )
+            if not order_item:
+                raise NotFoundError("Order item not found")
+
+            if order_item.status == OrderItem.Status.CANCELLED:
+                return None
+
+            order = order_item.order
+            refund_amount = round(
+                (order_item.price or 0) * (order_item.quantity or 0), 2
+            )
+
+            if refund_amount > 0:
+                OrderService._assert_refund_within_captured(
+                    order, refund_amount, session=session
+                )
+
+            order_item.transition_to(OrderItem.Status.CANCELLED)
+
+            for payment in order.payments or []:
+                if payment.status in (
+                    PaymentStatus.COMPLETED,
+                    PaymentStatus.PARTIALLY_REFUNDED,
+                ):
+                    payment.transition_to(PaymentStatus.PARTIALLY_REFUNDED)
+
+            buyer_user_id = order.buyer.user_id if order.buyer else None
+            session.flush()
+
+        if refund_amount > 0 and buyer_user_id:
+            return WalletService.refund_order_item_to_wallet(
+                buyer_user_id, order_item_id, refund_amount, reason=reason
+            )
+        return None
 
     @staticmethod
     def reject_return(
