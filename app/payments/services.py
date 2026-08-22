@@ -100,7 +100,7 @@ class PaymentService:
             already_completed = payment.status == PaymentStatus.COMPLETED
 
             if not already_completed:
-                payment.status = PaymentStatus.COMPLETED
+                payment.transition_to(PaymentStatus.COMPLETED)
                 payment.paid_at = datetime.utcnow()
                 if gateway_response is not None:
                     payment.gateway_response = gateway_response
@@ -255,7 +255,7 @@ class PaymentService:
                     resolved_amount,
                     currency=currency,
                 )
-                payment.status = PaymentStatus.COMPLETED
+                payment.transition_to(PaymentStatus.COMPLETED)
                 payment.paid_at = datetime.utcnow()
                 wallet_payment_id = payment.id
             elif method == PaymentMethod.CARD:
@@ -301,7 +301,8 @@ class PaymentService:
                         f"Unsupported payment method: {payment.method}"
                     )
 
-                payment.status = result["status"]
+                if result["status"] != payment.status:
+                    payment.transition_to(result["status"])
                 if result.get("transaction_id"):
                     payment.transaction_id = result["transaction_id"]
                 payment.gateway_response = result.get("gateway_response", {})
@@ -320,6 +321,9 @@ class PaymentService:
 
             except Exception as e:
                 logger.error(f"Payment processing failed: {str(e)}")
+                # Direct assignment, not transition_to: this is error-recovery
+                # cleanup and must not itself raise (e.g. if payment.status
+                # was already advanced in-memory above before the failure).
                 payment.status = PaymentStatus.FAILED
                 payment.gateway_response = {"error": str(e)}
                 session.flush()
@@ -758,7 +762,12 @@ class PaymentService:
                 if not payment:
                     return False
 
-                payment.status = PaymentStatus.FAILED
+                # Webhooks can be delivered more than once; treat a repeat
+                # failure notification as a no-op instead of erroring, and
+                # let transition_to reject a stale failure arriving after
+                # the payment already completed elsewhere.
+                if payment.status != PaymentStatus.FAILED:
+                    payment.transition_to(PaymentStatus.FAILED)
                 payment.gateway_response = data
                 session.flush()
 
