@@ -68,6 +68,10 @@ class NotificationService:
             "title": "New order to fulfil",
             "message": "{message}",
         },
+        NotificationType.SUBSTITUTION_APPROVAL_REQUIRED: {
+            "title": "Approval needed",
+            "message": "{message}",
+        },
         # Buyer request notifications
         NotificationType.REQUEST_OFFER: {
             "title": "New offer",

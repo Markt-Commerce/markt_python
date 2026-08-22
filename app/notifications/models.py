@@ -29,6 +29,9 @@ class NotificationType(Enum):
     PAYMENT_FAILED = "payment_failed"
     # Seller fulfilment notifications (§12.1-12.2)
     FULFILMENT_REQUEST = "fulfilment_request"
+    # §6.1 ASK gate: a reroute-created substitution needs buyer approval
+    # before it commits.
+    SUBSTITUTION_APPROVAL_REQUIRED = "substitution_approval_required"
     # Social notifications
     NICHE_INVITATION = "niche_invitation"
     NICHE_POST_APPROVED = "niche_post_approved"

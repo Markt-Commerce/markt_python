@@ -334,7 +334,7 @@ def test_complete_checkout_payment_builds_order_and_confirms_reservations(
         "items": [{"reservation_id": "RSV_1"}, {"reservation_id": "RSV_2"}],
     }
     payment = _payment(snapshot=snapshot)
-    order_item = SimpleNamespace(id=1, seller_id=7, quantity=2)
+    order_item = SimpleNamespace(id=1, seller_id=7, quantity=2, product_id="PRD_1")
     order = SimpleNamespace(id="ORD_1", items=[order_item])
     mock_create_order.return_value = order
 
@@ -351,7 +351,7 @@ def test_complete_checkout_payment_builds_order_and_confirms_reservations(
     assert payment.status == PaymentStatus.COMPLETED
     assert payment.order_id == "ORD_1"
     mock_confirm.assert_called_once_with(session, ["RSV_1", "RSV_2"], "ORD_1")
-    mock_create_allocation.assert_called_once_with(1, 7, 2)
+    mock_create_allocation.assert_called_once_with(1, 7, 2, product_id="PRD_1")
 
 
 @patch("app.orders.services.OrderService.create_order_from_checkout_snapshot")

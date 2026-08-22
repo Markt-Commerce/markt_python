@@ -28,6 +28,7 @@ from .models import (
     Order,
     OrderStatus,
     OrderItem,
+    FulfilmentPreference,
     ShippingAddress,
     Shipment,
     OrderReturn,
@@ -148,6 +149,18 @@ class OrderService:
         )
         session.add(shipping_address_obj)
 
+        # §6: one preference per order, set at checkout, stamped onto every
+        # item -- see FulfilmentPreference's docstring for why it's stored
+        # per-item rather than requiring a join back to Order later. Falls
+        # back to AUTO for a missing/unrecognised value rather than
+        # rejecting the whole checkout over it.
+        try:
+            fulfilment_preference = FulfilmentPreference(
+                snapshot.get("fulfilment_preference", FulfilmentPreference.AUTO.value)
+            )
+        except ValueError:
+            fulfilment_preference = FulfilmentPreference.AUTO
+
         for item in snapshot["items"]:
             order_item = OrderItem(
                 order_id=order.id,
@@ -157,6 +170,7 @@ class OrderService:
                 quantity=item["quantity"],
                 price=item["price"],
                 status=OrderItem.Status.PROCESSING,
+                fulfilment_preference=fulfilment_preference,
             )
             session.add(order_item)
             order.items.append(order_item)

@@ -86,6 +86,27 @@ class Order(BaseModel, UniqueIdMixin):
         }
 
 
+class FulfilmentPreference(Enum):
+    """§6: the buyer's substitution preference, set at checkout. Stored per
+    OrderItem (matching the §5.1 data model) rather than only on Order --
+    the rerouting engine (app.fulfilment.rerouting) reads it per item, and
+    this avoids a join back to Order every time it does. In practice the
+    buyer picks one preference for the whole order at checkout and it's
+    stamped onto every item Order.create_order_from_checkout_snapshot
+    creates (see PaymentService.initialize_checkout_payment)."""
+
+    # Markt may automatically reroute within the market. Default.
+    AUTO = "auto"
+    # Markt may find a candidate but must get buyer approval (§6.1) before
+    # committing a material substitution -- a non-material one (same
+    # product/variant, same price, different seller) still proceeds
+    # silently, same as AUTO.
+    ASK = "ask"
+    # Only the originally chosen seller may fulfil; no rerouting at all --
+    # a decline/timeout skips straight to escalation (§7.1 step 2).
+    SELLER_ONLY = "seller_only"
+
+
 class OrderItem(BaseModel, StatusMixin):
     __tablename__ = "order_items"
 
@@ -127,6 +148,16 @@ class OrderItem(BaseModel, StatusMixin):
     # owed) -- lets the settlement worker query "still pending" cheaply
     # without re-deriving that from the wallet ledger.
     settled_at = db.Column(db.DateTime, nullable=True)
+    # §6: buyer substitution preference for this item. Nullable-in-effect
+    # via the default -- old-flow orders (cart checkout, pre-Phase 6) never
+    # set this explicitly and get AUTO, which matches their actual
+    # behaviour today (no rerouting existed before this, so nothing changes
+    # for them).
+    fulfilment_preference = db.Column(
+        db.Enum(FulfilmentPreference),
+        default=FulfilmentPreference.AUTO,
+        nullable=False,
+    )
 
     # Relationships
     order = db.relationship("Order", back_populates="items")

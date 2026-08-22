@@ -81,4 +81,9 @@ CELERYBEAT_SCHEDULE = {
         "schedule": crontab(minute="*/1"),  # Every minute -- 3-min response window
         "options": {"queue": "default"},
     },
+    "recompute-seller-reliability-scores": {
+        "task": "app.fulfilment.tasks.recompute_seller_reliability_scores",
+        "schedule": crontab(hour="*/6"),  # Every 6 hours, same cadence as confidence
+        "options": {"queue": "default"},
+    },
 }

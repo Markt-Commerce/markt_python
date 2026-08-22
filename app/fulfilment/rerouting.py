@@ -1,6 +1,8 @@
-"""Rerouting engine: candidate-seller lookup and the hard eligibility
-filter (§7.1 step 3-4, §7.2), now that Market/Area exist
-(feat/market-area-foundation) to scope "same market" by.
+"""Rerouting engine (§7.1): candidate-seller lookup, the hard eligibility
+filter (§7.2), and the attempt loop that ties them together with ranking
+(§13.1) to actually retry a failed item against the next-best seller. Now
+that Market/Area exist (feat/market-area-foundation) to scope "same
+market" by.
 
 Product matching: there's no canonical-product concept linking different
 sellers' listings of the same real-world item -- each seller's `Product`
@@ -14,15 +16,32 @@ a canonical join -- it trades some precision for actually finding
 plausible matches given today's catalog. A real fix (a shared
 canonical-product concept sellers link their listings to) is bigger,
 separate catalog work.
+
+Buyer fulfilment preference (§6): SELLER_ONLY is gated here (attempt_reroute
+never looks for candidates at all). ASK's material-substitution gate is
+NOT here -- it lives in FulfilmentService.accept(), since "material" only
+becomes knowable once a specific replacement seller has actually accepted
+(their product's price is what's compared against the original). See that
+method's docstring, and FulfilmentAllocationStatus.AWAITING_BUYER_APPROVAL.
 """
 
 import re
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 from app.categories.models import ProductCategory
 from app.inventory.confidence import ConfidenceBand, InventoryConfidenceService
+from app.libs.errors import ConflictError, NotFoundError
+from app.libs.session import session_scope
+from app.orders.models import FulfilmentPreference, OrderItem
 from app.products.models import Product
 from app.users.models import MarketVerificationStatus, Seller
+
+from .models import FulfilmentAllocation, FulfilmentAllocationStatus
+
+# rank_candidates is imported lazily inside attempt_reroute() (below), not
+# here -- ranking.py imports PRICE_HEADROOM_RATE from this module at load
+# time, so a module-level import here would be circular.
 
 STOPWORDS = {"the", "a", "an", "of", "and", "or", "for", "with", "in", "on", "to"}
 
@@ -130,3 +149,158 @@ def filter_eligible_candidates(
         eligible.append(product)
 
     return eligible
+
+
+# Phase 0: total time Markt has to resolve an item, from its very first
+# allocation attempt -- distinct from SELLER_RESPONSE_TIMEOUT_MINUTES,
+# which bounds one seller's response.
+FULFILMENT_DEADLINE_MINUTES = 10
+
+# Not spec-mandated (Phase 0 fixed the deadline, not a retry count) --
+# a generous safety net so a pathological "every candidate declines
+# instantly" case can't loop forever within the deadline window; in
+# practice the 10-min deadline is almost always the binding constraint
+# given the 3-min per-seller timeout.
+MAX_REROUTE_ATTEMPTS = 5
+
+
+class ReroutingService:
+    @staticmethod
+    def attempt_reroute(failed_allocation_id: int) -> Optional[FulfilmentAllocation]:
+        """§7.1 steps 2-9: called when an allocation lands at DECLINED,
+        TIMEOUT, or BUYER_REJECTED (§6.1's ASK-gate rejection -- see
+        FulfilmentService.buyer_reject_reroute). Finds and ranks eligible
+        in-market candidates (excluding every seller already tried for
+        this item) and reserves stock against the top-ranked one, retrying
+        down the ranked list if a reservation loses a race. Returns the
+        new AWAITING_SELLER allocation on success.
+
+        Returns None if the item couldn't be rerouted -- SELLER_ONLY
+        preference (§7.1 step 2), fulfilment deadline or retry limit
+        reached, or no eligible candidates at all -- after marking the
+        failed allocation UNFULFILLED. §7.3's escalation flow (surfacing
+        that to the buyer) isn't built yet; this only gets the state
+        honestly to where escalation would pick it up.
+
+        A no-op (returns None without raising) if the allocation isn't
+        actually at DECLINED/TIMEOUT/BUYER_REJECTED -- this can be invoked
+        more than once for the same failure without double-processing it.
+        """
+        with session_scope() as session:
+            failed = session.query(FulfilmentAllocation).get(failed_allocation_id)
+            if not failed:
+                raise NotFoundError("Fulfilment allocation not found")
+
+            if failed.status not in (
+                FulfilmentAllocationStatus.DECLINED,
+                FulfilmentAllocationStatus.TIMEOUT,
+                FulfilmentAllocationStatus.BUYER_REJECTED,
+            ):
+                return None
+
+            order_item = session.query(OrderItem).get(failed.order_item_id)
+            if not order_item:
+                return None
+
+            # §7.1 step 2: SELLER_ONLY means no rerouting at all -- skip
+            # straight to the same UNFULFILLED end state §7.3's (unbuilt)
+            # escalation flow would pick up from, without even looking for
+            # candidates.
+            if order_item.fulfilment_preference == FulfilmentPreference.SELLER_ONLY:
+                failed.transition_to(FulfilmentAllocationStatus.REROUTING)
+                failed.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
+                session.flush()
+                return None
+
+            first_attempt = (
+                session.query(FulfilmentAllocation)
+                .filter_by(order_item_id=order_item.id)
+                .order_by(FulfilmentAllocation.created_at.asc())
+                .first()
+            )
+            deadline_anchor = (
+                first_attempt.created_at if first_attempt else failed.created_at
+            )
+            deadline = deadline_anchor + timedelta(minutes=FULFILMENT_DEADLINE_MINUTES)
+
+            attempt_count = (
+                session.query(FulfilmentAllocation)
+                .filter_by(order_item_id=order_item.id)
+                .count()
+            )
+
+            failed.transition_to(FulfilmentAllocationStatus.REROUTING)
+
+            if datetime.utcnow() >= deadline or attempt_count >= MAX_REROUTE_ATTEMPTS:
+                failed.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
+                session.flush()
+                return None
+
+            original_product = session.query(Product).get(order_item.product_id)
+            if not original_product:
+                failed.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
+                session.flush()
+                return None
+
+            tried_seller_ids = {
+                row[0]
+                for row in session.query(FulfilmentAllocation.seller_id)
+                .filter_by(order_item_id=order_item.id)
+                .all()
+            }
+
+            eligible = filter_eligible_candidates(
+                session,
+                original_product,
+                order_item.price,
+                exclude_seller_id=order_item.seller_id,
+                variant_id=order_item.variant_id,
+            )
+            eligible = [p for p in eligible if p.seller_id not in tried_seller_ids]
+
+            if not eligible:
+                failed.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
+                session.flush()
+                return None
+
+            from .ranking import rank_candidates
+
+            ranked = rank_candidates(eligible, order_item.price, order_item.quantity)
+            buyer_id = order_item.order.buyer_id
+            quantity = order_item.quantity
+            order_item_id = order_item.id
+
+            session.flush()
+
+        # Reservation is its own atomic transaction (row lock) -- see
+        # InventoryService.reserve_stock -- so trying candidates in ranked
+        # order happens outside the session block above.
+        from app.inventory.services import InventoryService
+        from .services import FulfilmentService
+
+        for candidate in ranked:
+            try:
+                reservation = InventoryService.reserve_stock(
+                    candidate["product_id"],
+                    buyer_id,
+                    quantity,
+                )
+            except ConflictError:
+                # Lost a race for this candidate's stock -- try the next.
+                continue
+
+            return FulfilmentService.create_allocation(
+                order_item_id,
+                candidate["seller_id"],
+                quantity,
+                product_id=candidate["product_id"],
+                reservation_id=reservation.id,
+            )
+
+        # Every ranked candidate lost the stock race.
+        with session_scope() as session:
+            failed = session.query(FulfilmentAllocation).get(failed_allocation_id)
+            if failed and failed.status == FulfilmentAllocationStatus.REROUTING:
+                failed.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
+
+        return None
