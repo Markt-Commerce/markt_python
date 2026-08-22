@@ -556,11 +556,10 @@ class PaymentService:
                 },
             }
 
-            split = PaymentService._resolve_subaccount_split(order)
-            if split:
-                payload["subaccount"] = split["subaccount_code"]
-                order.paystack_split_used = True
-
+            # Escrow is held in Markt's own wallet ledger and released to
+            # sellers on delivery (see WalletService.settle_order_item), not
+            # via Paystack's live subaccount split -- splitting at charge time
+            # would pay sellers before delivery is even confirmed.
             response = requests.post(
                 f"{PaymentService.PAYSTACK_BASE_URL}/transaction/initialize",
                 json=payload,
