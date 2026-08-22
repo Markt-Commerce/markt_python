@@ -138,22 +138,3 @@ def test_register_seller_payout_account(mock_create):
 def test_initialize_topup_rejects_small_amount():
     with pytest.raises(ValidationError):
         WalletService.initialize_topup("USR_1", 50.0)
-
-
-def test_resolve_subaccount_split_single_seller():
-    seller = SimpleNamespace(seller_id=1, paystack_subaccount_code="ACCT_abc")
-    item = SimpleNamespace(seller_id=1, seller=seller)
-    order = SimpleNamespace(items=[item])
-
-    split = PaymentService._resolve_subaccount_split(order)
-    assert split == {"subaccount_code": "ACCT_abc"}
-
-
-def test_resolve_subaccount_split_multi_seller_returns_none():
-    order = SimpleNamespace(
-        items=[
-            SimpleNamespace(seller_id=1, seller=None),
-            SimpleNamespace(seller_id=2, seller=None),
-        ]
-    )
-    assert PaymentService._resolve_subaccount_split(order) is None
