@@ -23,6 +23,21 @@ class Payment(BaseModel, UniqueIdMixin):
     __tablename__ = "payments"
     id_prefix = "PAY_"
 
+    # Single source of truth for legal status transitions, used by every code
+    # path that moves a payment forward (webhook, browser callback, bank
+    # transfer polling, cancellation/return refunds). FAILED->COMPLETED is
+    # allowed because Paystack's webhook delivery isn't ordered -- a late
+    # success can arrive after a local timeout already marked the payment
+    # failed, and the money did land, so the payment should be rescued rather
+    # than left stuck. COMPLETED->FAILED is deliberately NOT allowed: a
+    # captured payment must never be flipped to failed by a late/duplicate
+    # webhook. PARTIALLY_REFUNDED isn't reachable yet -- nothing sets it.
+    VALID_STATUS_TRANSITIONS = {
+        PaymentStatus.PENDING: [PaymentStatus.COMPLETED, PaymentStatus.FAILED],
+        PaymentStatus.FAILED: [PaymentStatus.COMPLETED],
+        PaymentStatus.COMPLETED: [PaymentStatus.REFUNDED],
+    }
+
     id = db.Column(db.String(12), primary_key=True, default=None)
     order_id = db.Column(db.String(12), db.ForeignKey("orders.id"))
     amount = db.Column(db.Float, nullable=False)
@@ -37,6 +52,13 @@ class Payment(BaseModel, UniqueIdMixin):
     )  # Prevent duplicate payments
 
     order = db.relationship("Order", back_populates="payments")
+
+    def transition_to(self, new_status: "PaymentStatus") -> None:
+        """Apply a status change, raising ValueError if it isn't a legal transition."""
+        allowed = Payment.VALID_STATUS_TRANSITIONS.get(self.status, [])
+        if new_status not in allowed:
+            raise ValueError(f"Cannot transition from {self.status} to {new_status}")
+        self.status = new_status
 
 
 class Transaction(BaseModel):

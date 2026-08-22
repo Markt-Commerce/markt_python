@@ -21,12 +21,20 @@ def test_returnable_order_statuses():
 
 @patch("app.wallet.services.WalletService.credit")
 def test_approve_return_credits_buyer_wallet(mock_credit):
+    from app.payments.models import Payment, PaymentStatus
+    from app.orders.models import OrderItem
+
+    payment = SimpleNamespace(status=PaymentStatus.COMPLETED)
+    payment.transition_to = lambda new_status, _p=payment: Payment.transition_to(
+        _p, new_status
+    )
+
     order = SimpleNamespace(
         id="ORD_RET001",
         total=8000.0,
         buyer=SimpleNamespace(user_id="USR_BUYER1"),
-        items=[SimpleNamespace(seller_id=7, status=SimpleNamespace(value="delivered"))],
-        payments=[SimpleNamespace(status=SimpleNamespace(value="completed"))],
+        items=[SimpleNamespace(seller_id=7, status=OrderItem.Status.DELIVERED)],
+        payments=[payment],
     )
     order_return = SimpleNamespace(
         id="RET_TEST01",
@@ -41,17 +49,11 @@ def test_approve_return_credits_buyer_wallet(mock_credit):
 
     with patch("app.orders.services.session_scope") as mock_scope:
         mock_scope.return_value.__enter__.return_value = session
-        from app.payments.models import PaymentStatus
-
-        for payment in order.payments:
-            payment.status = PaymentStatus.COMPLETED
-        from app.orders.models import OrderItem
-
-        order.items[0].status = OrderItem.Status.DELIVERED
         OrderService.approve_return("RET_TEST01", seller_id=7)
 
     mock_credit.assert_called_once()
     assert mock_credit.call_args.kwargs["idempotency_key"] == "return-refund:RET_TEST01"
+    assert payment.status == PaymentStatus.REFUNDED
 
 
 @patch("app.wallet.services.WalletService.credit")

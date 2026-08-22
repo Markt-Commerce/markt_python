@@ -303,7 +303,7 @@ class OrderService:
             if paid_amount > 0:
                 for payment in order.payments:
                     if payment.status == PaymentStatus.COMPLETED:
-                        payment.status = PaymentStatus.REFUNDED
+                        payment.transition_to(PaymentStatus.REFUNDED)
 
             session.flush()
 
@@ -562,7 +562,7 @@ class OrderService:
 
             for payment in order.payments or []:
                 if payment.status == PaymentStatus.COMPLETED:
-                    payment.status = PaymentStatus.REFUNDED
+                    payment.transition_to(PaymentStatus.REFUNDED)
 
             session.flush()
 
