@@ -66,6 +66,11 @@ CELERYBEAT_SCHEDULE = {
         "schedule": crontab(minute="*/2"),  # Every 2 minutes (10-min reservation TTL)
         "options": {"queue": "default"},
     },
+    "expire-abandoned-checkout-payments": {
+        "task": "app.payments.tasks.expire_abandoned_checkout_payments",
+        "schedule": crontab(minute="*/5"),  # Every 5 min -- 15-min abandonment window
+        "options": {"queue": "default"},
+    },
     "recompute-inventory-confidence-scores": {
         "task": "app.inventory.tasks.recompute_confidence_scores",
         "schedule": crontab(hour="*/6"),  # Every 6 hours -- recency decays over days

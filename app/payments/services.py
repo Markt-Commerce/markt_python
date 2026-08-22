@@ -226,15 +226,32 @@ class PaymentService:
             )
             payment.order_id = order.id
 
-            InventoryService.confirm_reservations(
-                session,
-                [
-                    item["reservation_id"]
-                    for item in snapshot["items"]
-                    if item.get("reservation_id")
-                ],
-                order.id,
+            failed_reservation_ids = set(
+                InventoryService.confirm_reservations(
+                    session,
+                    [
+                        item["reservation_id"]
+                        for item in snapshot["items"]
+                        if item.get("reservation_id")
+                    ],
+                    order.id,
+                )
             )
+
+            # 14.3 payment/escrow reconciliation: Payment.FAILED->COMPLETED
+            # is deliberately allowed for a late-webhook rescue (see
+            # Payment's own transition-graph comment) -- but by the time
+            # that rescue lands, this specific item's reservation may have
+            # already expired and its stock gone to someone else.
+            # confirm_reservations reports exactly which ones -- those
+            # items must NOT get a seller-acceptance window opened for
+            # stock we no longer actually hold; refund just that item
+            # instead (reuses the same primitive 9.1's ASK timeout does).
+            unsecured_order_item_ids = [
+                order_item.id
+                for order_item, snapshot_item in zip(order.items, snapshot["items"])
+                if snapshot_item.get("reservation_id") in failed_reservation_ids
+            ]
 
             cart = session.query(Cart).filter_by(buyer_id=payment.buyer_id).first()
             if cart:
@@ -247,6 +264,7 @@ class PaymentService:
             item_specs = [
                 (item.id, item.seller_id, item.quantity, item.product_id)
                 for item in order.items
+                if item.id not in unsecured_order_item_ids
             ]
 
         # Open the seller-acceptance window (12.1-12.2, Phase 5) only
@@ -259,6 +277,20 @@ class PaymentService:
             FulfilmentService.create_allocation(
                 order_item_id, seller_id, quantity, product_id=product_id
             )
+
+        if unsecured_order_item_ids:
+            logger.warning(
+                "complete_checkout_payment: reservation(s) lapsed before "
+                "payment %s completed -- refunding unsecured item(s) %s "
+                "instead of opening fulfilment for them",
+                payment_id_for_cache,
+                unsecured_order_item_ids,
+            )
+            for order_item_id in unsecured_order_item_ids:
+                OrderService.refund_unresolved_item(
+                    order_item_id,
+                    reason=("Stock reservation expired before payment completed"),
+                )
 
         PaymentService._invalidate_payment_cache(payment_id_for_cache)
         return True

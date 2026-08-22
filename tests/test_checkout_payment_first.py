@@ -34,10 +34,11 @@ def test_confirm_reservations_promotes_held_to_confirmed_and_sets_order():
     session = MagicMock()
     session.query.return_value.filter.return_value.all.return_value = [reservation]
 
-    InventoryService.confirm_reservations(session, ["RSV_1"], "ORD_1")
+    failed = InventoryService.confirm_reservations(session, ["RSV_1"], "ORD_1")
 
     assert reservation.status == InventoryReservation.Status.CONFIRMED
     assert reservation.order_id == "ORD_1"
+    assert failed == []
 
 
 def test_confirm_reservations_promotes_requested_through_held_to_confirmed():
@@ -55,16 +56,43 @@ def test_confirm_reservations_is_idempotent_for_already_confirmed():
     session = MagicMock()
     session.query.return_value.filter.return_value.all.return_value = [reservation]
 
-    InventoryService.confirm_reservations(session, ["RSV_1"], "ORD_1")
+    failed = InventoryService.confirm_reservations(session, ["RSV_1"], "ORD_1")
 
     assert reservation.status == InventoryReservation.Status.CONFIRMED
     assert reservation.order_id == "ORD_1"
+    assert failed == []
 
 
 def test_confirm_reservations_no_op_for_empty_list():
     session = MagicMock()
-    InventoryService.confirm_reservations(session, [], "ORD_1")
+    result = InventoryService.confirm_reservations(session, [], "ORD_1")
     session.query.assert_not_called()
+    assert result == []
+
+
+def test_confirm_reservations_reports_expired_reservation_as_failed():
+    """14.3: a reservation that lapsed before a rescued (late-webhook)
+    payment completed must be reported, not silently confirmed."""
+    reservation = _reservation("RSV_1", InventoryReservation.Status.EXPIRED)
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = [reservation]
+
+    failed = InventoryService.confirm_reservations(session, ["RSV_1"], "ORD_1")
+
+    assert failed == ["RSV_1"]
+    # Not stamped with the order it failed to actually secure.
+    assert reservation.order_id is None
+
+
+def test_confirm_reservations_reports_missing_reservation_as_failed():
+    """A reservation id that no longer exists in the DB at all must also
+    be reported -- not silently ignored."""
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = []
+
+    failed = InventoryService.confirm_reservations(session, ["RSV_GONE"], "ORD_1")
+
+    assert failed == ["RSV_GONE"]
 
 
 @patch("app.inventory.services.session_scope")
@@ -353,6 +381,55 @@ def test_complete_checkout_payment_builds_order_and_confirms_reservations(
     assert payment.order_id == "ORD_1"
     mock_confirm.assert_called_once_with(session, ["RSV_1", "RSV_2"], "ORD_1")
     mock_create_allocation.assert_called_once_with(1, 7, 2, product_id="PRD_1")
+
+
+@patch("app.orders.services.OrderService.refund_unresolved_item")
+@patch("app.fulfilment.services.FulfilmentService.create_allocation")
+@patch("app.orders.services.OrderService.create_order_from_checkout_snapshot")
+@patch("app.inventory.services.InventoryService.confirm_reservations")
+@patch("app.payments.services.PaymentService._invalidate_payment_cache")
+@patch("app.payments.services.session_scope")
+def test_complete_checkout_payment_refunds_item_with_lapsed_reservation(
+    mock_scope,
+    mock_invalidate,
+    mock_confirm,
+    mock_create_order,
+    mock_create_allocation,
+    mock_refund,
+):
+    """14.3 payment/escrow reconciliation: a late-webhook-rescued payment
+    (Payment.FAILED->COMPLETED) whose reservation already lapsed must not
+    get a seller-acceptance window opened for stock that's gone -- it
+    should be refunded instead, and the OTHER (still-secured) item in the
+    same order must proceed normally."""
+    snapshot = {
+        "items": [{"reservation_id": "RSV_1"}, {"reservation_id": "RSV_2"}],
+    }
+    payment = _payment(status=PaymentStatus.FAILED, snapshot=snapshot)
+    secured_item = SimpleNamespace(id=1, seller_id=7, quantity=2, product_id="PRD_1")
+    lapsed_item = SimpleNamespace(id=2, seller_id=8, quantity=1, product_id="PRD_2")
+    order = SimpleNamespace(id="ORD_1", items=[secured_item, lapsed_item])
+    mock_create_order.return_value = order
+    # RSV_2 (the second item's reservation) had already expired by the
+    # time this rescued payment completed.
+    mock_confirm.return_value = ["RSV_2"]
+
+    session = MagicMock()
+    session.query.return_value.with_for_update.return_value.filter_by.return_value.first.return_value = (
+        payment
+    )
+    session.query.return_value.filter_by.return_value.first.return_value = None  # cart
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = PaymentService.complete_checkout_payment(payment_id="PAY_1")
+
+    assert result is True
+    assert payment.status == PaymentStatus.COMPLETED
+    # Only the still-secured item gets fulfilment opened.
+    mock_create_allocation.assert_called_once_with(1, 7, 2, product_id="PRD_1")
+    # The lapsed item is refunded instead.
+    mock_refund.assert_called_once()
+    assert mock_refund.call_args.args[0] == 2
 
 
 @patch("app.orders.services.OrderService.create_order_from_checkout_snapshot")
