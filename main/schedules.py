@@ -83,7 +83,7 @@ CELERYBEAT_SCHEDULE = {
     },
     "expire-stale-buyer-approvals": {
         "task": "app.fulfilment.tasks.expire_stale_buyer_approvals",
-        "schedule": crontab(minute="*/1"),  # Every minute -- 5-min §9.1 window
+        "schedule": crontab(minute="*/1"),  # Every minute -- 5-min 9.1 window
         "options": {"queue": "default"},
     },
     "recompute-seller-reliability-scores": {

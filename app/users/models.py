@@ -236,7 +236,7 @@ class Seller(BaseModel):
     payout_bank_code = db.Column(db.String(10), nullable=True)
     payout_account_number = db.Column(db.String(20), nullable=True)
     payout_account_name = db.Column(db.String(100), nullable=True)
-    # Market membership (§7.2, Phase 6) -- explicit assignment, not
+    # Market membership (7.2, Phase 6) -- explicit assignment, not
     # geofenced. shop_address/lat/lng are only used to sanity-check the
     # claim (see market_verification_status), never to derive it.
     market_id = db.Column(db.Integer, db.ForeignKey("markets.id"), nullable=True)

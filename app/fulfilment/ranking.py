@@ -1,10 +1,10 @@
-"""Seller ranking scorer (§13.1), applied only after the hard eligibility
-filter (§7.2) -- a high score never overrides a failed eligibility check
+"""Seller ranking scorer (13.1), applied only after the hard eligibility
+filter (7.2) -- a high score never overrides a failed eligibility check
 (candidates reaching this module are assumed already eligible).
 
 Distance/Delivery Cost has no real signal yet: rerouting is within one
 market, and per-order delivery cost is governed by the shared
-DeliveryRun (§10), not by which seller within the market fulfils a given
+DeliveryRun (10), not by which seller within the market fulfils a given
 item -- a real per-seller routing cost needs DeliveryRun/route data that
 doesn't exist yet (Phase 9). Falls back to the same neutral-prior
 convention used everywhere else this session has hit a similar gap
@@ -21,15 +21,15 @@ from app.products.models import Product
 from .reliability import SellerReliabilityService
 from .rerouting import PRICE_HEADROOM_RATE
 
-# §13.3: splitting one item across sellers adds operational complexity,
+# 13.3: splitting one item across sellers adds operational complexity,
 # so a candidate that can't cover the full needed quantity alone (and
 # would therefore require splitting with another seller) is penalised in
 # ranking -- not excluded, since a split may still be the only way to
-# fulfil the shortfall (§5.2), just deprioritised versus a candidate who
+# fulfil the shortfall (5.2), just deprioritised versus a candidate who
 # can take the whole thing.
 QUANTITY_SPLIT_PENALTY = 0.10
 
-# §13.1 weights.
+# 13.1 weights.
 WEIGHTS = {
     "inventory_confidence": 0.30,
     "seller_reliability": 0.25,
@@ -64,9 +64,9 @@ def _price_compatibility(candidate_price: float, original_price: float) -> float
 def score_candidate(
     product: Product, original_price: float, needed_quantity: Optional[int] = None
 ) -> Dict[str, Any]:
-    """§13.1: weighted seller score for one eligible candidate product.
+    """13.1: weighted seller score for one eligible candidate product.
 
-    needed_quantity, if given, triggers the §13.3 quantity-split penalty
+    needed_quantity, if given, triggers the 13.3 quantity-split penalty
     when the candidate can't cover the full amount alone.
     """
     inventory_confidence = InventoryConfidenceService.get_score_for_product(product.id)

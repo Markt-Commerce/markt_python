@@ -231,7 +231,7 @@ class WalletService:
         amount: float,
         reason: Optional[str] = None,
     ) -> WalletEntry:
-        """§11.8: refund a single unfulfillable item -- see
+        """11.8: refund a single unfulfillable item -- see
         OrderService.refund_unresolved_item. Same ORDER_REFUND reference
         type as the whole-order refund above, just keyed by item id
         instead of order id -- OrderService._get_total_refunded sums both

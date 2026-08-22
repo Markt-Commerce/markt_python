@@ -1,5 +1,5 @@
 """Unit tests for FulfilmentService: seller accept/decline/timeout of an
-item allocation (§12.1-12.2)."""
+item allocation (12.1-12.2)."""
 
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -10,6 +10,7 @@ import pytest
 from app.fulfilment.models import FulfilmentAllocation, FulfilmentAllocationStatus
 from app.fulfilment.services import FulfilmentService
 from app.libs.errors import ConflictError, ForbiddenError, NotFoundError
+from app.orders.events import OrderEventType
 from app.orders.models import FulfilmentPreference
 from app.payments.models import PaymentStatus
 
@@ -27,7 +28,7 @@ def _allocation(status, **overrides):
 @patch("app.fulfilment.services.NotificationService.create_notification")
 @patch("app.fulfilment.services.session_scope")
 def test_create_allocation_notifies_seller(mock_scope, mock_notify):
-    order_item = SimpleNamespace(product_id="PRD_1")
+    order_item = SimpleNamespace(product_id="PRD_1", order_id="ORD_1")
     seller = SimpleNamespace(user_id="USR_SELLER1")
     fetched = SimpleNamespace(id=99)
     session = MagicMock()
@@ -50,13 +51,19 @@ def test_create_allocation_notifies_seller(mock_scope, mock_notify):
     assert call_kwargs["user_id"] == "USR_SELLER1"
     assert call_kwargs["reference_id"] == "99"
 
+    # 14.2: the original (non-reroute) allocation emits ITEM_ALLOCATED,
+    # not ITEM_REROUTED.
+    emitted_event = session.add.call_args_list[1][0][0]
+    assert emitted_event.event_type == OrderEventType.ITEM_ALLOCATED
+    assert emitted_event.order_id == "ORD_1"
+
 
 @patch("app.fulfilment.services.NotificationService.create_notification")
 @patch("app.fulfilment.services.session_scope")
 def test_create_allocation_skips_notification_when_seller_missing(
     mock_scope, mock_notify
 ):
-    order_item = SimpleNamespace(product_id="PRD_1")
+    order_item = SimpleNamespace(product_id="PRD_1", order_id="ORD_1")
     session = MagicMock()
     session.query.return_value.get.side_effect = [
         order_item,
@@ -77,20 +84,29 @@ def test_create_allocation_uses_explicit_product_id_for_reroutes(
     mock_scope, mock_notify
 ):
     """A reroute-created allocation passes product_id explicitly (the
-    replacement seller's own Product row) and must not look up
-    OrderItem.product_id at all."""
+    replacement seller's own Product row) and must not use
+    OrderItem.product_id's value -- OrderItem is still looked up (now
+    unconditionally) for its order_id, needed for the 14.2 event log."""
+    order_item = SimpleNamespace(product_id="PRD_ORIGINAL", order_id="ORD_1")
     seller = SimpleNamespace(user_id="USR_SELLER1")
     fetched = SimpleNamespace(id=99)
     session = MagicMock()
     session.add.side_effect = lambda obj: setattr(obj, "id", 99)
-    session.query.return_value.get.side_effect = [seller, fetched]
+    session.query.return_value.get.side_effect = [order_item, seller, fetched]
 
     mock_scope.return_value.__enter__.return_value = session
 
     FulfilmentService.create_allocation(10, 7, 2, product_id="PRD_REPLACEMENT")
 
-    added = session.add.call_args[0][0]
+    # First add() call is the FulfilmentAllocation itself -- a second one
+    # follows for the 14.2 OrderEvent this now also emits.
+    added = session.add.call_args_list[0][0][0]
     assert added.product_id == "PRD_REPLACEMENT"
+
+    # An explicit product_id is exactly the reroute signal -- ITEM_REROUTED,
+    # not ITEM_ALLOCATED.
+    emitted_event = session.add.call_args_list[1][0][0]
+    assert emitted_event.event_type == OrderEventType.ITEM_REROUTED
 
 
 @patch("app.fulfilment.services.session_scope")
@@ -132,12 +148,14 @@ def _accept_query_side_effect(fa_mock, oi_mock, product_mock):
 @patch("app.fulfilment.services.NotificationService.create_notification")
 @patch("app.fulfilment.services.session_scope")
 def test_accept_gates_material_substitution_for_ask_preference(mock_scope, mock_notify):
-    """§6.1: an ASK buyer whose replacement seller's price differs from the
+    """6.1: an ASK buyer whose replacement seller's price differs from the
     original lands at AWAITING_BUYER_APPROVAL, not ACCEPTED, and is notified."""
     allocation = _allocation(
         FulfilmentAllocationStatus.AWAITING_SELLER, product_id="PRD_2"
     )
     order_item = SimpleNamespace(
+        id=10,
+        order_id="ORD_1",
         fulfilment_preference=FulfilmentPreference.ASK,
         price=1000.0,
         order=SimpleNamespace(buyer=SimpleNamespace(user_id="USR_BUYER1")),
@@ -173,6 +191,8 @@ def test_accept_same_price_ask_proceeds_silently(mock_scope, mock_notify):
         FulfilmentAllocationStatus.AWAITING_SELLER, product_id="PRD_2"
     )
     order_item = SimpleNamespace(
+        id=10,
+        order_id="ORD_1",
         fulfilment_preference=FulfilmentPreference.ASK,
         price=1000.0,
         order=SimpleNamespace(buyer=SimpleNamespace(user_id="USR_BUYER1")),
@@ -207,6 +227,8 @@ def test_accept_auto_preference_ignores_price_difference(mock_scope, mock_notify
         FulfilmentAllocationStatus.AWAITING_SELLER, product_id="PRD_2"
     )
     order_item = SimpleNamespace(
+        id=10,
+        order_id="ORD_1",
         fulfilment_preference=FulfilmentPreference.AUTO,
         price=1000.0,
         order=SimpleNamespace(buyer=SimpleNamespace(user_id="USR_BUYER1")),
@@ -305,7 +327,9 @@ def test_cancel_after_accept_rejects_from_awaiting_seller(mock_scope):
 @patch("app.fulfilment.services.session_scope")
 def test_buyer_approve_reroute_transitions_to_accepted(mock_scope):
     allocation = _allocation(FulfilmentAllocationStatus.AWAITING_BUYER_APPROVAL)
-    order_item = SimpleNamespace(order=SimpleNamespace(buyer_id="BYR_1"))
+    order_item = SimpleNamespace(
+        id=10, order_id="ORD_1", order=SimpleNamespace(buyer_id="BYR_1")
+    )
 
     fa_mock = MagicMock()
     fa_mock.filter_by.return_value.first.return_value = allocation
@@ -324,7 +348,9 @@ def test_buyer_approve_reroute_transitions_to_accepted(mock_scope):
 @patch("app.fulfilment.services.session_scope")
 def test_buyer_approve_reroute_raises_forbidden_for_wrong_buyer(mock_scope):
     allocation = _allocation(FulfilmentAllocationStatus.AWAITING_BUYER_APPROVAL)
-    order_item = SimpleNamespace(order=SimpleNamespace(buyer_id="BYR_1"))
+    order_item = SimpleNamespace(
+        id=10, order_id="ORD_1", order=SimpleNamespace(buyer_id="BYR_1")
+    )
 
     fa_mock = MagicMock()
     fa_mock.filter_by.return_value.first.return_value = allocation
@@ -348,7 +374,9 @@ def test_buyer_reject_reroute_releases_reservation_and_retries(
     allocation = _allocation(
         FulfilmentAllocationStatus.AWAITING_BUYER_APPROVAL, reservation_id="RSV_1"
     )
-    order_item = SimpleNamespace(order=SimpleNamespace(buyer_id="BYR_1"))
+    order_item = SimpleNamespace(
+        id=10, order_id="ORD_1", order=SimpleNamespace(buyer_id="BYR_1")
+    )
 
     fa_mock = MagicMock()
     fa_mock.filter_by.return_value.first.return_value = allocation
@@ -548,7 +576,7 @@ def test_expire_stale_buyer_approvals_times_out_and_refunds(
     mock_release.assert_called_once_with(["RSV_1"])
     mock_refund.assert_called_once()
     assert mock_refund.call_args.args[0] == allocation.order_item_id
-    # §9.1: no substitution retry on an ASK timeout, unlike decline/timeout.
+    # 9.1: no substitution retry on an ASK timeout, unlike decline/timeout.
     mock_reroute.assert_not_called()
 
 

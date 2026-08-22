@@ -64,7 +64,7 @@ class InventoryService:
     def get_available_quantity(
         product_id: str, variant_id: Optional[int] = None
     ) -> int:
-        """available = reported_quantity - active_reserved_quantity (§8)."""
+        """available = reported_quantity - active_reserved_quantity (8)."""
         with session_scope() as session:
             reported = InventoryService.get_reported_quantity(
                 session, product_id, variant_id
@@ -81,7 +81,7 @@ class InventoryService:
         quantity: int,
         variant_id: Optional[int] = None,
     ) -> InventoryReservation:
-        """Atomically reserve stock for a buyer (§8.2).
+        """Atomically reserve stock for a buyer (8.2).
 
         Locks the product/inventory row that owns the reported quantity so
         two concurrent reservations against the same stock can never both
@@ -89,7 +89,7 @@ class InventoryService:
         the first's transaction commits, then re-reads with the first
         reservation already counted.
 
-        Confidence-gated securing (§8.3): High -> reserve normally (HELD
+        Confidence-gated securing (8.3): High -> reserve normally (HELD
         immediately). Medium -> reserve, but flag needs_verification so a
         follow-up check can happen (no verification workflow consumes this
         flag yet). Low -> left at REQUESTED rather than promoted to HELD,
@@ -173,7 +173,7 @@ class InventoryService:
     def confirm_reservations(
         session, reservation_ids: List[str], order_id: str
     ) -> None:
-        """Confirm reservations into a just-created order (§8.1: -> CONFIRMED),
+        """Confirm reservations into a just-created order (8.1: -> CONFIRMED),
         called from within the same transaction that creates the order (see
         PaymentService.complete_checkout_payment). Idempotent: a reservation
         already at CONFIRMED (or further along) is left alone."""

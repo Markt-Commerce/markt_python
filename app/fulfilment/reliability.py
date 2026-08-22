@@ -1,6 +1,6 @@
-"""Seller Reliability (§13.2): a scored, versioned estimate of how
+"""Seller Reliability (13.2): a scored, versioned estimate of how
 dependably a seller responds to and fulfils allocations -- separate from
-Inventory Confidence (§8.3, Phase 3), which is about whether a specific
+Inventory Confidence (8.3, Phase 3), which is about whether a specific
 product is actually in stock, not about the seller's own behaviour.
 
 Same "real where possible, honest placeholder where not" treatment as
@@ -10,7 +10,7 @@ yet, Phase 6's own reroute loop is the first thing that will start
 generating that signal), so it falls back to a neutral prior rather than
 a fabricated measurement.
 
-§13.4 anti-gaming layer: applied ON TOP of the §13.2 five-weight formula
+13.4 anti-gaming layer: applied ON TOP of the 13.2 five-weight formula
 above, not folded into it -- those weights are spec-mandated as-is.
 cancellation_penalty is a multiplicative deduction proportional to how
 often the seller's accepted allocations end in CANCELLED_BY_SELLER
@@ -41,7 +41,7 @@ from .models import (
 )
 from .services import SELLER_RESPONSE_TIMEOUT_MINUTES
 
-# §13.2 weights.
+# 13.2 weights.
 WEIGHTS = {
     "acceptance": 0.30,
     "response_rate": 0.20,
@@ -53,13 +53,13 @@ WEIGHTS = {
 SCORE_VERSION = 1
 LOOKBACK_DAYS = 30
 
-# §13.4: how much of the base score a seller can lose to cancellation --
+# 13.4: how much of the base score a seller can lose to cancellation --
 # multiplicative, so a 100% accept-then-cancel rate would zero the score
 # out entirely; a 30% rate costs 15% of it (0.30 * 0.5).
 CANCELLATION_PENALTY_WEIGHT = 0.5
 # A response landing in the final 15% of the seller's response window
 # counts as "last-second" for anti-gaming purposes -- distinct from (and
-# coarser than) the continuous response-time decay already in §13.1's
+# coarser than) the continuous response-time decay already in 13.1's
 # ranking formula; this is a pattern-flag, not a score input.
 LAST_SECOND_WINDOW_RATE = 0.15
 # Crossing either of these (with enough samples to mean something --
@@ -188,10 +188,10 @@ class SellerReliabilityService:
     def _cancellation_stats(
         session, seller_id: int, cutoff: datetime
     ) -> "tuple[float, int]":
-        """§13.4: (cancellation_rate, sample_size) -- fraction of the
+        """13.4: (cancellation_rate, sample_size) -- fraction of the
         seller's accepted allocations that were later CANCELLED_BY_SELLER
         rather than left standing. Zero-rate/zero-sample rather than None
-        when there's nothing to measure -- unlike the §13.2 components
+        when there's nothing to measure -- unlike the 13.2 components
         above, this isn't itself one of the weighted formula's inputs, so
         there's no neutral-prior fallback to reason about; "no data" and
         "no cancellations" both correctly mean "no penalty."""
@@ -219,7 +219,7 @@ class SellerReliabilityService:
     def _last_second_response_stats(
         session, seller_id: int, cutoff: datetime
     ) -> "tuple[float, int]":
-        """§13.4: (last_second_rate, sample_size) -- fraction of the
+        """13.4: (last_second_rate, sample_size) -- fraction of the
         seller's first responses that landed in the final
         LAST_SECOND_WINDOW_RATE of their response window. A response with
         a non-positive window (bad data) is skipped, not counted either
@@ -310,7 +310,7 @@ class SellerReliabilityService:
                 + WEIGHTS["response_time"] * response_time
             )
 
-            # §13.4: multiplicative penalty on top of the §13.2 formula
+            # 13.4: multiplicative penalty on top of the 13.2 formula
             # above (that formula's own weights are unchanged).
             cancellation_penalty = round(
                 cancellation_rate * CANCELLATION_PENALTY_WEIGHT, 4
@@ -374,7 +374,7 @@ class SellerReliabilityService:
     @staticmethod
     def get_response_rate(seller_id: int) -> float:
         """Last computed Response Rate component, or the neutral prior --
-        reused by the §13.1 ranking scorer's "Response Reliability" input
+        reused by the 13.1 ranking scorer's "Response Reliability" input
         rather than recomputed separately, since it's the same signal."""
         with session_scope() as session:
             record = (

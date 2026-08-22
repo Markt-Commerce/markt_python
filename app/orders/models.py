@@ -29,11 +29,11 @@ class Order(BaseModel, UniqueIdMixin):
     shipping_fee = db.Column(db.Float)
     tax = db.Column(db.Float)
     discount = db.Column(db.Float)
-    # Buyer-facing Service Fee (§11.3, Phase 0: 2.5%, floor ₦25, ceiling
+    # Buyer-facing Service Fee (11.3, Phase 0: 2.5%, floor ₦25, ceiling
     # ₦1,000). Nullable: orders from the pre-existing order-first checkout
     # flow predate this fee and never set it.
     service_fee = db.Column(db.Float, nullable=True)
-    # Reliability Fee (§11.2, Phase 0: 10% of order value, capped ₦1,500) --
+    # Reliability Fee (11.2, Phase 0: 10% of order value, capped ₦1,500) --
     # opt-in, and only ever actually charged if a reroute fires. Rerouting
     # doesn't exist yet (Phase 6), so today this is toggle + estimate only;
     # reliability_fee_estimate is NEVER added to `total`/captured amount.
@@ -87,8 +87,8 @@ class Order(BaseModel, UniqueIdMixin):
 
 
 class FulfilmentPreference(Enum):
-    """§6: the buyer's substitution preference, set at checkout. Stored per
-    OrderItem (matching the §5.1 data model) rather than only on Order --
+    """6: the buyer's substitution preference, set at checkout. Stored per
+    OrderItem (matching the 5.1 data model) rather than only on Order --
     the rerouting engine (app.fulfilment.rerouting) reads it per item, and
     this avoids a join back to Order every time it does. In practice the
     buyer picks one preference for the whole order at checkout and it's
@@ -97,13 +97,13 @@ class FulfilmentPreference(Enum):
 
     # Markt may automatically reroute within the market. Default.
     AUTO = "auto"
-    # Markt may find a candidate but must get buyer approval (§6.1) before
+    # Markt may find a candidate but must get buyer approval (6.1) before
     # committing a material substitution -- a non-material one (same
     # product/variant, same price, different seller) still proceeds
     # silently, same as AUTO.
     ASK = "ask"
     # Only the originally chosen seller may fulfil; no rerouting at all --
-    # a decline/timeout skips straight to escalation (§7.1 step 2).
+    # a decline/timeout skips straight to escalation (7.1 step 2).
     SELLER_ONLY = "seller_only"
 
 
@@ -148,7 +148,7 @@ class OrderItem(BaseModel, StatusMixin):
     # owed) -- lets the settlement worker query "still pending" cheaply
     # without re-deriving that from the wallet ledger.
     settled_at = db.Column(db.DateTime, nullable=True)
-    # §6: buyer substitution preference for this item. Nullable-in-effect
+    # 6: buyer substitution preference for this item. Nullable-in-effect
     # via the default -- old-flow orders (cart checkout, pre-Phase 6) never
     # set this explicitly and get AUTO, which matches their actual
     # behaviour today (no rerouting existed before this, so nothing changes

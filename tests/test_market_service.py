@@ -1,5 +1,5 @@
 """Unit tests for MarketService: seller-market assignment and the
-geocode-distance verification check (§7.2, Phase 6 blocker resolution)."""
+geocode-distance verification check (7.2, Phase 6 blocker resolution)."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch

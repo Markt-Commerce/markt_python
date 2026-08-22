@@ -1,6 +1,6 @@
 """Tests for the inventory maintenance tasks: reservation expiry
-(§8.1: HELD -> EXPIRED) and scheduled confidence-score recomputation
-(§8.3)."""
+(8.1: HELD -> EXPIRED) and scheduled confidence-score recomputation
+(8.3)."""
 
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch

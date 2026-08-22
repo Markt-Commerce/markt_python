@@ -1,7 +1,7 @@
 # python imports
 from datetime import datetime, timedelta
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -38,6 +38,7 @@ from app.orders.shipping import (
     normalize_shipping_address,
     shipping_address_to_model_kwargs,
 )
+from app.orders.events import ActorType, OrderEventService, OrderEventType
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +150,7 @@ class OrderService:
         )
         session.add(shipping_address_obj)
 
-        # §6: one preference per order, set at checkout, stamped onto every
+        # 6: one preference per order, set at checkout, stamped onto every
         # item -- see FulfilmentPreference's docstring for why it's stored
         # per-item rather than requiring a join back to Order later. Falls
         # back to AUTO for a missing/unrecognised value rather than
@@ -178,6 +179,16 @@ class OrderService:
         session.flush()
         order.order_number = order.generate_order_number()
         session.flush()
+
+        OrderEventService.emit(
+            session,
+            order_id=order.id,
+            event_type=OrderEventType.ORDER_CREATED,
+            actor_type=ActorType.BUYER,
+            actor_id=str(buyer_id),
+            metadata={"item_count": len(snapshot["items"]), "total": order.total},
+        )
+
         return order
 
     @staticmethod
@@ -214,6 +225,32 @@ class OrderService:
                     db.joinedload(Order.payments),
                 )
                 .get(order_id)
+            )
+
+    @staticmethod
+    def get_order_events(order_id: str, buyer_id: int) -> List["OrderEvent"]:
+        """14.2/15: buyer-facing fulfilment history for one order --
+        "the buyer can inspect fulfilment history (who fulfilled, why a
+        substitution happened), sourced from the event log." Deliberately
+        NOT filtered down to a "customer-friendly" subset -- 15's
+        notify/don't-notify distinction is about proactive notifications,
+        not what's inspectable on request; the full chronological history
+        (including a first seller's decline before a reroute succeeded)
+        is exactly the transparency this is for."""
+        from .events import OrderEvent
+
+        with session_scope() as session:
+            order = session.query(Order).filter_by(id=order_id).first()
+            if not order:
+                raise NotFoundError("Order not found")
+            if order.buyer_id != buyer_id:
+                raise ForbiddenError("You can only view your own order's history")
+
+            return (
+                session.query(OrderEvent)
+                .filter_by(order_id=order_id)
+                .order_by(OrderEvent.created_at.asc())
+                .all()
             )
 
     @staticmethod
@@ -409,7 +446,7 @@ class OrderService:
             captured_amount = OrderService._get_completed_payment_amount(order)
             # Only refund what hasn't already gone out -- an item may have
             # been refunded on its own earlier (see refund_unresolved_item,
-            # §11.8/§9.1) before the buyer cancels the rest of the order.
+            # 11.8/9.1) before the buyer cancels the rest of the order.
             already_refunded = OrderService._get_total_refunded(session, order)
             paid_amount = round(max(captured_amount - already_refunded, 0.0), 2)
             buyer_user_id = order.buyer.user_id if order.buyer else None
@@ -433,6 +470,15 @@ class OrderService:
                     PaymentStatus.PARTIALLY_REFUNDED,
                 ):
                     payment.transition_to(PaymentStatus.REFUNDED)
+
+            OrderEventService.emit(
+                session,
+                order_id=order_id,
+                event_type=OrderEventType.ORDER_CANCELLED,
+                actor_type=ActorType.BUYER,
+                actor_id=str(buyer_id),
+                metadata={"reason": reason, "refund_amount": paid_amount},
+            )
 
             session.flush()
 
@@ -724,12 +770,12 @@ class OrderService:
     def refund_unresolved_item(
         order_item_id: int, reason: Optional[str] = None
     ) -> Optional["WalletEntry"]:
-        """§11.8 / §9.1: refund a single item that couldn't be fulfilled,
+        """11.8 / 9.1: refund a single item that couldn't be fulfilled,
         without touching the rest of the order -- distinct from
         cancel_order (whole order, buyer-initiated) and approve_return
         (whole order, post-delivery). Today's only caller is the ASK
         timeout worker (app.fulfilment.tasks.expire_stale_buyer_approvals,
-        §9.1's "remove the unresolved item and adjust/refund" MVP policy),
+        9.1's "remove the unresolved item and adjust/refund" MVP policy),
         but this is a standalone reusable primitive -- flagged as needed
         back in Phase 4, genuinely blocked until an item-level "couldn't
         be fulfilled" outcome existed to call it from.
@@ -787,6 +833,17 @@ class OrderService:
                     payment.transition_to(PaymentStatus.PARTIALLY_REFUNDED)
 
             buyer_user_id = order.buyer.user_id if order.buyer else None
+
+            OrderEventService.emit(
+                session,
+                order_id=order.id,
+                order_item_id=order_item_id,
+                event_type=OrderEventType.ITEM_REFUNDED,
+                actor_type=ActorType.SYSTEM,
+                metadata={"reason": reason, "refund_amount": refund_amount},
+                idempotency_key=f"event:item_refunded:{order_item_id}",
+            )
+
             session.flush()
 
         if refund_amount > 0 and buyer_user_id:

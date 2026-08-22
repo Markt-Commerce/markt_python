@@ -43,6 +43,7 @@ class Database:
                 NicheCategory,
             )
             from app.orders.models import Order, Shipment
+            from app.orders.events import OrderEvent
             from app.payments.models import Payment, Transaction
             from app.socials.models import (
                 ProductReview,

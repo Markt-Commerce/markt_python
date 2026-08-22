@@ -19,6 +19,7 @@ def pytest_configure():
     import app.media.models  # noqa: F401
     import app.notifications.models  # noqa: F401
     import app.orders.models  # noqa: F401
+    import app.orders.events  # noqa: F401
     import app.payments.models  # noqa: F401
     import app.products.models  # noqa: F401
     import app.requests.models  # noqa: F401

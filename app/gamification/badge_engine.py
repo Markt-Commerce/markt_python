@@ -1,4 +1,4 @@
-"""Criteria DSL evaluator for badges (spec §4.3, Appendix B).
+"""Criteria DSL evaluator for badges (spec 4.3, Appendix B).
 
 criteria_json shape:
     {

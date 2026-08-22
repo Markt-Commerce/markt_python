@@ -27,6 +27,7 @@ from .schemas import (
     OrderReturnRequestSchema,
     OrderReturnResponseSchema,
     OrderReturnActionSchema,
+    OrderEventSchema,
 )
 
 bp = Blueprint("orders", __name__, description="Order operations", url_prefix="/orders")
@@ -97,6 +98,24 @@ class OrderDetail(MethodView):
             # 404 (not 403) so order ids can't be probed for existence
             abort(404, message="Order not found")
         return order
+
+
+@bp.route("/<string:order_id>/events")
+class OrderEventList(MethodView):
+    @login_required
+    @buyer_required
+    @bp.response(200, OrderEventSchema(many=True))
+    def get(self, order_id):
+        """14.2/15: buyer-facing fulfilment history for one order --
+        who fulfilled each item, and why a substitution happened."""
+        try:
+            return OrderService.get_order_events(
+                order_id, current_user.buyer_account.id
+            )
+        except APIError as e:
+            message = getattr(e, "message", str(e))
+            status_code = getattr(e, "status_code", 400)
+            abort(status_code, message=message)
 
 
 @bp.route("/seller")

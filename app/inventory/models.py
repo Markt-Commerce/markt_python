@@ -18,7 +18,7 @@ class InventoryReservation(BaseModel, StatusMixin, UniqueIdMixin):
         RELEASED = "released"
 
     # Single source of truth for legal status transitions, same transition_to
-    # pattern as OrderItem/Payment (§8.1). RELEASED covers an explicit
+    # pattern as OrderItem/Payment (8.1). RELEASED covers an explicit
     # release (buyer abandons checkout, seller can't confirm) distinct from
     # EXPIRED (TTL lapsed with no action taken).
     VALID_STATUS_TRANSITIONS = {
@@ -37,7 +37,7 @@ class InventoryReservation(BaseModel, StatusMixin, UniqueIdMixin):
     quantity = db.Column(db.Integer, nullable=False)
     expires_at = db.Column(db.DateTime, nullable=False)
     # Set when the product's confidence band was Medium at reserve time
-    # (§8.3: "reserve + verify quickly"). No verification workflow consumes
+    # (8.3: "reserve + verify quickly"). No verification workflow consumes
     # this yet -- it's a data-model placeholder for a Phase 5/6 follow-up.
     needs_verification = db.Column(db.Boolean, default=False, nullable=False)
 
@@ -62,7 +62,7 @@ class HandlingClass(Enum):
 
 
 class ProductHandling(BaseModel):
-    """Per-product delivery-handling constraints (§10.5). Only the data
+    """Per-product delivery-handling constraints (10.5). Only the data
     model is built here -- per Phase 0, max_dwell_minutes is NOT enforced
     in MVP (rerouting keeps a product with its original seller, so
     freshness isn't at risk in practice); the column exists so that
@@ -87,7 +87,7 @@ class ProductHandling(BaseModel):
 
 
 class InventoryConfidenceScore(BaseModel):
-    """Last computed Inventory Confidence score per product (§8.3).
+    """Last computed Inventory Confidence score per product (8.3).
     Recomputed on a schedule rather than on every read."""
 
     __tablename__ = "inventory_confidence_scores"
@@ -107,7 +107,7 @@ class InventoryConfidenceScore(BaseModel):
 
 
 class CategoryConfidencePrior(BaseModel):
-    """Cold-start prior (§8.4): seeds a new product/seller's confidence
+    """Cold-start prior (8.4): seeds a new product/seller's confidence
     before there's enough observed behaviour to compute a real score.
     Scoped by category only for now -- Market doesn't exist as a model yet
     (that's Phase 9); add a market_id column and re-scope once it does."""

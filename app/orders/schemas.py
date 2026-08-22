@@ -2,6 +2,7 @@ from marshmallow import Schema, fields, validate
 from app.libs.schemas import PaginationSchema
 from app.products.schemas import ProductSimpleSchema, ProductVariantSchema
 from app.users.schemas import BuyerSimpleSchema
+from .events import OrderEventType, ActorType
 from .models import OrderStatus, OrderItem
 
 
@@ -125,3 +126,14 @@ class OrderItemStatusUpdateSchema(Schema):
 
 class ReviewSchema(Schema):
     pass
+
+
+class OrderEventSchema(Schema):
+    """14.2 / 15: buyer-facing fulfilment-history entry."""
+
+    id = fields.Int(dump_only=True)
+    order_item_id = fields.Int(dump_only=True, allow_none=True)
+    event_type = fields.Enum(OrderEventType, by_value=True, dump_only=True)
+    actor_type = fields.Enum(ActorType, by_value=True, dump_only=True)
+    metadata = fields.Dict(dump_only=True, attribute="event_metadata")
+    created_at = fields.DateTime(dump_only=True)

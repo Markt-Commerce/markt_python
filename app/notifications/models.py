@@ -22,7 +22,7 @@ class NotificationType(Enum):
     REQUEST_CLOSED = "request_closed"
     REQUEST_STATUS_CHANGE = "request_status_change"
     REQUEST_EXPIRED = "request_expired"
-    # §7.4: a new request matching a seller's category (and, for a
+    # 7.4: a new request matching a seller's category (and, for a
     # REROUTE_ENGINE request, their market) has opened -- distinct from
     # REQUEST_OFFER, which notifies the *buyer* that a seller responded.
     NEW_REQUEST_MATCH = "new_request_match"
@@ -31,9 +31,9 @@ class NotificationType(Enum):
     ORDER_PLACED = "order_placed"
     PAYMENT_SUCCESS = "payment_success"
     PAYMENT_FAILED = "payment_failed"
-    # Seller fulfilment notifications (§12.1-12.2)
+    # Seller fulfilment notifications (12.1-12.2)
     FULFILMENT_REQUEST = "fulfilment_request"
-    # §6.1 ASK gate: a reroute-created substitution needs buyer approval
+    # 6.1 ASK gate: a reroute-created substitution needs buyer approval
     # before it commits.
     SUBSTITUTION_APPROVAL_REQUIRED = "substitution_approval_required"
     # Social notifications

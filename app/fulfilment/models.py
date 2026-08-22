@@ -12,7 +12,7 @@ class FulfilmentAllocationStatus(Enum):
     REROUTING = "rerouting"
     PREPARING = "preparing"
     UNFULFILLED = "unfulfilled"
-    # §6.1 ASK gate: the replacement seller has accepted a reroute-created
+    # 6.1 ASK gate: the replacement seller has accepted a reroute-created
     # allocation that materially substitutes the buyer's original choice
     # (different price -- see FulfilmentService.accept's docstring), and
     # the buyer's ASK preference means it can't be committed without their
@@ -24,12 +24,12 @@ class FulfilmentAllocationStatus(Enum):
     # Response Rate (app.fulfilment.reliability._RESOLVED excludes it) --
     # only that this particular substitution wasn't acceptable to the buyer.
     BUYER_REJECTED = "buyer_rejected"
-    # §13.4 anti-gaming: a seller backs out AFTER accepting (or even
+    # 13.4 anti-gaming: a seller backs out AFTER accepting (or even
     # starting prep) -- distinct from DECLINED, which happens before any
     # commitment. This is the "accept-then-cancel" pattern the spec names
     # explicitly; see FulfilmentService.cancel_after_accept and
     # reliability.py's cancellation-penalty component. Still pre-dispatch
-    # (§10.1: nothing dispatches until fulfilment is locked), so a plain
+    # (10.1: nothing dispatches until fulfilment is locked), so a plain
     # reroute is always possible from here -- there's no rider/pickup
     # complication to unwind.
     CANCELLED_BY_SELLER = "cancelled_by_seller"
@@ -77,7 +77,7 @@ class FulfilmentAllocation(BaseModel):
         FulfilmentAllocationStatus.AWAITING_BUYER_APPROVAL: [
             FulfilmentAllocationStatus.ACCEPTED,
             FulfilmentAllocationStatus.BUYER_REJECTED,
-            # §9.1 ASK timeout: straight to UNFULFILLED, not REROUTING --
+            # 9.1 ASK timeout: straight to UNFULFILLED, not REROUTING --
             # the MVP policy is "do not substitute after an ASK timeout,"
             # so there is deliberately no next-candidate retry from here
             # (contrast BUYER_REJECTED, an explicit "not that one" which
@@ -137,11 +137,11 @@ class FulfilmentAllocation(BaseModel):
         nullable=False,
     )
     seller_response_deadline = db.Column(db.DateTime, nullable=False)
-    # §9.1: set only when this allocation enters AWAITING_BUYER_APPROVAL
-    # (see FulfilmentService.accept's §6.1 ASK gate) -- how long Markt
+    # 9.1: set only when this allocation enters AWAITING_BUYER_APPROVAL
+    # (see FulfilmentService.accept's 6.1 ASK gate) -- how long Markt
     # waits for the buyer to approve/reject a material substitution before
     # giving up on it entirely (distinct clock from seller_response_deadline,
-    # same "earliest relevant deadline wins" principle as §9's other two).
+    # same "earliest relevant deadline wins" principle as 9's other two).
     buyer_response_deadline = db.Column(db.DateTime, nullable=True)
 
     order_item = db.relationship("OrderItem")
@@ -149,7 +149,7 @@ class FulfilmentAllocation(BaseModel):
     product = db.relationship("Product")
 
     __table_args__ = (
-        # "One active fulfilment owner per allocation-quantity" (§14.5,
+        # "One active fulfilment owner per allocation-quantity" (14.5,
         # moved here from Phase 2 once this model existed to constrain).
         # Partial unique index: only ACTIVE_STATUSES rows are constrained,
         # so history from earlier reroute attempts never collides with a
@@ -174,8 +174,8 @@ class FulfilmentAllocation(BaseModel):
 
 
 class SellerReliabilityScore(BaseModel):
-    """Last computed Seller Reliability score (§13.2), separate from
-    Inventory Confidence (§8.3, per-product). Recomputed on a schedule,
+    """Last computed Seller Reliability score (13.2), separate from
+    Inventory Confidence (8.3, per-product). Recomputed on a schedule,
     versioned so a future change to the weights/formula doesn't corrupt
     the meaning of historical scores already referenced elsewhere."""
 
@@ -191,13 +191,13 @@ class SellerReliabilityScore(BaseModel):
     fulfilment_rate_component = db.Column(db.Float, nullable=False)
     inventory_accuracy_component = db.Column(db.Float, nullable=False)
     response_time_component = db.Column(db.Float, nullable=False)
-    # §13.4 anti-gaming layer, applied ON TOP of the §13.2 weighted formula
+    # 13.4 anti-gaming layer, applied ON TOP of the 13.2 weighted formula
     # above (that formula's five weights are spec-mandated and untouched;
     # this is a separate multiplicative penalty -- see reliability.py's
     # module docstring). Fraction of the seller's accepted allocations in
     # the lookback window that were CANCELLED_BY_SELLER (accept-then-cancel).
     cancellation_penalty = db.Column(db.Float, nullable=False, default=0.0)
-    # Crossed a §13.4 anti-gaming threshold (chronic accept-then-cancel
+    # Crossed a 13.4 anti-gaming threshold (chronic accept-then-cancel
     # and/or suspiciously last-second responses -- see
     # reliability.py's GAMING_FLAG_* constants). Mirrors
     # MarketVerificationStatus.FLAGGED's pattern: a flagged seller is

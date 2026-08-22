@@ -1,5 +1,5 @@
-"""Unit tests for the per-item refund primitive (§11.8) and the cumulative
-escrow invariant it required (§9.1's ASK timeout is today's only caller,
+"""Unit tests for the per-item refund primitive (11.8) and the cumulative
+escrow invariant it required (9.1's ASK timeout is today's only caller,
 via FulfilmentService.expire_stale_buyer_approvals)."""
 
 from types import SimpleNamespace
@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.libs.errors import NotFoundError, ValidationError
+from app.orders.events import OrderEventType
 from app.orders.models import OrderItem
 from app.orders.services import OrderService
 from app.payments.models import Payment, PaymentStatus
@@ -144,7 +145,7 @@ def test_cancel_order_refunds_only_remaining_amount_after_prior_item_refund(
     mock_scope, mock_restore, mock_refund
 ):
     """cancel_order must not re-refund money already paid out by an
-    earlier per-item refund (§9.1 ASK timeout, or any future partial
+    earlier per-item refund (9.1 ASK timeout, or any future partial
     refund) -- only the remainder still owed."""
     from app.orders.models import OrderStatus
 
@@ -169,3 +170,9 @@ def test_cancel_order_refunds_only_remaining_amount_after_prior_item_refund(
 
     mock_refund.assert_called_once_with("USR_BUYER1", "ORD_1", 700.0)
     assert payment.status == PaymentStatus.REFUNDED
+
+    # 14.2: cancel_order's only session.add() call is the ORDER_CANCELLED
+    # event (order/items/payments are mutated in place, not newly added).
+    emitted_event = session.add.call_args[0][0]
+    assert emitted_event.event_type == OrderEventType.ORDER_CANCELLED
+    assert emitted_event.order_id == "ORD_1"

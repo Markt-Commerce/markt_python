@@ -1,5 +1,5 @@
 """Unit tests for InventoryReservation.transition_to, the single source of
-truth for reservation status changes (§8.1)."""
+truth for reservation status changes (8.1)."""
 
 import pytest
 
