@@ -258,6 +258,16 @@ class OrderService:
         return 0.0
 
     @staticmethod
+    def _assert_refund_within_captured(order: Order, refund_amount: float) -> None:
+        """Escrow invariant: a refund can never exceed what was actually captured."""
+        captured = OrderService._get_completed_payment_amount(order)
+        if captured and refund_amount > captured + 0.01:
+            raise ValidationError(
+                f"Refund amount {refund_amount} exceeds captured payment amount "
+                f"{captured} for order {order.id}"
+            )
+
+    @staticmethod
     def cancel_order(order_id: str, buyer_id: int, reason: Optional[str] = None):
         """Cancel an order on behalf of the buyer."""
         from app.wallet.services import WalletService
@@ -301,6 +311,7 @@ class OrderService:
                     item.status = OrderItem.Status.CANCELLED
 
             if paid_amount > 0:
+                OrderService._assert_refund_within_captured(order, paid_amount)
                 for payment in order.payments:
                     if payment.status == PaymentStatus.COMPLETED:
                         payment.transition_to(PaymentStatus.REFUNDED)
@@ -548,6 +559,8 @@ class OrderService:
             )
             if refund_amount <= 0:
                 refund_amount = order.total or 0.0
+
+            OrderService._assert_refund_within_captured(order, refund_amount)
 
             buyer_user_id = order.buyer.user_id if order.buyer else None
             order_id = order.id

@@ -43,3 +43,44 @@ def test_credit_rejects_non_positive_amount():
             "ref-1",
         )
     assert "positive" in exc.value.message
+
+
+def test_credit_is_idempotent_for_repeated_key():
+    """A second credit call with the same idempotency key must not double-pay."""
+    existing_entry = SimpleNamespace(id=1)
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.first.return_value = (
+        existing_entry
+    )
+
+    with patch("app.wallet.services.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        result = WalletService.credit(
+            "USR_1",
+            500.0,
+            WalletReferenceType.ORDER_REFUND,
+            "ORD_1",
+            idempotency_key="refund:order:ORD_1",
+        )
+
+    assert result is existing_entry
+    session.add.assert_not_called()
+
+
+def test_settle_order_item_rejects_invalid_commission_rate():
+    """Commission rate must stay within [0, 1] so settlement can never exceed gross."""
+    item = SimpleNamespace(
+        id=42,
+        order_id="ORD_1",
+        price=10000.0,
+        quantity=1,
+        seller=SimpleNamespace(user_id="USR_SELLER1"),
+    )
+    order = SimpleNamespace(paystack_split_used=False)
+    session = MagicMock()
+    session.query.return_value.get.return_value = order
+
+    with patch("app.wallet.services.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        with pytest.raises(ValidationError):
+            WalletService.settle_order_item(item, commission_rate=1.5)
