@@ -24,7 +24,7 @@ from app.libs.errors import (
 # app imports
 from .models import Payment, Transaction, PaymentStatus, PaymentMethod
 from app.orders.models import Order, OrderStatus, OrderItem
-from app.users.models import User
+from app.users.models import User, Seller
 from app.notifications.services import NotificationService
 from app.notifications.models import NotificationType
 
@@ -488,6 +488,27 @@ class PaymentService:
             return False
 
     # ==================== PRIVATE METHODS ====================
+
+    @staticmethod
+    def _resolve_subaccount_split(order: Order) -> Optional[Dict[str, str]]:
+        """Return Paystack subaccount code when order has a single registered seller."""
+        seller_ids = {item.seller_id for item in order.items if item.seller_id}
+        if len(seller_ids) != 1:
+            return None
+
+        seller_id = next(iter(seller_ids))
+        seller = (
+            order.items[0].seller
+            if order.items and order.items[0].seller_id == seller_id
+            else None
+        )
+        if not seller:
+            with session_scope() as session:
+                seller = session.query(Seller).get(seller_id)
+        if not seller or not seller.paystack_subaccount_code:
+            return None
+
+        return {"subaccount_code": seller.paystack_subaccount_code}
 
     @staticmethod
     def _initialize_paystack_transaction(

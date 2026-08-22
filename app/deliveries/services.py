@@ -719,6 +719,8 @@ class DeliveryService:
 
     @staticmethod
     def confirm_order_qr_code(user_id: str, order_id: str, qr_code: str) -> Dict:
+        from app.wallet.services import WalletService
+
         with session_scope() as session:
             # query the assignment to get the escrow QR code
             assignment = (
@@ -742,17 +744,26 @@ class DeliveryService:
                 )
                 raise ValidationError("Invalid QR code")
 
-            # Mark the order as delivered
             order = session.query(Order).filter_by(id=order_id).first()
             if not order:
                 logger.warning(f"No order found with ID {order_id}")
                 raise NotFoundError("Order not found")
 
-            order.status = OrderStatus.DELIVERED
+            # POD is the trigger for escrow release: settle every item's seller now,
+            # not just items a seller separately marked shipped/delivered themselves.
+            for item in order.items:
+                item.status = OrderItem.Status.DELIVERED
+                WalletService.settle_order_item(item)
+
             assignment.logistical_status = LogisticalStatus.COMPLETED
             session.commit()
 
-            return {"status": "success", "message": "Order marked as delivered"}
+        # Delegate order-level completion (status, realtime event, gamification)
+        # to the single source of truth so the QR path gets the same side effects
+        # as every other way an order can be marked delivered.
+        OrderService.update_order_status(order_id, OrderStatus.DELIVERED)
+
+        return {"status": "success", "message": "Order marked as delivered"}
 
     @staticmethod
     def find_delivery_order_buyer(user_id: str, room_id: str) -> bool:
