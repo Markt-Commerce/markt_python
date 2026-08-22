@@ -30,6 +30,7 @@ class Database:
             from app.users.models import User, Buyer, Seller, UserAddress
             from app.products.models import Product, ProductVariant, ProductInventory
             from app.inventory.models import InventoryReservation
+            from app.fulfilment.models import FulfilmentAllocation
             from app.categories.models import (
                 Category,
                 ProductCategory,

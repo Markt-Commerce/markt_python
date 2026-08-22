@@ -244,6 +244,18 @@ class PaymentService:
 
             session.flush()
             payment_id_for_cache = payment.id
+            item_specs = [
+                (item.id, item.seller_id, item.quantity) for item in order.items
+            ]
+
+        # Open the seller-acceptance window (§12.1-12.2, Phase 5) only
+        # after the order has actually committed -- an allocation (and its
+        # seller notification) must never be created for an order that
+        # turned out not to persist.
+        from app.fulfilment.services import FulfilmentService
+
+        for order_item_id, seller_id, quantity in item_specs:
+            FulfilmentService.create_allocation(order_item_id, seller_id, quantity)
 
         PaymentService._invalidate_payment_cache(payment_id_for_cache)
         return True

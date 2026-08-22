@@ -64,6 +64,10 @@ class NotificationService:
             "title": "System notification",
             "message": "{message}",
         },
+        NotificationType.FULFILMENT_REQUEST: {
+            "title": "New order to fulfil",
+            "message": "{message}",
+        },
         # Buyer request notifications
         NotificationType.REQUEST_OFFER: {
             "title": "New offer",
