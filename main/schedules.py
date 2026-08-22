@@ -66,4 +66,9 @@ CELERYBEAT_SCHEDULE = {
         "schedule": crontab(minute="*/2"),  # Every 2 minutes (10-min reservation TTL)
         "options": {"queue": "default"},
     },
+    "recompute-inventory-confidence-scores": {
+        "task": "app.inventory.tasks.recompute_confidence_scores",
+        "schedule": crontab(hour="*/6"),  # Every 6 hours -- recency decays over days
+        "options": {"queue": "default"},
+    },
 }
