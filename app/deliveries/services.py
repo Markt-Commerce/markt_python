@@ -690,6 +690,19 @@ class DeliveryService:
                 )
 
             assignment.logistical_status = logistical_status
+
+            # Pickup is the item-level equivalent of "shipped" for orders
+            # fulfilled through Markt's own delivery network -- keep OrderItem
+            # in step so a rider-managed order reaches DELIVERED through the
+            # same validated SHIPPED->DELIVERED transition as a seller-managed
+            # one, instead of needing a special case at POD time.
+            if logistical_status == LogisticalStatus.PICKED_UP:
+                order = session.query(Order).filter_by(id=assignment.order_id).first()
+                if order:
+                    for item in order.items:
+                        if item.status == OrderItem.Status.PROCESSING:
+                            item.transition_to(OrderItem.Status.SHIPPED)
+
             session.commit()
 
             return {"status": assignment.logistical_status.value}
@@ -749,10 +762,25 @@ class DeliveryService:
                 logger.warning(f"No order found with ID {order_id}")
                 raise NotFoundError("Order not found")
 
+            if not DeliveryService.is_valid_status_transition(
+                assignment.logistical_status, LogisticalStatus.COMPLETED
+            ):
+                logger.warning(
+                    f"QR confirm attempted for order {order_id} while assignment "
+                    f"is at {assignment.logistical_status}, not DELIVERED_PENDING_QR"
+                )
+                raise ValidationError(
+                    "Delivery is not ready for proof-of-delivery confirmation"
+                )
+
             # POD is the trigger for escrow release: settle every item's seller now,
             # not just items a seller separately marked shipped/delivered themselves.
+            # Cancelled items are skipped entirely -- never transitioned, never paid.
             for item in order.items:
-                item.status = OrderItem.Status.DELIVERED
+                if item.status == OrderItem.Status.CANCELLED:
+                    continue
+                if item.status != OrderItem.Status.DELIVERED:
+                    item.transition_to(OrderItem.Status.DELIVERED)
                 WalletService.settle_order_item(item)
 
             assignment.logistical_status = LogisticalStatus.COMPLETED

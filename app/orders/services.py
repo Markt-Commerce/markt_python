@@ -648,6 +648,9 @@ class SellerOrderService:
 
     @staticmethod
     def update_order_item_status(order_item_id, status, seller_id):
+        order_id = None
+        all_delivered = False
+
         with session_scope() as session:
             item = (
                 session.query(OrderItem)
@@ -659,41 +662,24 @@ class SellerOrderService:
             if not item:
                 raise ValueError("Order item not found")
 
-            valid_transitions = {
-                OrderItem.Status.PENDING: [
-                    OrderItem.Status.PROCESSING,
-                    OrderItem.Status.CANCELLED,
-                ],
-                OrderItem.Status.PROCESSING: [
-                    OrderItem.Status.SHIPPED,
-                    OrderItem.Status.CANCELLED,
-                ],
-                OrderItem.Status.SHIPPED: [OrderItem.Status.DELIVERED],
-                # Other status transitions...
-            }
+            item.transition_to(status)
+            order_id = item.order_id
 
-            if (
-                item.status not in valid_transitions
-                or status not in valid_transitions[item.status]
-            ):
-                raise ValueError(f"Cannot transition from {item.status} to {status}")
-
-            item.status = status
-
-            completed_order_id = None
             if status == OrderItem.Status.DELIVERED:
-                order = session.query(Order).get(item.order_id)
-                if all(i.status == OrderItem.Status.DELIVERED for i in order.items):
-                    order.status = OrderStatus.DELIVERED
-                    completed_order_id = order.id
+                order = session.query(Order).get(order_id)
+                all_delivered = all(
+                    i.status == OrderItem.Status.DELIVERED for i in order.items
+                )
 
                 from app.wallet.services import WalletService
 
                 WalletService.settle_order_item(item)
 
-        # Post-commit: award gamification points once the whole order is delivered.
-        if completed_order_id:
-            OrderService._emit_gam_order_completed(completed_order_id)
+        # Post-commit: delegate order-level completion (status, realtime
+        # event, gamification) to the single source of truth once every item
+        # on the order is in, instead of setting order.status here too.
+        if status == OrderItem.Status.DELIVERED and all_delivered:
+            OrderService.update_order_status(order_id, OrderStatus.DELIVERED)
 
         return item
 

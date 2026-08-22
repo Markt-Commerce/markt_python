@@ -1,4 +1,4 @@
-"""Unit tests for the delivery QR proof-of-delivery flow."""
+"""Unit tests for the delivery QR proof-of-delivery flow and pickup wiring."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -9,6 +9,15 @@ from app.deliveries.models import AssignmentStatus, LogisticalStatus
 from app.deliveries.services import DeliveryService
 from app.libs.errors import ValidationError
 from app.orders.models import OrderItem, OrderStatus
+
+
+def _make_item(id, status, seller_id):
+    """A SimpleNamespace that behaves like a real OrderItem for transition_to."""
+    item = SimpleNamespace(id=id, status=status, seller_id=seller_id)
+    item.transition_to = lambda new_status, _item=item: OrderItem.transition_to(
+        _item, new_status
+    )
+    return item
 
 
 def _session_with(assignment, order):
@@ -33,8 +42,8 @@ def _session_with(assignment, order):
 def test_confirm_order_qr_code_settles_every_item_and_completes_order(
     mock_settle, mock_update_status
 ):
-    item_a = SimpleNamespace(id=1, status=OrderItem.Status.PROCESSING, seller_id=7)
-    item_b = SimpleNamespace(id=2, status=OrderItem.Status.PROCESSING, seller_id=8)
+    item_a = _make_item(1, OrderItem.Status.PROCESSING, seller_id=7)
+    item_b = _make_item(2, OrderItem.Status.SHIPPED, seller_id=8)
     order = SimpleNamespace(id="ORD_1", items=[item_a, item_b])
     assignment = SimpleNamespace(
         escrow_qr_code="QR123",
@@ -58,6 +67,54 @@ def test_confirm_order_qr_code_settles_every_item_and_completes_order(
 
 @patch("app.orders.services.OrderService.update_order_status")
 @patch("app.wallet.services.WalletService.settle_order_item")
+def test_confirm_order_qr_code_skips_cancelled_items(mock_settle, mock_update_status):
+    item_a = _make_item(1, OrderItem.Status.SHIPPED, seller_id=7)
+    item_b = _make_item(2, OrderItem.Status.CANCELLED, seller_id=8)
+    order = SimpleNamespace(id="ORD_1", items=[item_a, item_b])
+    assignment = SimpleNamespace(
+        escrow_qr_code="QR123",
+        status=AssignmentStatus.ACCEPTED,
+        logistical_status=LogisticalStatus.DELIVERED_PENDING_QR,
+    )
+
+    session = _session_with(assignment, order)
+
+    with patch("app.deliveries.services.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        DeliveryService.confirm_order_qr_code("DEL_1", "ORD_1", "QR123")
+
+    assert item_a.status == OrderItem.Status.DELIVERED
+    assert item_b.status == OrderItem.Status.CANCELLED
+    mock_settle.assert_called_once_with(item_a)
+
+
+@patch("app.orders.services.OrderService.update_order_status")
+@patch("app.wallet.services.WalletService.settle_order_item")
+def test_confirm_order_qr_code_rejects_when_not_pending_qr(
+    mock_settle, mock_update_status
+):
+    item_a = _make_item(1, OrderItem.Status.SHIPPED, seller_id=7)
+    order = SimpleNamespace(id="ORD_1", items=[item_a])
+    assignment = SimpleNamespace(
+        escrow_qr_code="QR123",
+        status=AssignmentStatus.ACCEPTED,
+        logistical_status=LogisticalStatus.EN_ROUTE_TO_DROPOFF,
+    )
+
+    session = _session_with(assignment, order)
+
+    with patch("app.deliveries.services.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        with pytest.raises(ValidationError):
+            DeliveryService.confirm_order_qr_code("DEL_1", "ORD_1", "QR123")
+
+    assert item_a.status == OrderItem.Status.SHIPPED
+    mock_settle.assert_not_called()
+    mock_update_status.assert_not_called()
+
+
+@patch("app.orders.services.OrderService.update_order_status")
+@patch("app.wallet.services.WalletService.settle_order_item")
 def test_confirm_order_qr_code_rejects_wrong_code(mock_settle, mock_update_status):
     assignment = SimpleNamespace(
         escrow_qr_code="QR123", status=AssignmentStatus.ACCEPTED
@@ -71,3 +128,45 @@ def test_confirm_order_qr_code_rejects_wrong_code(mock_settle, mock_update_statu
 
     mock_settle.assert_not_called()
     mock_update_status.assert_not_called()
+
+
+def test_update_assignment_status_pickup_ships_processing_items():
+    item_a = _make_item(1, OrderItem.Status.PROCESSING, seller_id=7)
+    item_b = _make_item(2, OrderItem.Status.CANCELLED, seller_id=8)
+    order = SimpleNamespace(id="ORD_1", items=[item_a, item_b])
+    assignment = SimpleNamespace(
+        assignment_id="ASG_1",
+        order_id="ORD_1",
+        logistical_status=LogisticalStatus.ARRIVED_PICKUP,
+    )
+
+    session = _session_with(assignment, order)
+
+    with patch("app.deliveries.services.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        result = DeliveryService.update_assignment_status("DEL_1", "ASG_1", "picked_up")
+
+    assert result == {"status": "PICKED_UP"}
+    assert item_a.status == OrderItem.Status.SHIPPED
+    assert item_b.status == OrderItem.Status.CANCELLED
+
+
+def test_update_assignment_status_leaves_items_alone_for_other_transitions():
+    item_a = _make_item(1, OrderItem.Status.PROCESSING, seller_id=7)
+    order = SimpleNamespace(id="ORD_1", items=[item_a])
+    assignment = SimpleNamespace(
+        assignment_id="ASG_1",
+        order_id="ORD_1",
+        logistical_status=LogisticalStatus.PICKED_UP,
+    )
+
+    session = _session_with(assignment, order)
+
+    with patch("app.deliveries.services.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        result = DeliveryService.update_assignment_status(
+            "DEL_1", "ASG_1", "en_route_to_dropoff"
+        )
+
+    assert result == {"status": "EN_ROUTE_TO_DROPOFF"}
+    assert item_a.status == OrderItem.Status.PROCESSING
