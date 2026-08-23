@@ -374,10 +374,14 @@ class DeliveryRunService:
     @staticmethod
     def close_runs_past_cutoff() -> dict:
         """10.2: OPEN -> CUTOFF_REACHED once cutoff_at passes, priced
-        (10.3) and advanced to PLANNING -- Phase 10 takes it from there
-        (rider assignment). An empty run at cutoff ("with little or no
-        order volume, a run may not run at all", 10.1) is cancelled
-        instead of planned with nothing to plan.
+        (10.3), advanced to PLANNING and then straight to RIDER_ASSIGNMENT
+        (opening it up for any rider to browse/accept -- see
+        DeliveryRunAssignmentService.get_available_runs/accept_run; no
+        separate rider-ranking/offer step exists, matching the existing
+        single-order accept_order's own first-come-first-served
+        simplicity). An empty run at cutoff ("with little or no order
+        volume, a run may not run at all", 10.1) is cancelled instead of
+        planned with nothing to plan.
 
         10.3 wait-deadline fallback: if the run is STILL thin at cutoff,
         every attached order that didn't consent to the single-drop
@@ -463,6 +467,11 @@ class DeliveryRunService:
                 run.base_price = DEFAULT_BASE_PRICE
                 run.price_per_order = round(run.base_price / len(surviving_orders), 2)
                 run.transition_to(DeliveryRunStatus.PLANNING)
+                # 10.2/Phase 10: no separate rider-ranking/offer step exists
+                # (matching the existing single-order accept_order's own
+                # first-come-first-served simplicity) -- a priced run opens
+                # straight up for any online rider to browse and accept.
+                run.transition_to(DeliveryRunStatus.RIDER_ASSIGNMENT)
                 closed += 1
 
             order_buyer_ids = {}

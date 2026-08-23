@@ -28,8 +28,13 @@ from .schemas import (
     DeliveryOrderQRResponseSchema,
     DeliveryOrderQRConfirmRequestSchema,
     DeliveryOrderQRConfirmResponseSchema,
+    DeliveryAvailableRunsQuerySchema,
+    DeliveryAvailableRunsResponseSchema,
+    DeliveryRunAcceptResponseSchema,
+    DeliveryRunFailRequestSchema,
 )
 from .services import DeliveryService
+from .run_assignment import DeliveryRunAssignmentService
 
 bp = Blueprint(
     "deliveries",
@@ -180,4 +185,50 @@ class DeliveryOrderQRConfirm(MethodView):
         """Confirm QR code for order escrow release"""
         return DeliveryService.confirm_order_qr_code(
             current_user.id, order_id, data["qr_code"]
+        )
+
+
+@bp.route("/runs/available")
+class DeliveryAvailableRuns(MethodView):
+    @login_required
+    @bp.arguments(DeliveryAvailableRunsQuerySchema, location="query")
+    @bp.response(200, DeliveryAvailableRunsResponseSchema)
+    def get(self, args):
+        """10.6: get available delivery runs for the rider (paginated)."""
+        return DeliveryRunAssignmentService.get_available_runs(
+            current_user.id,
+            search_radius=args.get("search_radius", 5000),
+            page=args.get("page", 1),
+            per_page=args.get("per_page", 20),
+        )
+
+
+@bp.route("/runs/<string:run_id>/accept")
+class DeliveryRunAccept(MethodView):
+    @login_required
+    @bp.response(200, DeliveryRunAcceptResponseSchema)
+    def post(self, run_id):
+        """10.6: accept an available delivery run."""
+        return DeliveryRunAssignmentService.accept_run(current_user.id, run_id)
+
+
+@bp.route("/runs/<string:run_id>/reject")
+class DeliveryRunReject(MethodView):
+    @login_required
+    @bp.response(200, DeliveryRunAcceptResponseSchema)
+    def post(self, run_id):
+        """10.6: decline an available delivery run."""
+        return DeliveryRunAssignmentService.reject_run(current_user.id, run_id)
+
+
+@bp.route("/runs/<string:run_id>/fail")
+class DeliveryRunFail(MethodView):
+    @login_required
+    @bp.arguments(DeliveryRunFailRequestSchema, location="json")
+    @bp.response(200, DeliveryRunAcceptResponseSchema)
+    def post(self, data, run_id):
+        """10.7: rider reports they can no longer continue an accepted
+        run -- triggers reassignment where possible."""
+        return DeliveryRunAssignmentService.fail_run(
+            current_user.id, run_id, reason=data.get("reason")
         )
