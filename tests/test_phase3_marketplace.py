@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.libs.errors import ValidationError
+from app.notifications.models import NotificationType
 from app.orders.models import OrderReturnStatus, OrderStatus
 from app.orders.services import OrderService, RETURNABLE_ORDER_STATUSES
 from app.payments.services import PaymentService
@@ -19,8 +20,9 @@ def test_returnable_order_statuses():
     assert OrderStatus.PENDING_PAYMENT not in RETURNABLE_ORDER_STATUSES
 
 
+@patch("app.orders.services.NotificationService.create_notification")
 @patch("app.wallet.services.WalletService.credit")
-def test_approve_return_credits_buyer_wallet(mock_credit):
+def test_approve_return_credits_buyer_wallet(mock_credit, mock_notify):
     from app.payments.models import Payment, PaymentStatus
     from app.orders.models import OrderItem
 
@@ -56,6 +58,13 @@ def test_approve_return_credits_buyer_wallet(mock_credit):
     mock_credit.assert_called_once()
     assert mock_credit.call_args.kwargs["idempotency_key"] == "return-refund:RET_TEST01"
     assert payment.status == PaymentStatus.REFUNDED
+    # Phase 12 (15): "refund issued" notification.
+    mock_notify.assert_called_once()
+    assert mock_notify.call_args.kwargs["user_id"] == "USR_BUYER1"
+    assert (
+        mock_notify.call_args.kwargs["notification_type"]
+        == NotificationType.REFUND_ISSUED
+    )
 
 
 @patch("app.wallet.services.WalletService.credit")

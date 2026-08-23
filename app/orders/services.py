@@ -18,6 +18,8 @@ from app.libs.errors import (
 from app.libs.pagination import Paginator
 
 from app.cart.models import Cart, CartItem
+from app.notifications.models import NotificationType
+from app.notifications.services import NotificationService
 from app.products.models import Product
 from app.payments.models import Payment, PaymentStatus
 from app.users.models import Buyer
@@ -503,6 +505,34 @@ class OrderService:
                     buyer_user_id, order_id, paid_amount
                 )
 
+        if buyer_user_id:
+            try:
+                NotificationService.create_notification(
+                    user_id=buyer_user_id,
+                    notification_type=NotificationType.ORDER_CANCELLED,
+                    reference_type="order",
+                    reference_id=order_id,
+                    metadata_={"order_id": order_id},
+                )
+                if paid_amount > 0:
+                    NotificationService.create_notification(
+                        user_id=buyer_user_id,
+                        notification_type=NotificationType.REFUND_ISSUED,
+                        reference_type="order",
+                        reference_id=order_id,
+                        metadata_={
+                            "message": (
+                                f"₦{paid_amount:.2f} was refunded to your "
+                                "wallet for a cancelled order."
+                            )
+                        },
+                    )
+            except Exception:
+                logger.exception(
+                    "Failed to notify buyer of order %s cancellation/refund",
+                    order_id,
+                )
+
         try:
             from app.realtime.event_manager import EventManager
 
@@ -773,6 +803,23 @@ class OrderService:
                 description=f"Return refund for order {order_id}",
                 idempotency_key=f"return-refund:{return_id}",
             )
+            try:
+                NotificationService.create_notification(
+                    user_id=buyer_user_id,
+                    notification_type=NotificationType.REFUND_ISSUED,
+                    reference_type="order",
+                    reference_id=order_id,
+                    metadata_={
+                        "message": (
+                            f"₦{refund_amount:.2f} was refunded to your "
+                            "wallet for your approved return."
+                        )
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to notify buyer of return refund for order %s", order_id
+                )
 
         # Post-commit: claw back any gamification points earned on this order.
         if order_id:
@@ -861,9 +908,27 @@ class OrderService:
             session.flush()
 
         if refund_amount > 0 and buyer_user_id:
-            return WalletService.refund_order_item_to_wallet(
+            entry = WalletService.refund_order_item_to_wallet(
                 buyer_user_id, order_item_id, refund_amount, reason=reason
             )
+            try:
+                NotificationService.create_notification(
+                    user_id=buyer_user_id,
+                    notification_type=NotificationType.REFUND_ISSUED,
+                    reference_type="order_item",
+                    reference_id=str(order_item_id),
+                    metadata_={
+                        "message": (
+                            f"₦{refund_amount:.2f} was refunded to your "
+                            "wallet for an item that couldn't be fulfilled."
+                        )
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to notify buyer of item %s refund", order_item_id
+                )
+            return entry
         return None
 
     @staticmethod

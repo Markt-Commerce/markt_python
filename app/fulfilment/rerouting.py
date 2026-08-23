@@ -52,6 +52,8 @@ from app.categories.models import ProductCategory
 from app.inventory.confidence import ConfidenceBand, InventoryConfidenceService
 from app.libs.errors import ConflictError, NotFoundError
 from app.libs.session import session_scope
+from app.notifications.models import NotificationType
+from app.notifications.services import NotificationService
 from app.orders.events import ActorType, OrderEventService, OrderEventType
 from app.orders.models import FulfilmentPreference, OrderItem
 from app.products.models import Product
@@ -86,6 +88,47 @@ PRICE_HEADROOM_RATE = 0.05
 def _tokenize(name: str) -> List[str]:
     tokens = re.findall(r"[a-z0-9]+", (name or "").lower())
     return [t for t in tokens if t not in STOPWORDS and len(t) > 1]
+
+
+def _notify_buyer_item_unfulfilled(order_item: OrderItem, reason: str) -> None:
+    """Phase 12 (15): "no replacement found" notification, fired
+    alongside each ITEM_UNFULFILLED event emission in attempt_reroute
+    below. Called from inside the caller's still-open session_scope(),
+    right after that transaction's own session.flush() -- like
+    escalate_unfulfilled_item (this module's other post-flush side
+    effect at these exact call sites), NotificationService.create_notification
+    opens its own nested session_scope() to persist the Notification row,
+    which will commit the caller's transaction early. Unlike
+    InventoryService.reserve_stock (where this same pattern silently broke
+    a row-locked concurrency guarantee -- see the Phase 11 CI investigation),
+    nothing here holds a lock or does anything further in the same
+    transaction after this point, so the early commit has no correctness
+    consequence -- it just makes the outer session_scope()'s own final
+    commit a no-op. Wrapped in try/except: a notification failure must
+    never mask the state transition that already happened."""
+    try:
+        buyer_user_id = (
+            order_item.order.buyer.user_id
+            if order_item.order and order_item.order.buyer
+            else None
+        )
+        if not buyer_user_id:
+            return
+        NotificationService.create_notification(
+            user_id=buyer_user_id,
+            notification_type=NotificationType.ITEM_UNFULFILLED,
+            reference_type="order_item",
+            reference_id=str(order_item.id),
+            metadata_={
+                "message": (
+                    "We couldn't find a replacement seller for an item in "
+                    "your order. Check your order for details."
+                ),
+                "reason": reason,
+            },
+        )
+    except Exception:
+        logger.exception("Failed to notify buyer of unfulfilled item %s", order_item.id)
 
 
 def find_candidate_products(
@@ -357,6 +400,7 @@ class ReroutingService:
                     metadata={"reason": "seller_only_preference"},
                 )
                 session.flush()
+                _notify_buyer_item_unfulfilled(order_item, "seller_only_preference")
                 return None
 
             first_attempt = (
@@ -389,6 +433,9 @@ class ReroutingService:
                     metadata={"reason": "deadline_or_retry_limit_reached"},
                 )
                 session.flush()
+                _notify_buyer_item_unfulfilled(
+                    order_item, "deadline_or_retry_limit_reached"
+                )
                 escalate_unfulfilled_item(failed_allocation_id)
                 return None
 
@@ -404,6 +451,7 @@ class ReroutingService:
                     metadata={"reason": "original_product_missing"},
                 )
                 session.flush()
+                _notify_buyer_item_unfulfilled(order_item, "original_product_missing")
                 return None
 
             tried_seller_ids = {
@@ -433,6 +481,7 @@ class ReroutingService:
                     metadata={"reason": "no_eligible_candidates"},
                 )
                 session.flush()
+                _notify_buyer_item_unfulfilled(order_item, "no_eligible_candidates")
                 escalate_unfulfilled_item(failed_allocation_id)
                 return None
 
@@ -484,6 +533,9 @@ class ReroutingService:
                         event_type=OrderEventType.ITEM_UNFULFILLED,
                         actor_type=ActorType.SYSTEM,
                         metadata={"reason": "every_candidate_lost_stock_race"},
+                    )
+                    _notify_buyer_item_unfulfilled(
+                        order_item, "every_candidate_lost_stock_race"
                     )
 
         escalate_unfulfilled_item(failed_allocation_id)

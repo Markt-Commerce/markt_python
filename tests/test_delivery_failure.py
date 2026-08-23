@@ -15,6 +15,8 @@ from app.deliveries.models import (
     DeliveryRecoveryAction,
 )
 from app.libs.errors import ConflictError, NotFoundError, ValidationError
+from app.notifications.models import NotificationType
+from app.orders.events import OrderEventType
 from app.orders.models import OrderItem
 
 
@@ -37,10 +39,11 @@ def _make_item(id, status, product_id):
 # --- report_failure -----------------------------------------------------
 
 
-def test_report_failure_records_reason_and_perishable_flag():
+@patch("app.deliveries.failure.NotificationService.create_notification")
+def test_report_failure_records_reason_and_perishable_flag(mock_notify):
     assignment = SimpleNamespace(status=AssignmentStatus.ACCEPTED)
     item = _make_item(1, OrderItem.Status.SHIPPED, product_id="P1")
-    order = SimpleNamespace(items=[item])
+    order = SimpleNamespace(items=[item], buyer=SimpleNamespace(user_id="USR_BUYER1"))
     run_order = SimpleNamespace(order_id="ORD_1", order=order)
     handling = SimpleNamespace(product_id="P1")
 
@@ -76,12 +79,24 @@ def test_report_failure_records_reason_and_perishable_flag():
     assert result["reason"] == "buyer_unavailable"
     assert result["is_perishable"] is True
     assert result["outcome"] == DeliveryFailureOutcome.PENDING.value
+    # Phase 12 (15): buyer notified of the delivery failure.
+    mock_notify.assert_called_once()
+    assert mock_notify.call_args.kwargs["user_id"] == "USR_BUYER1"
+    assert (
+        mock_notify.call_args.kwargs["notification_type"]
+        == NotificationType.DELIVERY_FAILED
+    )
+    # 14.2 gap-fill: event log now covers run-based delivery failures too.
+    emitted_event = session.add.call_args_list[-1][0][0]
+    assert emitted_event.event_type == OrderEventType.ITEM_DELIVERY_FAILED
+    assert emitted_event.order_id == "ORD_1"
 
 
-def test_report_failure_not_perishable_when_no_handling_match():
+@patch("app.deliveries.failure.NotificationService.create_notification")
+def test_report_failure_not_perishable_when_no_handling_match(mock_notify):
     assignment = SimpleNamespace(status=AssignmentStatus.ACCEPTED)
     item = _make_item(1, OrderItem.Status.SHIPPED, product_id="P1")
-    order = SimpleNamespace(items=[item])
+    order = SimpleNamespace(items=[item], buyer=SimpleNamespace(user_id="USR_BUYER1"))
     run_order = SimpleNamespace(order_id="ORD_1", order=order)
 
     session = MagicMock()
