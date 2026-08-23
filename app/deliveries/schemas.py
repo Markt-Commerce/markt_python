@@ -154,3 +154,42 @@ class DeliveryOrderQRConfirmRequestSchema(Schema):
 class DeliveryOrderQRConfirmResponseSchema(Schema):
     status = fields.String()
     message = fields.String()
+
+
+# --- DeliveryRun rider assignment (10.6-10.7, Phase 10) ---------------------
+
+
+class DeliveryAvailableRunsQuerySchema(Schema):
+    page = fields.Int(validate=validate.Range(min=1), missing=1)
+    per_page = fields.Int(validate=validate.Range(min=1, max=50), missing=20)
+    search_radius = fields.Int(
+        validate=validate.Range(min=100, max=50000), missing=5000
+    )
+
+
+class AvailableRunSchema(Schema):
+    run_id = fields.String()
+    market = fields.String(allow_none=True)
+    area = fields.String()
+    order_count = fields.Integer()
+    price_per_order = fields.Float(allow_none=True)
+    distance_meters = fields.Float()
+
+
+class DeliveryAvailableRunsResponseSchema(Schema):
+    range_meters = fields.Integer()
+    runs = fields.List(fields.Nested(AvailableRunSchema))
+    page = fields.Integer()
+    per_page = fields.Integer()
+    total = fields.Integer()
+    total_pages = fields.Integer()
+
+
+class DeliveryRunAcceptResponseSchema(Schema):
+    run_id = fields.String()
+    status = fields.String()
+    assignment_id = fields.Integer(allow_none=True)
+
+
+class DeliveryRunFailRequestSchema(Schema):
+    reason = fields.String(allow_none=True)

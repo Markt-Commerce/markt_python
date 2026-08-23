@@ -25,6 +25,7 @@ def _run(status):
         (DeliveryRunStatus.RIDER_ASSIGNMENT, DeliveryRunStatus.CANCELLED),
         (DeliveryRunStatus.RIDER_ACCEPTED, DeliveryRunStatus.PICKUP_IN_PROGRESS),
         (DeliveryRunStatus.RIDER_ACCEPTED, DeliveryRunStatus.CANCELLED),
+        (DeliveryRunStatus.RIDER_ACCEPTED, DeliveryRunStatus.RIDER_FAILED),
         (DeliveryRunStatus.PICKUP_IN_PROGRESS, DeliveryRunStatus.DELIVERY_IN_PROGRESS),
         (DeliveryRunStatus.PICKUP_IN_PROGRESS, DeliveryRunStatus.RIDER_FAILED),
         (DeliveryRunStatus.DELIVERY_IN_PROGRESS, DeliveryRunStatus.COMPLETED),

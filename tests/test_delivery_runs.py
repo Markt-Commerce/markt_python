@@ -259,7 +259,7 @@ def test_close_runs_past_cutoff_prices_and_plans_nonempty_run(mock_scope):
     result = DeliveryRunService.close_runs_past_cutoff()
 
     assert result == {"closed": 1, "cancelled_empty": 0, "free_cancellations": 0}
-    assert run.status == DeliveryRunStatus.PLANNING
+    assert run.status == DeliveryRunStatus.RIDER_ASSIGNMENT
     assert run.base_price == DEFAULT_BASE_PRICE
     assert run.price_per_order == round(DEFAULT_BASE_PRICE / 4, 2)
 
@@ -330,7 +330,7 @@ def test_close_runs_past_cutoff_keeps_consented_order_cancels_the_rest(
     result = DeliveryRunService.close_runs_past_cutoff()
 
     assert result == {"closed": 1, "cancelled_empty": 0, "free_cancellations": 1}
-    assert run.status == DeliveryRunStatus.PLANNING
+    assert run.status == DeliveryRunStatus.RIDER_ASSIGNMENT
     assert run.price_per_order == round(DEFAULT_BASE_PRICE / 1, 2)
     mock_cancel.assert_called_once()
 

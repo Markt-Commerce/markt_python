@@ -24,6 +24,12 @@ class AssignmentStatus(Enum):
     ASSIGNED = "ASSIGNED"
     ACCEPTED = "ACCEPTED"
     REJECTED = "REJECTED"
+    # 10.7: rider failed *after* accepting (mid-run) -- distinct from
+    # REJECTED, which happens before any commitment. Used by
+    # DeliveryRunAssignment (10.7's run-level rider failure/reassignment);
+    # not currently reachable via the single-order DeliveryOrderAssignment
+    # path this enum also serves.
+    FAILED = "FAILED"
 
 
 class LogisticalStatus(Enum):
@@ -226,6 +232,10 @@ class DeliveryRun(BaseModel, UniqueIdMixin):
         DeliveryRunStatus.RIDER_ACCEPTED: [
             DeliveryRunStatus.PICKUP_IN_PROGRESS,
             DeliveryRunStatus.CANCELLED,
+            # 10.7: a rider can fail before pickup even starts (emergency,
+            # vehicle breakdown right after accepting) -- not just mid-
+            # pickup/delivery.
+            DeliveryRunStatus.RIDER_FAILED,
         ],
         DeliveryRunStatus.PICKUP_IN_PROGRESS: [
             DeliveryRunStatus.DELIVERY_IN_PROGRESS,
@@ -339,3 +349,31 @@ class DeliveryRunOrder(BaseModel):
 
     delivery_run = db.relationship("DeliveryRun", back_populates="run_orders")
     order = db.relationship("Order")
+
+
+class DeliveryRunAssignment(BaseModel):
+    """Which rider currently owns (or tried, or failed) a run (10.7).
+    Same ASSIGNED/ACCEPTED/REJECTED/FAILED semantics and history-row
+    pattern as the existing single-order DeliveryOrderAssignment -- a
+    genuinely parallel structure rather than a shared one, since a run's
+    rider negotiation is otherwise identical in shape but keyed by run
+    instead of order. Multiple rows can exist per run over time (a
+    decline, a mid-run failure and reassignment) -- only ever one ACCEPTED
+    row is live at once, enforced by DeliveryRun's own transition_to guard
+    (RIDER_ASSIGNMENT -> RIDER_ACCEPTED only happens once) rather than a
+    DB constraint here."""
+
+    __tablename__ = "delivery_run_assignments"
+
+    id = db.Column(db.Integer, primary_key=True)
+    delivery_run_id = db.Column(
+        db.String(12), db.ForeignKey("delivery_runs.id"), nullable=False
+    )
+    delivery_user_id = db.Column(
+        db.String(12), db.ForeignKey("delivery_users.id"), nullable=False
+    )
+    status = db.Column(db.Enum(AssignmentStatus), nullable=False)
+    assigned_at = db.Column(db.DateTime, server_default=db.func.now())
+
+    delivery_run = db.relationship("DeliveryRun")
+    delivery_user = db.relationship("DeliveryUser")
