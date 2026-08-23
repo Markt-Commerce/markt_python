@@ -193,3 +193,32 @@ class DeliveryRunAcceptResponseSchema(Schema):
 
 class DeliveryRunFailRequestSchema(Schema):
     reason = fields.String(allow_none=True)
+
+
+# --- DeliveryRun pickup-per-stop / POD (10.6, Phase 10) ---------------------
+
+
+class DeliveryRunStopActionResponseSchema(Schema):
+    delivery_run_id = fields.String()
+    seller_id = fields.Integer()
+    status = fields.String(validate=validate.OneOf(["pending", "arrived", "picked_up"]))
+
+
+class DeliveryRunPickupConfirmResponseSchema(DeliveryRunStopActionResponseSchema):
+    run_status = fields.String()
+    pod_issued_for_orders = fields.List(fields.String())
+
+
+class DeliveryRunOrderPodQRResponseSchema(Schema):
+    order_id = fields.String()
+    qr_code = fields.String()
+
+
+class DeliveryRunOrderPodConfirmRequestSchema(Schema):
+    qr_code = fields.String(required=True)
+
+
+class DeliveryRunOrderPodConfirmResponseSchema(Schema):
+    status = fields.String()
+    message = fields.String()
+    run_completed = fields.Boolean()

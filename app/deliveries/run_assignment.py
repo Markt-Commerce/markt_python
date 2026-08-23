@@ -177,6 +177,12 @@ class DeliveryRunAssignmentService:
             session.add(assignment)
             session.flush()
 
+            # 10.6: one DeliveryRunStop per distinct seller across the
+            # run's orders, ready for the rider to work through.
+            from .pickup import create_stops_for_run
+
+            create_stops_for_run(session, run_id)
+
             return {
                 "run_id": run_id,
                 "status": run.status.value,

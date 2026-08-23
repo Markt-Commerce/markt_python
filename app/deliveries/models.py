@@ -309,6 +309,15 @@ class DeliveryRunWaitChoice(Enum):
     PAY_NOW = "pay_now"
 
 
+class DeliveryRunOrderPodStatus(Enum):
+    """10.6 POD lifecycle for one order within a run -- see
+    DeliveryRunOrder.pod_status's own docstring."""
+
+    PENDING = "pending"
+    QR_ISSUED = "qr_issued"
+    DELIVERED = "delivered"
+
+
 class DeliveryRunOrder(BaseModel):
     """Which orders are attached to which run (10.1). A join table rather
     than a column on Order: an order can only ever be in one *active* run
@@ -347,6 +356,21 @@ class DeliveryRunOrder(BaseModel):
     # the periodic sweep doesn't re-notify on every run.
     notified_thin_volume_at = db.Column(db.DateTime, nullable=True)
 
+    # 10.6 POD, scoped per order-within-a-run (not literally per item --
+    # see app.deliveries.pod's module docstring for why). PENDING until
+    # every DeliveryRunStop this order's items depend on is PICKED_UP;
+    # QR_ISSUED once the buyer has a code to scan; DELIVERED once
+    # confirmed -- mirrors the existing single-order escrow_qr_code/
+    # LogisticalStatus pattern, just keyed by (run, order) instead of a
+    # DeliveryOrderAssignment.
+    pod_status = db.Column(
+        db.Enum(DeliveryRunOrderPodStatus),
+        default=DeliveryRunOrderPodStatus.PENDING,
+        nullable=False,
+    )
+    qr_code = db.Column(db.String(64), nullable=True)
+    delivered_at = db.Column(db.DateTime, nullable=True)
+
     delivery_run = db.relationship("DeliveryRun", back_populates="run_orders")
     order = db.relationship("Order")
 
@@ -377,3 +401,43 @@ class DeliveryRunAssignment(BaseModel):
 
     delivery_run = db.relationship("DeliveryRun")
     delivery_user = db.relationship("DeliveryUser")
+
+
+class DeliveryRunStopStatus(Enum):
+    PENDING = "pending"
+    ARRIVED = "arrived"
+    PICKED_UP = "picked_up"
+
+
+class DeliveryRunStop(BaseModel):
+    """One seller pickup point within an accepted run (10.6: "rider
+    pickup confirmation flow per seller stop"). A run can span several
+    sellers across its batched orders -- generated once per distinct
+    seller when the run is accepted (see
+    app.deliveries.pickup.DeliveryRunPickupService.create_stops_for_run),
+    not per order-seller pair, so a seller with items in two different
+    orders in the same run is still only one physical stop."""
+
+    __tablename__ = "delivery_run_stops"
+
+    id = db.Column(db.Integer, primary_key=True)
+    delivery_run_id = db.Column(
+        db.String(12), db.ForeignKey("delivery_runs.id"), nullable=False
+    )
+    seller_id = db.Column(db.Integer, db.ForeignKey("sellers.id"), nullable=False)
+    status = db.Column(
+        db.Enum(DeliveryRunStopStatus),
+        default=DeliveryRunStopStatus.PENDING,
+        nullable=False,
+    )
+    arrived_at = db.Column(db.DateTime, nullable=True)
+    picked_up_at = db.Column(db.DateTime, nullable=True)
+
+    delivery_run = db.relationship("DeliveryRun")
+    seller = db.relationship("Seller")
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            "delivery_run_id", "seller_id", name="uq_delivery_run_stop_seller"
+        ),
+    )

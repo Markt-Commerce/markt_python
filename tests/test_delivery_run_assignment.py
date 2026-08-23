@@ -132,7 +132,8 @@ def test_get_available_runs_filters_by_distance_and_missing_area_location(
 # --- accept_run --------------------------------------------------------------
 
 
-def test_accept_run_success():
+@patch("app.deliveries.pickup.create_stops_for_run")
+def test_accept_run_success(mock_create_stops):
     run = SimpleNamespace(id="RUN_1", status=DeliveryRunStatus.RIDER_ASSIGNMENT)
     run.transition_to = lambda new_status, _r=run: DeliveryRun.transition_to(
         _r, new_status
@@ -166,6 +167,7 @@ def test_accept_run_success():
         "assignment_id": 99,
     }
     assert run.status == DeliveryRunStatus.RIDER_ACCEPTED
+    mock_create_stops.assert_called_once_with(session, "RUN_1")
 
 
 def test_accept_run_raises_not_found_for_missing_run():
