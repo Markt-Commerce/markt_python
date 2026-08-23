@@ -130,7 +130,9 @@ class InventoryService:
                     f"Only {available} unit(s) available for product {product_id}"
                 )
 
-            band = InventoryConfidenceService.get_band_for_product(product_id)
+            band = InventoryConfidenceService.get_band_for_product(
+                product_id, session=session
+            )
 
             reservation = InventoryReservation(
                 product_id=product_id,

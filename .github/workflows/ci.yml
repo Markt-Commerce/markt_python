@@ -14,36 +14,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint-and-smoke:
-    name: Lint and smoke checks
+  lint:
+    name: Lint & format
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_USER: markt
-          POSTGRES_PASSWORD: markt123
-          POSTGRES_DB: markt_db
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U markt"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    env:
-      DB_HOST: localhost
-      DB_PORT: 5432
-      DB_USER: markt
-      DB_PASSWORD: markt123
-      DB_NAME: markt_db
-      # Only set here: this job's Postgres is a fresh, disposable service
-      # container. Tests gated on this must never run against a real
-      # developer's configured database (see test_inventory_concurrency.py).
-      RUN_DB_TESTS: "1"
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
@@ -95,5 +69,97 @@ jobs:
       - name: Syntax smoke check
         run: python -m compileall -q app main external
 
-      - name: Run pytest
-        run: pytest tests/ -v --tb=short
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements/requirements.txt
+            requirements/dev-requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements/dev-requirements.txt
+
+      # No database here on purpose -- every test in this run either mocks
+      # the DB session or self-skips without RUN_DB_TESTS=1 (see the
+      # db-integration-tests job below). --ignore is belt-and-suspenders:
+      # the two real-database files stay entirely out of this job's run,
+      # not just skipped, so a report from here is never ambiguous about
+      # which layer failed.
+      - name: Run pytest (mocked-session unit tests only)
+        run: >-
+          pytest tests/ -v --tb=short
+          --ignore=tests/test_inventory_concurrency.py
+          --ignore=tests/test_delivery_run_capacity_concurrency.py
+
+  db-integration-tests:
+    name: Database integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: markt
+          POSTGRES_PASSWORD: markt123
+          POSTGRES_DB: markt_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U markt"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DB_HOST: localhost
+      DB_PORT: 5432
+      DB_USER: markt
+      DB_PASSWORD: markt123
+      DB_NAME: markt_db
+      # Only set here: this job's Postgres is a fresh, disposable service
+      # container, destroyed with the job. Tests gated on this must never
+      # run against a real developer's configured database -- see
+      # test_inventory_concurrency.py's own docstring for why.
+      RUN_DB_TESTS: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements/requirements.txt
+            requirements/dev-requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements/dev-requirements.txt
+
+      # Only the tests that actually need a real database -- the two
+      # real-connection concurrency tests. Everything else already ran in
+      # the test job above; re-running the full suite here would just
+      # duplicate that signal against a slower, service-container job.
+      - name: Run real-database concurrency/integration tests
+        run: >-
+          pytest tests/test_inventory_concurrency.py
+          tests/test_delivery_run_capacity_concurrency.py
+          -v --tb=short

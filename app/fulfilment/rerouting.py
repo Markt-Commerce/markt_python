@@ -178,7 +178,9 @@ def filter_eligible_candidates(
         if product.price > price_ceiling:
             continue
 
-        band = InventoryConfidenceService.get_band_for_product(product.id)
+        band = InventoryConfidenceService.get_band_for_product(
+            product.id, session=session
+        )
         if _CONFIDENCE_BAND_RANK[band] < _CONFIDENCE_BAND_RANK[MIN_CONFIDENCE_BAND]:
             continue
 

@@ -116,6 +116,11 @@ def test_filter_eligible_candidates_excludes_over_price_ceiling(mock_band, mock_
 
     assert result == [within]
     assert within.price <= 1000.0 * (1 + PRICE_HEADROOM_RATE)
+    # Regression guard: must pass the caller's already-open session
+    # through rather than letting get_band_for_product open its own
+    # nested session_scope() -- see test_inventory_confidence.py's own
+    # regression test for the underlying bug this fixed.
+    mock_band.assert_called_once_with(within.id, session=session)
 
 
 @patch("app.fulfilment.rerouting.find_candidate_products")
