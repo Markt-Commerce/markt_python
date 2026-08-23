@@ -26,6 +26,7 @@ def register_blueprints(app, api):
         "wallet",
         "gamification",
         "fulfilment",
+        "metrics",
     ]
 
     for module in modules:
