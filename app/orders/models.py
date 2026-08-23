@@ -188,8 +188,18 @@ class ShippingAddress(BaseModel):
     # if the longtitude and latitude are not provided, we can use a geocoding service to get them from the address
     longitude = db.Column(db.Float)
     latitude = db.Column(db.Float)
+    # 10.1: which Area (app.markets.models.Area) this address resolves to
+    # for delivery-run purposes -- a DeliveryRun serves one Market -> one
+    # Area. Nullable: resolved best-effort from lat/lon at order-creation
+    # time (see app.markets.services.MarketService.resolve_area_for_coordinates)
+    # rather than required at checkout, since Areas are a small, curated
+    # set (initially 3 campuses) and most addresses won't match one yet.
+    # An order whose address doesn't resolve to any Area simply isn't
+    # eligible to join a run until it does -- flagged, not faked.
+    area_id = db.Column(db.Integer, db.ForeignKey("areas.id"), nullable=True)
 
     order = db.relationship("Order", back_populates="shipping_address")
+    area = db.relationship("Area")
 
 
 class Shipment(BaseModel):

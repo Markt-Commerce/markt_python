@@ -150,6 +150,20 @@ class OrderService:
         )
         session.add(shipping_address_obj)
 
+        # 10.1: best-effort Area resolution for DeliveryRun eligibility --
+        # see MarketService.resolve_area_for_coordinates and
+        # ShippingAddress.area_id's own docstring for why this is
+        # best-effort rather than required.
+        from app.markets.services import MarketService
+
+        area = MarketService.resolve_area_for_coordinates(
+            session,
+            shipping_address_obj.latitude,
+            shipping_address_obj.longitude,
+        )
+        if area:
+            shipping_address_obj.area_id = area.id
+
         # 6: one preference per order, set at checkout, stamped onto every
         # item -- see FulfilmentPreference's docstring for why it's stored
         # per-item rather than requiring a join back to Order later. Falls

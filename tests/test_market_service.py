@@ -8,6 +8,7 @@ import pytest
 
 from app.libs.errors import NotFoundError, ValidationError
 from app.markets.services import (
+    AREA_RESOLUTION_TOLERANCE_METERS,
     MARKET_VERIFICATION_TOLERANCE_METERS,
     MarketService,
 )
@@ -97,3 +98,48 @@ def test_seed_market_returns_existing_when_slug_present(mock_scope):
 
     assert result is existing
     session.add.assert_not_called()
+
+
+@patch("app.deliveries.services.DeliveryService.haversine_distance")
+def test_resolve_area_for_coordinates_returns_nearest_within_tolerance(mock_distance):
+    area_near = SimpleNamespace(id=1, latitude=6.45, longitude=3.39)
+    area_far = SimpleNamespace(id=2, latitude=10.0, longitude=10.0)
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = [
+        area_near,
+        area_far,
+    ]
+    mock_distance.side_effect = [500, 50000]
+
+    result = MarketService.resolve_area_for_coordinates(session, 6.451, 3.391)
+
+    assert result is area_near
+
+
+@patch("app.deliveries.services.DeliveryService.haversine_distance")
+def test_resolve_area_for_coordinates_returns_none_outside_tolerance(mock_distance):
+    area = SimpleNamespace(id=1, latitude=6.45, longitude=3.39)
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = [area]
+    mock_distance.return_value = AREA_RESOLUTION_TOLERANCE_METERS + 1
+
+    result = MarketService.resolve_area_for_coordinates(session, 6.451, 3.391)
+
+    assert result is None
+
+
+def test_resolve_area_for_coordinates_returns_none_for_missing_coordinates():
+    session = MagicMock()
+
+    assert MarketService.resolve_area_for_coordinates(session, None, 3.39) is None
+    assert MarketService.resolve_area_for_coordinates(session, 6.45, None) is None
+    session.query.assert_not_called()
+
+
+def test_resolve_area_for_coordinates_returns_none_when_no_areas_have_location():
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = []
+
+    result = MarketService.resolve_area_for_coordinates(session, 6.45, 3.39)
+
+    assert result is None

@@ -22,11 +22,21 @@ from app.libs.session import session_scope
 from app.orders.shipping import geocode_address
 from app.users.models import MarketVerificationStatus, Seller
 
-from .models import Market
+from .models import Area, Market
 
 # Generous on purpose -- see module docstring on geocoding accuracy for
 # informal market addresses.
 MARKET_VERIFICATION_TOLERANCE_METERS = 2000
+
+# 10.1: how close a shipping address's geocoded coordinates must be to an
+# Area's own reference location to resolve to it. Areas are a small,
+# curated set (initially 3 campuses) rather than a fine-grained geofence,
+# so this is deliberately generous -- same reasoning as the market
+# verification tolerance above, and the same "explicit assignment,
+# geocode is only ever a best-effort/verification signal" philosophy
+# (see this module's own docstring): nothing here lets a buyer claim an
+# Area, it only auto-resolves one from where their address actually is.
+AREA_RESOLUTION_TOLERANCE_METERS = 5000
 
 
 class MarketService:
@@ -70,6 +80,45 @@ class MarketService:
 
             session.flush()
             return seller
+
+    @staticmethod
+    def resolve_area_for_coordinates(
+        session, latitude: Optional[float], longitude: Optional[float]
+    ) -> Optional[Area]:
+        """10.1: best-effort resolve a shipping address's coordinates to
+        the nearest active Area with a reference location, within
+        AREA_RESOLUTION_TOLERANCE_METERS. Returns None (never raises) if
+        the coordinates are missing, no Area has a reference location
+        yet, or nothing is close enough -- an unresolved address simply
+        isn't eligible to join a DeliveryRun yet (see ShippingAddress.area_id's
+        own docstring), not an error."""
+        from app.deliveries.services import DeliveryService
+
+        if latitude is None or longitude is None:
+            return None
+
+        areas = (
+            session.query(Area)
+            .filter(
+                Area.is_active.is_(True),
+                Area.latitude.isnot(None),
+                Area.longitude.isnot(None),
+            )
+            .all()
+        )
+
+        nearest = None
+        nearest_distance = None
+        for area in areas:
+            distance = DeliveryService.haversine_distance(
+                latitude, longitude, area.latitude, area.longitude
+            )
+            if nearest_distance is None or distance < nearest_distance:
+                nearest, nearest_distance = area, distance
+
+        if nearest is not None and nearest_distance <= AREA_RESOLUTION_TOLERANCE_METERS:
+            return nearest
+        return None
 
     @staticmethod
     def seed_market(
