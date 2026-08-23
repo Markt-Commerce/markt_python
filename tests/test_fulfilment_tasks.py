@@ -7,6 +7,7 @@ from app.fulfilment.tasks import (
     expire_stale_allocations,
     expire_stale_buyer_approvals,
     recompute_seller_reliability_scores,
+    recover_stuck_fulfilment_allocations,
 )
 
 
@@ -28,6 +29,16 @@ def test_expire_stale_buyer_approvals_task_delegates_to_service(mock_expire):
 
     assert result == {"timed_out": 2}
     mock_expire.assert_called_once()
+
+
+@patch("app.fulfilment.services.FulfilmentService.recover_stuck_allocations")
+def test_recover_stuck_fulfilment_allocations_task_delegates_to_service(mock_recover):
+    mock_recover.return_value = {"retried": 2, "resolved_stuck_rerouting": 1}
+
+    result = recover_stuck_fulfilment_allocations()
+
+    assert result == {"retried": 2, "resolved_stuck_rerouting": 1}
+    mock_recover.assert_called_once()
 
 
 @patch("app.fulfilment.reliability.SellerReliabilityService.calculate_score")

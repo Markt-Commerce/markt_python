@@ -96,4 +96,9 @@ CELERYBEAT_SCHEDULE = {
         "schedule": crontab(hour="*/6"),  # Every 6 hours, same cadence as confidence
         "options": {"queue": "default"},
     },
+    "recover-stuck-fulfilment-allocations": {
+        "task": "app.fulfilment.tasks.recover_stuck_fulfilment_allocations",
+        "schedule": crontab(minute="*/3"),  # Backstop sweep, 10-min deadline (14.3)
+        "options": {"queue": "default"},
+    },
 }

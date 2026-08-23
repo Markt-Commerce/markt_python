@@ -39,6 +39,28 @@ def expire_stale_buyer_approvals():
 
 
 @celery_app.task(
+    name="app.fulfilment.tasks.recover_stuck_fulfilment_allocations", queue="default"
+)
+def recover_stuck_fulfilment_allocations():
+    """14.3: periodic sweep for allocations stranded past their order
+    item's fulfilment deadline -- a REROUTING allocation nothing times
+    out on its own, or a crash between a decline/timeout/rejection
+    landing and the attempt_reroute() call that's supposed to follow it
+    synchronously. See FulfilmentService.recover_stuck_allocations'
+    docstring for the full reasoning."""
+    from app.fulfilment.services import FulfilmentService
+
+    result = FulfilmentService.recover_stuck_allocations()
+    logger.info(
+        "Fulfilment deadline recovery: retried %s, resolved %s stuck REROUTING "
+        "allocation(s)",
+        result["retried"],
+        result["resolved_stuck_rerouting"],
+    )
+    return result
+
+
+@celery_app.task(
     name="app.fulfilment.tasks.recompute_seller_reliability_scores", queue="default"
 )
 def recompute_seller_reliability_scores():
