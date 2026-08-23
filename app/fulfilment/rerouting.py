@@ -34,7 +34,7 @@ direct candidate lookup above (deadline/retry limit, no eligible
 candidates, or every candidate losing the stock race -- NOT a SELLER_ONLY
 buyer's deliberate no-rerouting choice, which never reaches this), it
 reuses the existing app.requests rail as a wider, asynchronous net rather
-than building a parallel matching path -- see _escalate_unfulfilled_item
+than building a parallel matching path -- see escalate_unfulfilled_item
 and app.requests.services.BuyerRequestService.create_reroute_request.
 This is a genuine COMPLEMENT to the ranked-candidate algorithm above, not
 a replacement for it: 7.1's numbered steps describe a synchronous
@@ -202,13 +202,17 @@ MAX_REROUTE_ATTEMPTS = 5
 logger = logging.getLogger(__name__)
 
 
-def _escalate_unfulfilled_item(failed_allocation_id: int) -> None:
+def escalate_unfulfilled_item(failed_allocation_id: int) -> None:
     """7.4: auto-generate a market-scoped BuyerRequest (see
     app.requests.services.BuyerRequestService.create_reroute_request) for
     an item that genuinely exhausted the direct candidate lookup. Called
     from attempt_reroute right before each UNFULFILLED return that
     represents real exhaustion (not the SELLER_ONLY short-circuit, which
-    never reaches this).
+    never reaches this) -- and from FulfilmentService.recover_stuck_allocations
+    (14.3), which resolves a REROUTING allocation stranded past its item's
+    fulfilment deadline the same way attempt_reroute itself would have.
+    Public (not module-private) specifically for that second, cross-module
+    caller.
 
     Wrapped in try/except and never raises -- an escalation failure must
     not roll back or mask the more important UNFULFILLED state transition
@@ -383,7 +387,7 @@ class ReroutingService:
                     metadata={"reason": "deadline_or_retry_limit_reached"},
                 )
                 session.flush()
-                _escalate_unfulfilled_item(failed_allocation_id)
+                escalate_unfulfilled_item(failed_allocation_id)
                 return None
 
             original_product = session.query(Product).get(order_item.product_id)
@@ -427,7 +431,7 @@ class ReroutingService:
                     metadata={"reason": "no_eligible_candidates"},
                 )
                 session.flush()
-                _escalate_unfulfilled_item(failed_allocation_id)
+                escalate_unfulfilled_item(failed_allocation_id)
                 return None
 
             from .ranking import rank_candidates
@@ -480,5 +484,5 @@ class ReroutingService:
                         metadata={"reason": "every_candidate_lost_stock_race"},
                     )
 
-        _escalate_unfulfilled_item(failed_allocation_id)
+        escalate_unfulfilled_item(failed_allocation_id)
         return None

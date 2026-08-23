@@ -12,7 +12,7 @@ from app.fulfilment.rerouting import (
     MAX_REROUTE_ATTEMPTS,
     PRICE_HEADROOM_RATE,
     ReroutingService,
-    _escalate_unfulfilled_item,
+    escalate_unfulfilled_item,
     _tokenize,
     filter_eligible_candidates,
     find_candidate_products,
@@ -225,7 +225,7 @@ def test_attempt_reroute_no_op_when_not_declined_or_timeout(mock_scope):
     assert failed.status == FulfilmentAllocationStatus.ACCEPTED
 
 
-@patch("app.fulfilment.rerouting._escalate_unfulfilled_item")
+@patch("app.fulfilment.rerouting.escalate_unfulfilled_item")
 @patch("app.fulfilment.rerouting.session_scope")
 def test_attempt_reroute_starts_from_buyer_rejected(mock_scope, mock_escalate):
     """6.1: a buyer-rejected substitution can be retried like any other
@@ -257,7 +257,7 @@ def test_attempt_reroute_starts_from_buyer_rejected(mock_scope, mock_escalate):
     mock_escalate.assert_not_called()
 
 
-@patch("app.fulfilment.rerouting._escalate_unfulfilled_item")
+@patch("app.fulfilment.rerouting.escalate_unfulfilled_item")
 @patch("app.fulfilment.rerouting.session_scope")
 def test_attempt_reroute_seller_only_skips_straight_to_unfulfilled(
     mock_scope, mock_escalate
@@ -287,7 +287,7 @@ def test_attempt_reroute_seller_only_skips_straight_to_unfulfilled(
     mock_escalate.assert_not_called()
 
 
-@patch("app.fulfilment.rerouting._escalate_unfulfilled_item")
+@patch("app.fulfilment.rerouting.escalate_unfulfilled_item")
 @patch("app.fulfilment.rerouting.session_scope")
 def test_attempt_reroute_marks_unfulfilled_past_deadline(mock_scope, mock_escalate):
     failed = _failed_allocation(FulfilmentAllocationStatus.DECLINED)
@@ -320,7 +320,7 @@ def test_attempt_reroute_marks_unfulfilled_past_deadline(mock_scope, mock_escala
     mock_escalate.assert_called_once_with(1)
 
 
-@patch("app.fulfilment.rerouting._escalate_unfulfilled_item")
+@patch("app.fulfilment.rerouting.escalate_unfulfilled_item")
 @patch("app.fulfilment.rerouting.session_scope")
 def test_attempt_reroute_marks_unfulfilled_past_retry_limit(mock_scope, mock_escalate):
     failed = _failed_allocation(FulfilmentAllocationStatus.TIMEOUT)
@@ -350,7 +350,7 @@ def test_attempt_reroute_marks_unfulfilled_past_retry_limit(mock_scope, mock_esc
     mock_escalate.assert_called_once_with(1)
 
 
-@patch("app.fulfilment.rerouting._escalate_unfulfilled_item")
+@patch("app.fulfilment.rerouting.escalate_unfulfilled_item")
 @patch("app.fulfilment.rerouting.filter_eligible_candidates")
 @patch("app.fulfilment.rerouting.session_scope")
 def test_attempt_reroute_marks_unfulfilled_when_no_eligible_candidates(
@@ -439,7 +439,7 @@ def test_attempt_reroute_reserves_top_ranked_candidate(
     )
 
 
-@patch("app.fulfilment.rerouting._escalate_unfulfilled_item")
+@patch("app.fulfilment.rerouting.escalate_unfulfilled_item")
 @patch("app.fulfilment.services.FulfilmentService.create_allocation")
 @patch("app.inventory.services.InventoryService.reserve_stock")
 @patch("app.fulfilment.ranking.rank_candidates")
@@ -537,7 +537,7 @@ def test_escalate_unfulfilled_item_creates_reroute_request(mock_scope, mock_crea
     )
     mock_scope.return_value.__enter__.return_value = session
 
-    _escalate_unfulfilled_item(1)
+    escalate_unfulfilled_item(1)
 
     mock_create.assert_called_once_with(
         buyer_user_id="USR_BUYER1",
@@ -564,7 +564,7 @@ def test_escalate_unfulfilled_item_no_op_when_not_unfulfilled(mock_scope, mock_c
     )
     mock_scope.return_value.__enter__.return_value = session
 
-    _escalate_unfulfilled_item(1)
+    escalate_unfulfilled_item(1)
 
     mock_create.assert_not_called()
 
@@ -588,7 +588,7 @@ def test_escalate_unfulfilled_item_no_op_for_seller_only(mock_scope, mock_create
     )
     mock_scope.return_value.__enter__.return_value = session
 
-    _escalate_unfulfilled_item(1)
+    escalate_unfulfilled_item(1)
 
     mock_create.assert_not_called()
 
@@ -618,7 +618,7 @@ def test_escalate_unfulfilled_item_no_op_when_already_escalated(
     )
     mock_scope.return_value.__enter__.return_value = session
 
-    _escalate_unfulfilled_item(1)
+    escalate_unfulfilled_item(1)
 
     mock_create.assert_not_called()
 
@@ -629,6 +629,6 @@ def test_escalate_unfulfilled_item_swallows_exceptions(mock_scope, mock_create):
     mock_scope.side_effect = RuntimeError("db exploded")
 
     # Must not raise -- escalation failures are logged, not propagated.
-    _escalate_unfulfilled_item(1)
+    escalate_unfulfilled_item(1)
 
     mock_create.assert_not_called()

@@ -555,3 +555,133 @@ class FulfilmentService:
             )
 
         return {"timed_out": timed_out}
+
+    @staticmethod
+    def recover_stuck_allocations() -> dict:
+        """14.3 generic stuck-state recovery for fulfilment, closing the
+        gap flagged in Phase 8: AWAITING_SELLER and AWAITING_BUYER_APPROVAL
+        each have their own deadline column and worker (expire_stale_
+        allocations/expire_stale_buyer_approvals, above) -- but REROUTING
+        has no deadline of its own, nothing ever revisits it. And even a
+        DECLINED/TIMEOUT/BUYER_REJECTED/CANCELLED_BY_SELLER allocation only
+        actually progresses because decline()/expire_stale_allocations()/
+        buyer_reject_reroute()/cancel_after_accept() each call
+        ReroutingService.attempt_reroute() synchronously, in-process, right
+        after landing that status -- if the process crashes between the two,
+        there's no durable retry record, and the item just sits there.
+
+        Sweeps for allocations whose *order item* has passed its own 10-min
+        fulfilment deadline (ReroutingService.FULFILMENT_DEADLINE_MINUTES,
+        anchored at the item's first allocation attempt -- same calc
+        attempt_reroute() itself does), restricted to each item's single
+        most recent allocation (a superseded REROUTING row from an earlier,
+        already-successful reroute is normal permanent history, not stuck --
+        only the current one can be).
+
+        For the four statuses attempt_reroute() already accepts as a
+        starting point, this just re-invokes it -- safe/idempotent per its
+        own docstring, so no separate resolution logic is needed here. For
+        REROUTING specifically, which attempt_reroute() does NOT accept
+        (calling it would silently no-op), resolves directly to UNFULFILLED
+        here instead and escalates (7.4) -- the exact same outcome
+        attempt_reroute() reaches when it hits this deadline internally.
+        """
+        from .rerouting import (
+            FULFILMENT_DEADLINE_MINUTES,
+            ReroutingService,
+            escalate_unfulfilled_item,
+        )
+
+        stuck_statuses = (
+            FulfilmentAllocationStatus.DECLINED,
+            FulfilmentAllocationStatus.TIMEOUT,
+            FulfilmentAllocationStatus.BUYER_REJECTED,
+            FulfilmentAllocationStatus.CANCELLED_BY_SELLER,
+            FulfilmentAllocationStatus.REROUTING,
+        )
+        cutoff = datetime.utcnow() - timedelta(minutes=FULFILMENT_DEADLINE_MINUTES)
+
+        retryable_ids = []
+        stuck_rerouting_ids = []
+        with session_scope() as session:
+            # order_item ids with *any* allocation at rest in a stuck
+            # status -- just the seed set to know which items to check;
+            # whether one is actually stuck is decided below from that
+            # item's true latest allocation, not this row itself (an
+            # earlier REROUTING/DECLINED/etc. row can be normal superseded
+            # history if a later allocation for the same item has since
+            # moved on, e.g. to ACCEPTED).
+            item_ids = {
+                row[0]
+                for row in session.query(FulfilmentAllocation.order_item_id)
+                .filter(FulfilmentAllocation.status.in_(stuck_statuses))
+                .distinct()
+                .all()
+            }
+
+            candidates = []
+            first_attempt_at = {}
+            for order_item_id in item_ids:
+                history = (
+                    session.query(FulfilmentAllocation)
+                    .filter_by(order_item_id=order_item_id)
+                    .order_by(FulfilmentAllocation.created_at.asc())
+                    .all()
+                )
+                if not history:
+                    continue
+                first_attempt_at[order_item_id] = history[0].created_at
+                latest = max(history, key=lambda a: a.id)
+                if latest.status in stuck_statuses:
+                    candidates.append(latest)
+
+            for allocation in candidates:
+                anchor = (
+                    first_attempt_at.get(allocation.order_item_id)
+                    or allocation.created_at
+                )
+                if anchor > cutoff:
+                    continue
+
+                if allocation.status == FulfilmentAllocationStatus.REROUTING:
+                    stuck_rerouting_ids.append(allocation.id)
+                else:
+                    retryable_ids.append(allocation.id)
+
+        for allocation_id in retryable_ids:
+            ReroutingService.attempt_reroute(allocation_id)
+
+        resolved = 0
+        for allocation_id in stuck_rerouting_ids:
+            with session_scope() as session:
+                allocation = session.query(FulfilmentAllocation).get(allocation_id)
+                if (
+                    not allocation
+                    or allocation.status != FulfilmentAllocationStatus.REROUTING
+                ):
+                    continue
+
+                allocation.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
+                resolved += 1
+
+                order_item = session.query(OrderItem).get(allocation.order_item_id)
+                if order_item:
+                    OrderEventService.emit(
+                        session,
+                        order_id=order_item.order_id,
+                        order_item_id=allocation.order_item_id,
+                        event_type=OrderEventType.ITEM_UNFULFILLED,
+                        actor_type=ActorType.SYSTEM,
+                        metadata={"reason": "stuck_rerouting_deadline_recovery"},
+                        idempotency_key=(
+                            f"event:item_unfulfilled_stuck_recovery:{allocation.id}"
+                        ),
+                    )
+                session.flush()
+
+            escalate_unfulfilled_item(allocation_id)
+
+        return {
+            "retried": len(retryable_ids),
+            "resolved_stuck_rerouting": resolved,
+        }
