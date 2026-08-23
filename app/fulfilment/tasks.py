@@ -3,6 +3,7 @@
 import logging
 
 from main.workers import celery_app
+from app.libs.worker_log import record_worker_run
 
 logger = logging.getLogger(__name__)
 
@@ -13,11 +14,13 @@ def expire_stale_allocations():
     TIMEOUT (12.2). Stops there -- the reroute loop is what advances a
     TIMEOUT (or DECLINED) allocation to REROUTING once it actually picks
     the item up."""
-    from app.fulfilment.services import FulfilmentService
+    with record_worker_run("app.fulfilment.tasks.expire_stale_allocations") as run:
+        from app.fulfilment.services import FulfilmentService
 
-    result = FulfilmentService.expire_stale_allocations()
-    logger.info("Timed out %s stale fulfilment allocation(s)", result["timed_out"])
-    return result
+        result = FulfilmentService.expire_stale_allocations()
+        logger.info("Timed out %s stale fulfilment allocation(s)", result["timed_out"])
+        run.result = result
+        return result
 
 
 @celery_app.task(
@@ -29,13 +32,16 @@ def expire_stale_buyer_approvals():
     substitution retry (see FulfilmentService.expire_stale_buyer_approvals'
     own docstring for why this is deliberately unlike the seller-timeout
     task above)."""
-    from app.fulfilment.services import FulfilmentService
+    with record_worker_run("app.fulfilment.tasks.expire_stale_buyer_approvals") as run:
+        from app.fulfilment.services import FulfilmentService
 
-    result = FulfilmentService.expire_stale_buyer_approvals()
-    logger.info(
-        "Timed out %s stale buyer-approval allocation(s) (9.1)", result["timed_out"]
-    )
-    return result
+        result = FulfilmentService.expire_stale_buyer_approvals()
+        logger.info(
+            "Timed out %s stale buyer-approval allocation(s) (9.1)",
+            result["timed_out"],
+        )
+        run.result = result
+        return result
 
 
 @celery_app.task(
@@ -48,16 +54,20 @@ def recover_stuck_fulfilment_allocations():
     landing and the attempt_reroute() call that's supposed to follow it
     synchronously. See FulfilmentService.recover_stuck_allocations'
     docstring for the full reasoning."""
-    from app.fulfilment.services import FulfilmentService
+    with record_worker_run(
+        "app.fulfilment.tasks.recover_stuck_fulfilment_allocations"
+    ) as run:
+        from app.fulfilment.services import FulfilmentService
 
-    result = FulfilmentService.recover_stuck_allocations()
-    logger.info(
-        "Fulfilment deadline recovery: retried %s, resolved %s stuck REROUTING "
-        "allocation(s)",
-        result["retried"],
-        result["resolved_stuck_rerouting"],
-    )
-    return result
+        result = FulfilmentService.recover_stuck_allocations()
+        logger.info(
+            "Fulfilment deadline recovery: retried %s, resolved %s stuck REROUTING "
+            "allocation(s)",
+            result["retried"],
+            result["resolved_stuck_rerouting"],
+        )
+        run.result = result
+        return result
 
 
 @celery_app.task(

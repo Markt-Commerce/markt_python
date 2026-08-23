@@ -101,4 +101,13 @@ CELERYBEAT_SCHEDULE = {
         "schedule": crontab(minute="*/3"),  # Backstop sweep, 10-min deadline (14.3)
         "options": {"queue": "default"},
     },
+    "recover-stuck-orders": {
+        "task": "app.ops.tasks.recover_stuck_orders",
+        # Generic 14.3 backstop over every worker above -- coarser than any
+        # of their own tight intervals on purpose (it exists for when one
+        # of those didn't run, not to duplicate them every cycle), while
+        # still well inside the tightest real deadline (10 min).
+        "schedule": crontab(minute="*/15"),
+        "options": {"queue": "default"},
+    },
 }

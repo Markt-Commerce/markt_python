@@ -5,6 +5,7 @@ from datetime import datetime
 
 from main.workers import celery_app
 from app.libs.session import session_scope
+from app.libs.worker_log import record_worker_run
 from app.inventory.confidence import InventoryConfidenceService
 from app.inventory.models import InventoryReservation
 from app.products.models import Product, ProductStatus
@@ -23,25 +24,27 @@ TTL_BOUND_STATUSES = (
 def expire_stale_reservations():
     """Move reservations past their TTL to EXPIRED, releasing the stock
     they were holding (8.1) so it counts as available again."""
-    now = datetime.utcnow()
-    expired_count = 0
+    with record_worker_run("app.inventory.tasks.expire_stale_reservations") as run:
+        now = datetime.utcnow()
+        expired_count = 0
 
-    with session_scope() as session:
-        stale_reservations = (
-            session.query(InventoryReservation)
-            .filter(
-                InventoryReservation.status.in_(TTL_BOUND_STATUSES),
-                InventoryReservation.expires_at < now,
+        with session_scope() as session:
+            stale_reservations = (
+                session.query(InventoryReservation)
+                .filter(
+                    InventoryReservation.status.in_(TTL_BOUND_STATUSES),
+                    InventoryReservation.expires_at < now,
+                )
+                .all()
             )
-            .all()
-        )
 
-        for reservation in stale_reservations:
-            reservation.transition_to(InventoryReservation.Status.EXPIRED)
-            expired_count += 1
+            for reservation in stale_reservations:
+                reservation.transition_to(InventoryReservation.Status.EXPIRED)
+                expired_count += 1
 
-    logger.info("Expired %s stale inventory reservations", expired_count)
-    return {"expired": expired_count}
+        logger.info("Expired %s stale inventory reservations", expired_count)
+        run.result = {"expired": expired_count}
+        return run.result
 
 
 @celery_app.task(

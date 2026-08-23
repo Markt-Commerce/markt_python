@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 from main.workers import celery_app
 from app.libs.session import session_scope
+from app.libs.worker_log import record_worker_run
 from app.payments.models import Payment, PaymentStatus
 
 logger = logging.getLogger(__name__)
@@ -37,39 +38,43 @@ def expire_abandoned_checkout_payments():
     PaymentService.complete_checkout_payment's own reconciliation handles
     it (refunds the specific unsecured item rather than pretending it's
     fulfillable)."""
-    cutoff = datetime.utcnow() - timedelta(minutes=CHECKOUT_PAYMENT_ABANDON_MINUTES)
-    expired_count = 0
-    reservation_ids_to_release = []
+    with record_worker_run(
+        "app.payments.tasks.expire_abandoned_checkout_payments"
+    ) as run:
+        cutoff = datetime.utcnow() - timedelta(minutes=CHECKOUT_PAYMENT_ABANDON_MINUTES)
+        expired_count = 0
+        reservation_ids_to_release = []
 
-    with session_scope() as session:
-        stale_payments = (
-            session.query(Payment)
-            .filter(
-                Payment.status == PaymentStatus.PENDING,
-                Payment.order_id.is_(None),
-                Payment.pending_checkout_data.isnot(None),
-                Payment.created_at < cutoff,
+        with session_scope() as session:
+            stale_payments = (
+                session.query(Payment)
+                .filter(
+                    Payment.status == PaymentStatus.PENDING,
+                    Payment.order_id.is_(None),
+                    Payment.pending_checkout_data.isnot(None),
+                    Payment.created_at < cutoff,
+                )
+                .all()
             )
-            .all()
+
+            for payment in stale_payments:
+                payment.transition_to(PaymentStatus.FAILED)
+                snapshot = payment.pending_checkout_data or {}
+                for item in snapshot.get("items", []):
+                    reservation_id = item.get("reservation_id")
+                    if reservation_id:
+                        reservation_ids_to_release.append(reservation_id)
+                expired_count += 1
+
+        if reservation_ids_to_release:
+            from app.inventory.services import InventoryService
+
+            InventoryService.release_reservations(reservation_ids_to_release)
+
+        logger.info(
+            "Expired %s abandoned checkout payment(s), released %s reservation(s)",
+            expired_count,
+            len(reservation_ids_to_release),
         )
-
-        for payment in stale_payments:
-            payment.transition_to(PaymentStatus.FAILED)
-            snapshot = payment.pending_checkout_data or {}
-            for item in snapshot.get("items", []):
-                reservation_id = item.get("reservation_id")
-                if reservation_id:
-                    reservation_ids_to_release.append(reservation_id)
-            expired_count += 1
-
-    if reservation_ids_to_release:
-        from app.inventory.services import InventoryService
-
-        InventoryService.release_reservations(reservation_ids_to_release)
-
-    logger.info(
-        "Expired %s abandoned checkout payment(s), released %s reservation(s)",
-        expired_count,
-        len(reservation_ids_to_release),
-    )
-    return {"expired": expired_count}
+        run.result = {"expired": expired_count}
+        return run.result
