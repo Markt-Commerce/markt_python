@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.libs.errors import NotFoundError, ValidationError
+from app.notifications.models import NotificationType
 from app.orders.events import OrderEventType
 from app.orders.models import OrderItem
 from app.orders.services import OrderService
@@ -35,9 +36,10 @@ def _order_item(status=OrderItem.Status.PROCESSING, **overrides):
     return item
 
 
+@patch("app.orders.services.NotificationService.create_notification")
 @patch("app.wallet.services.WalletService.refund_order_item_to_wallet")
 @patch("app.orders.services.session_scope")
-def test_refund_unresolved_item_happy_path(mock_scope, mock_refund):
+def test_refund_unresolved_item_happy_path(mock_scope, mock_refund, mock_notify):
     payment = _payment(PaymentStatus.COMPLETED, amount=1000.0)
     order = SimpleNamespace(
         id="ORD_1",
@@ -58,6 +60,13 @@ def test_refund_unresolved_item_happy_path(mock_scope, mock_refund):
     assert order_item.status == OrderItem.Status.CANCELLED
     assert payment.status == PaymentStatus.PARTIALLY_REFUNDED
     mock_refund.assert_called_once_with("USR_BUYER1", 1, 1000.0, reason="test reason")
+    # Phase 12 (15): "refund issued" notification.
+    mock_notify.assert_called_once()
+    assert mock_notify.call_args.kwargs["user_id"] == "USR_BUYER1"
+    assert (
+        mock_notify.call_args.kwargs["notification_type"]
+        == NotificationType.REFUND_ISSUED
+    )
 
 
 @patch("app.wallet.services.WalletService.refund_order_item_to_wallet")
@@ -138,11 +147,12 @@ def test_refund_unresolved_item_accounts_for_prior_refunds(mock_scope, mock_refu
     mock_refund.assert_not_called()
 
 
+@patch("app.orders.services.NotificationService.create_notification")
 @patch("app.wallet.services.WalletService.refund_order_to_wallet")
 @patch("app.orders.services.ProductService.restore_inventory_for_order")
 @patch("app.orders.services.session_scope")
 def test_cancel_order_refunds_only_remaining_amount_after_prior_item_refund(
-    mock_scope, mock_restore, mock_refund
+    mock_scope, mock_restore, mock_refund, mock_notify
 ):
     """cancel_order must not re-refund money already paid out by an
     earlier per-item refund (9.1 ASK timeout, or any future partial
@@ -176,3 +186,13 @@ def test_cancel_order_refunds_only_remaining_amount_after_prior_item_refund(
     emitted_event = session.add.call_args[0][0]
     assert emitted_event.event_type == OrderEventType.ORDER_CANCELLED
     assert emitted_event.order_id == "ORD_1"
+
+    # Phase 12 (15): both ORDER_CANCELLED and REFUND_ISSUED notifications
+    # (paid_amount > 0 here, via the remaining-700 refund).
+    notified_types = {
+        call.kwargs["notification_type"] for call in mock_notify.call_args_list
+    }
+    assert notified_types == {
+        NotificationType.ORDER_CANCELLED,
+        NotificationType.REFUND_ISSUED,
+    }

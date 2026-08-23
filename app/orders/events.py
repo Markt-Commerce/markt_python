@@ -51,6 +51,10 @@ class OrderEventType(Enum):
     ITEM_SUBSTITUTION_REJECTED = "item_substitution_rejected"
     ITEM_REFUNDED = "item_refunded"
     ITEM_DELIVERED = "item_delivered"
+    # 10.7: a rider reported a failed delivery attempt (Phase 12 gap-fill --
+    # the run-based delivery flow, app.deliveries.pickup/failure, predates
+    # this event coverage; see DeliveryFailureService.report_failure).
+    ITEM_DELIVERY_FAILED = "item_delivery_failed"
 
 
 class ActorType(Enum):

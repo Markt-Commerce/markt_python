@@ -40,6 +40,17 @@ class NotificationType(Enum):
     # wait for a fuller run (default) or pay now for single/near-single
     # delivery.
     THIN_VOLUME_DELIVERY_CHOICE = "thin_volume_delivery_choice"
+    # Phase 12 (15): rerouting genuinely exhausted, no replacement found --
+    # see app.fulfilment.rerouting's ITEM_UNFULFILLED event-log emission,
+    # which this is fired alongside.
+    ITEM_UNFULFILLED = "item_unfulfilled"
+    # Buyer-initiated whole-order cancellation (OrderService.cancel_order).
+    ORDER_CANCELLED = "order_cancelled"
+    # 10.7: a rider reported a failed delivery attempt for this order.
+    DELIVERY_FAILED = "delivery_failed"
+    # Any of the three refund paths (cancel_order, refund_unresolved_item,
+    # approve_return) actually credited the buyer's wallet.
+    REFUND_ISSUED = "refund_issued"
     # Social notifications
     NICHE_INVITATION = "niche_invitation"
     NICHE_POST_APPROVED = "niche_post_approved"

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from app.fulfilment.models import FulfilmentAllocation, FulfilmentAllocationStatus
+from app.notifications.models import NotificationType
 from app.orders.models import FulfilmentPreference
 from app.fulfilment.rerouting import (
     FULFILMENT_DEADLINE_MINUTES,
@@ -290,6 +291,78 @@ def test_attempt_reroute_seller_only_skips_straight_to_unfulfilled(
     # candidates -- SELLER_ONLY short-circuits before any of that.
     fa_mock.filter_by.assert_not_called()
     mock_escalate.assert_not_called()
+
+
+@patch("app.fulfilment.rerouting.NotificationService.create_notification")
+@patch("app.fulfilment.rerouting.escalate_unfulfilled_item")
+@patch("app.fulfilment.rerouting.session_scope")
+def test_attempt_reroute_notifies_buyer_when_unfulfilled(
+    mock_scope, mock_escalate, mock_notify
+):
+    """Phase 12 (15): "no replacement found" -- the buyer must be
+    notified, not just have an event logged."""
+    failed = _failed_allocation(FulfilmentAllocationStatus.DECLINED)
+    order_item = _order_item(
+        fulfilment_preference=FulfilmentPreference.SELLER_ONLY,
+        order=SimpleNamespace(
+            buyer=SimpleNamespace(user_id="USR_BUYER1"), buyer_id="BYR_1"
+        ),
+    )
+
+    fa_mock = MagicMock()
+    fa_mock.get.return_value = failed
+
+    oi_mock = MagicMock()
+    oi_mock.get.return_value = order_item
+
+    session = MagicMock()
+    session.query.side_effect = _query_side_effect(
+        fa_mock, oi_mock, MagicMock(), MagicMock()
+    )
+    mock_scope.return_value.__enter__.return_value = session
+
+    ReroutingService.attempt_reroute(1)
+
+    mock_notify.assert_called_once()
+    call_kwargs = mock_notify.call_args.kwargs
+    assert call_kwargs["user_id"] == "USR_BUYER1"
+    assert call_kwargs["notification_type"] == NotificationType.ITEM_UNFULFILLED
+    assert call_kwargs["reference_id"] == str(order_item.id)
+
+
+@patch("app.fulfilment.rerouting.NotificationService.create_notification")
+@patch("app.fulfilment.rerouting.escalate_unfulfilled_item")
+@patch("app.fulfilment.rerouting.session_scope")
+def test_attempt_reroute_swallows_notification_failure(
+    mock_scope, mock_escalate, mock_notify
+):
+    """A notification failure must never mask the UNFULFILLED transition
+    that already happened."""
+    failed = _failed_allocation(FulfilmentAllocationStatus.DECLINED)
+    order_item = _order_item(
+        fulfilment_preference=FulfilmentPreference.SELLER_ONLY,
+        order=SimpleNamespace(
+            buyer=SimpleNamespace(user_id="USR_BUYER1"), buyer_id="BYR_1"
+        ),
+    )
+    mock_notify.side_effect = Exception("notification service down")
+
+    fa_mock = MagicMock()
+    fa_mock.get.return_value = failed
+
+    oi_mock = MagicMock()
+    oi_mock.get.return_value = order_item
+
+    session = MagicMock()
+    session.query.side_effect = _query_side_effect(
+        fa_mock, oi_mock, MagicMock(), MagicMock()
+    )
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = ReroutingService.attempt_reroute(1)
+
+    assert result is None
+    assert failed.status == FulfilmentAllocationStatus.UNFULFILLED
 
 
 @patch("app.fulfilment.rerouting.escalate_unfulfilled_item")

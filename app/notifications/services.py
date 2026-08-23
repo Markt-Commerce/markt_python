@@ -72,6 +72,30 @@ class NotificationService:
             "title": "Approval needed",
             "message": "{message}",
         },
+        # 10.3 -- real bug, never caught: this type had no template entry
+        # at all, so a real (non-mocked) call would raise ValueError.
+        # Caught while wiring Phase 12's notifications, none of which
+        # exercise the real create_notification() call path in tests.
+        NotificationType.THIN_VOLUME_DELIVERY_CHOICE: {
+            "title": "Delivery update",
+            "message": "{message}",
+        },
+        NotificationType.ITEM_UNFULFILLED: {
+            "title": "Item couldn't be fulfilled",
+            "message": "{message}",
+        },
+        NotificationType.ORDER_CANCELLED: {
+            "title": "Order cancelled",
+            "message": "Order #{order_id} has been cancelled.",
+        },
+        NotificationType.DELIVERY_FAILED: {
+            "title": "Delivery attempt failed",
+            "message": "{message}",
+        },
+        NotificationType.REFUND_ISSUED: {
+            "title": "Refund issued",
+            "message": "{message}",
+        },
         # Buyer request notifications
         NotificationType.REQUEST_OFFER: {
             "title": "New offer",
@@ -286,6 +310,58 @@ class NotificationService:
             "immediate_websocket": True,
             "push_when_offline": True,
             "always_email": True,  # Critical business notification
+        },
+        # Phase 12 (15) -- same "critical business notification" treatment
+        # as payment/order events above. Without an explicit entry here,
+        # NotificationService.create_notification defaults a type to
+        # WEBSOCKET-only (see config_channels' own fallback) -- meaning a
+        # buyer not actively connected at that exact moment (the normal
+        # case for e.g. "a rider reported your delivery failed") would
+        # never be pushed at all. A real gap, caught by asking "how does
+        # this reach the mobile app" rather than by any test -- none of
+        # this phase's tests exercise CHANNEL_CONFIG, only that
+        # create_notification was called.
+        NotificationType.ITEM_UNFULFILLED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.ORDER_CANCELLED: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,
+        },
+        NotificationType.DELIVERY_FAILED: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,
+        },
+        NotificationType.REFUND_ISSUED: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,  # Money moved -- buyer should always know
+        },
+        # 10.3: informational/actionable in-app prompt, not a critical
+        # financial event -- push so it's not missed, no email.
+        NotificationType.THIN_VOLUME_DELIVERY_CHOICE: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
         },
         # Social notifications
         NotificationType.NICHE_INVITATION: {

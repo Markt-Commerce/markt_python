@@ -22,6 +22,9 @@ from typing import Optional
 from app.inventory.models import HandlingClass, ProductHandling
 from app.libs.errors import ConflictError, NotFoundError, ValidationError
 from app.libs.session import session_scope
+from app.notifications.models import NotificationType
+from app.notifications.services import NotificationService
+from app.orders.events import ActorType, OrderEventService, OrderEventType
 from app.orders.models import OrderItem
 
 from .models import (
@@ -127,6 +130,26 @@ class DeliveryFailureService:
             session.add(failure)
             session.flush()
 
+            # 14.2/Phase 12 gap-fill: the run-based delivery flow
+            # (app.deliveries.pickup/failure) predates the event log's
+            # coverage -- this closes it for the failure-reporting moment,
+            # same outbox discipline as everywhere else (caller's already-
+            # open session, no nested session_scope()).
+            OrderEventService.emit(
+                session,
+                order_id=order_id,
+                event_type=OrderEventType.ITEM_DELIVERY_FAILED,
+                actor_type=ActorType.RIDER,
+                actor_id=user_id,
+                metadata={"reason": reason.value, "delivery_run_id": run_id},
+            )
+
+            buyer_user_id = (
+                run_order.order.buyer.user_id
+                if run_order.order and run_order.order.buyer
+                else None
+            )
+
             logger.warning(
                 "Delivery failure reported: order %s, run %s, reason %s "
                 "(perishable=%s)",
@@ -136,7 +159,37 @@ class DeliveryFailureService:
                 is_perishable,
             )
 
-            return _serialize(failure)
+            result = _serialize(failure)
+
+        # Phase 12 (15): notify the buyer -- after the transaction above
+        # commits, not before. NotificationService.create_notification
+        # always opens its own session_scope() to persist the Notification
+        # row; calling it while the transaction above is still open would
+        # commit that transaction early (see
+        # app.fulfilment.rerouting._notify_buyer_item_unfulfilled's own
+        # docstring for the fuller story on why that matters).
+        if buyer_user_id:
+            try:
+                NotificationService.create_notification(
+                    user_id=buyer_user_id,
+                    notification_type=NotificationType.DELIVERY_FAILED,
+                    reference_type="order",
+                    reference_id=order_id,
+                    metadata_={
+                        "message": (
+                            "A delivery attempt for your order failed. "
+                            "We're working on next steps."
+                        ),
+                        "reason": reason.value,
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to notify buyer of delivery failure for order %s",
+                    order_id,
+                )
+
+        return result
 
     @staticmethod
     def resolve_failure(
