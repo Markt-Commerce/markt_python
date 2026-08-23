@@ -239,10 +239,22 @@ class InventoryConfidenceService:
             return record
 
     @staticmethod
-    def get_score_for_product(product_id: str) -> float:
+    def get_score_for_product(product_id: str, session=None) -> float:
         """Last computed confidence score, or the cold-start prior if none
-        exists yet -- doesn't force a synchronous calculation."""
-        with session_scope() as session:
+        exists yet -- doesn't force a synchronous calculation.
+
+        Accepts an already-open `session` so a caller mid-transaction
+        (InventoryService.reserve_stock's row-locked transaction,
+        ReroutingService.attempt_reroute's) doesn't have this open a
+        *separate* nested session_scope() of its own -- that would commit
+        (and, for reserve_stock, release the row lock backing) the
+        caller's own in-progress transaction early. This was a real bug:
+        it silently broke reserve_stock's concurrency guarantee (two
+        concurrent reservations against stock=1 could both succeed),
+        caught by the CI job's disposable-database concurrency test, not
+        by any mocked-session unit test -- none of those exercise a real
+        transaction/commit boundary."""
+        if session is not None:
             record = (
                 session.query(InventoryConfidenceScore)
                 .filter_by(product_id=product_id)
@@ -254,9 +266,16 @@ class InventoryConfidenceService:
                 else InventoryConfidenceService.get_category_prior(session, product_id)
             )
 
+        with session_scope() as session:
+            return InventoryConfidenceService.get_score_for_product(
+                product_id, session=session
+            )
+
     @staticmethod
-    def get_band_for_product(product_id: str) -> str:
+    def get_band_for_product(product_id: str, session=None) -> str:
         """Confidence band for gating (8.3). See get_score_for_product."""
         return get_confidence_band(
-            InventoryConfidenceService.get_score_for_product(product_id)
+            InventoryConfidenceService.get_score_for_product(
+                product_id, session=session
+            )
         )

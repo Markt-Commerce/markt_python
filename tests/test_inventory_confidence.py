@@ -235,6 +235,28 @@ def test_get_score_for_product_falls_back_to_prior_when_unscored(mock_scope):
 
 
 @patch("app.inventory.confidence.session_scope")
+def test_get_score_for_product_uses_passed_session_without_opening_a_new_one(
+    mock_scope,
+):
+    """Real bug fix: a caller mid-transaction (InventoryService.reserve_stock's
+    row-locked transaction, ReroutingService.attempt_reroute's) must be able
+    to pass its own open session through -- opening a *separate* nested
+    session_scope() here would commit (and, for reserve_stock, release the
+    row lock backing) the caller's own in-progress transaction early. This
+    silently broke reserve_stock's concurrency guarantee in production
+    (two concurrent reservations against stock=1 could both succeed),
+    caught only by the real-database CI job, not by any mocked-session
+    test -- until now."""
+    existing = SimpleNamespace(score=0.85)
+    session = _session(existing_score=existing)
+
+    result = InventoryConfidenceService.get_score_for_product("PRD_1", session=session)
+
+    assert result == 0.85
+    mock_scope.assert_not_called()
+
+
+@patch("app.inventory.confidence.session_scope")
 def test_calculate_score_raises_not_found_for_missing_product(mock_scope):
     session = _session(product=None)
     mock_scope.return_value.__enter__.return_value = session
@@ -266,3 +288,16 @@ def test_get_band_for_product_falls_back_to_prior_when_unscored(mock_scope):
     assert (
         InventoryConfidenceService.get_band_for_product("PRD_1") == ConfidenceBand.LOW
     )
+
+
+@patch("app.inventory.confidence.session_scope")
+def test_get_band_for_product_uses_passed_session_without_opening_a_new_one(
+    mock_scope,
+):
+    existing = SimpleNamespace(score=0.85)
+    session = _session(existing_score=existing)
+
+    result = InventoryConfidenceService.get_band_for_product("PRD_1", session=session)
+
+    assert result == ConfidenceBand.HIGH
+    mock_scope.assert_not_called()

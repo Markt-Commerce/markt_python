@@ -134,6 +134,12 @@ def test_reserve_stock_locks_owner_row_and_creates_held_reservation(
     assert reservation.buyer_id == 42
     assert reservation.expires_at is not None
     session.add.assert_called_once_with(reservation)
+    # Regression guard: must pass the already-open (row-locked) session
+    # through, not let get_band_for_product open its own nested
+    # session_scope() -- that would commit (and release the row lock
+    # backing) this transaction early. See test_inventory_confidence.py's
+    # own regression test for the fix itself.
+    mock_band.assert_called_once_with("PRD_1", session=session)
 
 
 @patch.object(InventoryConfidenceService, "get_band_for_product")

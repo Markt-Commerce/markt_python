@@ -158,9 +158,21 @@ class FulfilmentAllocation(BaseModel):
             "uq_fulfilment_allocations_active_owner",
             "order_item_id",
             unique=True,
+            # SQLAlchemy's db.Enum(SomeEnum) stores each Postgres enum
+            # value as the Python member's NAME (e.g. "AWAITING_SELLER"),
+            # not its .value, unless values_callable overrides that --
+            # this codebase never does. Built from ACTIVE_STATUSES'
+            # .name rather than hand-typed lowercase literals so this
+            # can't drift out of sync with the real enum type again (an
+            # earlier hardcoded-lowercase version of this WHERE clause
+            # made db.create_all() fail outright against a real Postgres
+            # DB -- caught by the CI job's disposable-database tests,
+            # never in local mocked-session tests, since those never
+            # touch a real enum type at all).
             postgresql_where=db.text(
-                "status IN ('awaiting_seller', 'awaiting_buyer_approval', "
-                "'accepted', 'preparing')"
+                "status IN ({})".format(
+                    ", ".join(f"'{s.name}'" for s in ACTIVE_STATUSES)
+                )
             ),
         ),
     )
