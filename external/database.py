@@ -80,6 +80,8 @@ class Database:
                 DeliveryLastLocation,
                 DeliveryOrderAssignment,
                 LocationUpdateRoom,
+                DeliveryRun,
+                DeliveryRunOrder,
             )
 
         # Import other models as needed

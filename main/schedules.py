@@ -110,4 +110,14 @@ CELERYBEAT_SCHEDULE = {
         "schedule": crontab(minute="*/15"),
         "options": {"queue": "default"},
     },
+    "attach-eligible-orders-to-delivery-runs": {
+        "task": "app.deliveries.tasks.attach_eligible_orders",
+        "schedule": crontab(minute="*/5"),  # 10.1
+        "options": {"queue": "default"},
+    },
+    "close-delivery-runs-past-cutoff": {
+        "task": "app.deliveries.tasks.close_runs_past_cutoff",
+        "schedule": crontab(minute="*/10"),  # 10.2/10.3 -- cadence itself is ~2h
+        "options": {"queue": "default"},
+    },
 }
