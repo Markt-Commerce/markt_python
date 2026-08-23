@@ -5,6 +5,7 @@ from flask_login import login_required, login_user, current_user
 from marshmallow import fields
 
 # project imports
+from app.libs.decorators import admin_required
 from app.libs.schemas import PaginationQueryArgs
 
 # app imports
@@ -37,10 +38,16 @@ from .schemas import (
     DeliveryRunOrderPodQRResponseSchema,
     DeliveryRunOrderPodConfirmRequestSchema,
     DeliveryRunOrderPodConfirmResponseSchema,
+    DeliveryFailureReportRequestSchema,
+    DeliveryFailureSchema,
+    DeliveryFailureResolveRequestSchema,
+    DeliveryFailureCompleteRequestSchema,
 )
 from .services import DeliveryService
 from .run_assignment import DeliveryRunAssignmentService
 from .pickup import DeliveryRunPickupService, DeliveryRunPodService
+from .failure import DeliveryFailureService
+from .models import DeliveryCostBearer, DeliveryFailureReason, DeliveryRecoveryAction
 
 bp = Blueprint(
     "deliveries",
@@ -284,4 +291,51 @@ class DeliveryRunOrderPodConfirm(MethodView):
         and completes the run once every attached order has confirmed."""
         return DeliveryRunPodService.confirm_order_pod(
             current_user.id, run_id, order_id, data["qr_code"]
+        )
+
+
+@bp.route("/runs/<string:run_id>/orders/<string:order_id>/report-failure")
+class DeliveryRunOrderReportFailure(MethodView):
+    @login_required
+    @bp.arguments(DeliveryFailureReportRequestSchema, location="json")
+    @bp.response(200, DeliveryFailureSchema)
+    def post(self, data, run_id, order_id):
+        """10.7: rider reports a failed delivery attempt with a typed
+        reason."""
+        return DeliveryFailureService.report_failure(
+            current_user.id,
+            run_id,
+            order_id,
+            DeliveryFailureReason(data["reason"]),
+            notes=data.get("notes"),
+        )
+
+
+@bp.route("/failures/<string:failure_id>/resolve")
+class DeliveryFailureResolve(MethodView):
+    @admin_required
+    @bp.arguments(DeliveryFailureResolveRequestSchema, location="json")
+    @bp.response(200, DeliveryFailureSchema)
+    def post(self, data, failure_id):
+        """10.7: record the chosen recovery action and who bears the
+        cost -- a support/business decision, not made by the reporting
+        rider (admin-only)."""
+        return DeliveryFailureService.resolve_failure(
+            failure_id,
+            DeliveryRecoveryAction(data["recovery_action"]),
+            DeliveryCostBearer(data["cost_bearer"]),
+            notes=data.get("notes"),
+        )
+
+
+@bp.route("/failures/<string:failure_id>/complete")
+class DeliveryFailureComplete(MethodView):
+    @admin_required
+    @bp.arguments(DeliveryFailureCompleteRequestSchema, location="json")
+    @bp.response(200, DeliveryFailureSchema)
+    def post(self, data, failure_id):
+        """10.7: mark the already-decided recovery action as actually
+        carried out (admin-only)."""
+        return DeliveryFailureService.complete_recovery(
+            failure_id, notes=data.get("notes")
         )

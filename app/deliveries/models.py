@@ -441,3 +441,94 @@ class DeliveryRunStop(BaseModel):
             "delivery_run_id", "seller_id", name="uq_delivery_run_stop_seller"
         ),
     )
+
+
+class DeliveryFailureReason(Enum):
+    """10.7: typed because the financial consequences differ."""
+
+    BUYER_UNAVAILABLE = "buyer_unavailable"
+    BAD_ADDRESS = "bad_address"
+    BUYER_REFUSED = "buyer_refused"
+
+
+class DeliveryRecoveryAction(Enum):
+    REDELIVERY = "redelivery"
+    RETURN_TO_SELLER = "return_to_seller"
+    DISPOSE = "dispose"
+
+
+class DeliveryCostBearer(Enum):
+    """10.7: "who bears the cost (a business policy; the software must
+    represent it)." Deliberately not auto-derived from
+    DeliveryFailureReason -- which party bears the cost for e.g.
+    BUYER_UNAVAILABLE is a real, currently-undecided business policy
+    question (does Markt absorb a first free reattempt? does the buyer
+    always pay?), not something safe to hardcode. This enum exists so a
+    human decision has somewhere to be recorded, not to make that
+    decision for them -- see DeliveryFailureService.resolve_failure's
+    own docstring."""
+
+    BUYER = "buyer"
+    SELLER = "seller"
+    MARKT = "markt"
+
+
+class DeliveryFailureOutcome(Enum):
+    PENDING = "pending"  # reported, recovery not yet decided
+    RESOLVED = "resolved"  # recovery action + cost bearer decided
+    COMPLETED = "completed"  # recovery action actually carried out
+
+
+class DeliveryFailure(BaseModel, UniqueIdMixin):
+    """10.7: a typed, recorded delivery failure for one order (within a
+    run or otherwise) plus its recovery resolution. Deliberately its own
+    tracked record rather than a new OrderItem.status value -- same
+    "distinct from OrderItem's own lifecycle" philosophy as
+    FulfilmentAllocation (Phase 5): OrderItem tracks the buyer-facing
+    item lifecycle, this tracks the delivery-attempt-level negotiation,
+    which can have its own multi-step resolution without needing
+    OrderItem's transition graph to grow a failure state.
+
+    Scope note: this increment builds the *representation* -- reason,
+    chosen recovery action, cost bearer, outcome -- not full automation
+    of the recovery itself. A REDELIVERY action records intent; actually
+    re-dispatching the order (a new DeliveryRun attempt) is a follow-up,
+    not built here. Money movement contingent on cost_bearer (e.g.
+    refunding the buyer when Markt/seller bears the cost of a DISPOSE)
+    is likewise flagged, not wired -- see the Implementation Checklist.
+    """
+
+    __tablename__ = "delivery_failures"
+    id_prefix = "DFL_"
+
+    id = db.Column(db.String(12), primary_key=True, default=None)
+    delivery_run_id = db.Column(
+        db.String(12), db.ForeignKey("delivery_runs.id"), nullable=True
+    )
+    order_id = db.Column(db.String(12), db.ForeignKey("orders.id"), nullable=False)
+    reason = db.Column(db.Enum(DeliveryFailureReason), nullable=False)
+    reported_by_delivery_user_id = db.Column(
+        db.String(12), db.ForeignKey("delivery_users.id"), nullable=True
+    )
+    reported_at = db.Column(db.DateTime, server_default=db.func.now())
+    report_notes = db.Column(db.Text, nullable=True)
+    # 10.5: "perishables need the fastest recovery path" -- computed once
+    # at report time (any item in the order carrying HandlingClass.PERISHABLE)
+    # so whoever resolves the failure sees the urgency without re-deriving
+    # it themselves.
+    is_perishable = db.Column(db.Boolean, default=False, nullable=False)
+
+    outcome = db.Column(
+        db.Enum(DeliveryFailureOutcome),
+        default=DeliveryFailureOutcome.PENDING,
+        nullable=False,
+    )
+    recovery_action = db.Column(db.Enum(DeliveryRecoveryAction), nullable=True)
+    cost_bearer = db.Column(db.Enum(DeliveryCostBearer), nullable=True)
+    resolution_notes = db.Column(db.Text, nullable=True)
+    resolved_at = db.Column(db.DateTime, nullable=True)
+    completed_at = db.Column(db.DateTime, nullable=True)
+
+    order = db.relationship("Order")
+    delivery_run = db.relationship("DeliveryRun")
+    reported_by = db.relationship("DeliveryUser")
