@@ -84,6 +84,7 @@ class Database:
                 DeliveryRunOrder,
                 DeliveryRunAssignment,
                 DeliveryRunStop,
+                DeliveryFailure,
             )
 
         # Import other models as needed

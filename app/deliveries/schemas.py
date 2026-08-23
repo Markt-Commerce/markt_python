@@ -222,3 +222,44 @@ class DeliveryRunOrderPodConfirmResponseSchema(Schema):
     status = fields.String()
     message = fields.String()
     run_completed = fields.Boolean()
+
+
+# --- Delivery failure & recovery (10.7, Phase 10) ---------------------------
+
+
+class DeliveryFailureReportRequestSchema(Schema):
+    reason = fields.String(
+        required=True,
+        validate=validate.OneOf(["buyer_unavailable", "bad_address", "buyer_refused"]),
+    )
+    notes = fields.String(allow_none=True)
+
+
+class DeliveryFailureSchema(Schema):
+    id = fields.String()
+    delivery_run_id = fields.String(allow_none=True)
+    order_id = fields.String()
+    reason = fields.String()
+    is_perishable = fields.Boolean()
+    outcome = fields.String()
+    recovery_action = fields.String(allow_none=True)
+    cost_bearer = fields.String(allow_none=True)
+    resolution_notes = fields.String(allow_none=True)
+    reported_at = fields.DateTime(allow_none=True)
+    resolved_at = fields.DateTime(allow_none=True)
+    completed_at = fields.DateTime(allow_none=True)
+
+
+class DeliveryFailureResolveRequestSchema(Schema):
+    recovery_action = fields.String(
+        required=True,
+        validate=validate.OneOf(["redelivery", "return_to_seller", "dispose"]),
+    )
+    cost_bearer = fields.String(
+        required=True, validate=validate.OneOf(["buyer", "seller", "markt"])
+    )
+    notes = fields.String(allow_none=True)
+
+
+class DeliveryFailureCompleteRequestSchema(Schema):
+    notes = fields.String(allow_none=True)
