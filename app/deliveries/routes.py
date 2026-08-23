@@ -32,9 +32,15 @@ from .schemas import (
     DeliveryAvailableRunsResponseSchema,
     DeliveryRunAcceptResponseSchema,
     DeliveryRunFailRequestSchema,
+    DeliveryRunStopActionResponseSchema,
+    DeliveryRunPickupConfirmResponseSchema,
+    DeliveryRunOrderPodQRResponseSchema,
+    DeliveryRunOrderPodConfirmRequestSchema,
+    DeliveryRunOrderPodConfirmResponseSchema,
 )
 from .services import DeliveryService
 from .run_assignment import DeliveryRunAssignmentService
+from .pickup import DeliveryRunPickupService, DeliveryRunPodService
 
 bp = Blueprint(
     "deliveries",
@@ -231,4 +237,51 @@ class DeliveryRunFail(MethodView):
         run -- triggers reassignment where possible."""
         return DeliveryRunAssignmentService.fail_run(
             current_user.id, run_id, reason=data.get("reason")
+        )
+
+
+@bp.route("/runs/<string:run_id>/stops/<int:seller_id>/arrive")
+class DeliveryRunStopArrive(MethodView):
+    @login_required
+    @bp.response(200, DeliveryRunStopActionResponseSchema)
+    def post(self, run_id, seller_id):
+        """10.6: rider marks arrival at a seller pickup stop."""
+        return DeliveryRunPickupService.arrive_at_stop(
+            current_user.id, run_id, seller_id
+        )
+
+
+@bp.route("/runs/<string:run_id>/stops/<int:seller_id>/pickup")
+class DeliveryRunStopPickup(MethodView):
+    @login_required
+    @bp.response(200, DeliveryRunPickupConfirmResponseSchema)
+    def post(self, run_id, seller_id):
+        """10.6: rider confirms pickup at a seller stop. Once every stop
+        in the run is picked up, issues a POD QR per order and advances
+        the run to DELIVERY_IN_PROGRESS."""
+        return DeliveryRunPickupService.confirm_pickup_at_stop(
+            current_user.id, run_id, seller_id
+        )
+
+
+@bp.route("/runs/<string:run_id>/orders/<string:order_id>/pod-qr")
+class DeliveryRunOrderPodQR(MethodView):
+    @login_required
+    @bp.response(200, DeliveryRunOrderPodQRResponseSchema)
+    def get(self, run_id, order_id):
+        """10.6: get the POD QR code for one order within an accepted run."""
+        return DeliveryRunPodService.get_order_pod_qr(current_user.id, run_id, order_id)
+
+
+@bp.route("/runs/<string:run_id>/orders/<string:order_id>/pod-confirm")
+class DeliveryRunOrderPodConfirm(MethodView):
+    @login_required
+    @bp.arguments(DeliveryRunOrderPodConfirmRequestSchema, location="json")
+    @bp.response(200, DeliveryRunOrderPodConfirmResponseSchema)
+    def post(self, data, run_id, order_id):
+        """10.6: confirm proof-of-delivery for one order within a run --
+        marks its items DELIVERED (starting the settlement hold, Phase 0)
+        and completes the run once every attached order has confirmed."""
+        return DeliveryRunPodService.confirm_order_pod(
+            current_user.id, run_id, order_id, data["qr_code"]
         )
