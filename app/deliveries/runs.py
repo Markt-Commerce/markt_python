@@ -62,6 +62,34 @@ READY_ALLOCATION_STATUSES = (
 # MAX_REROUTE_ATTEMPTS was in Phase 6.
 THIN_VOLUME_THRESHOLD = 3
 
+# 10.3 "surge-aware" pricing (Phase 11): the spec names this in 10.3's
+# own section heading but never gives a formula or trigger in the body
+# text -- entirely a judgment call, same treatment as THIN_VOLUME_THRESHOLD
+# above. Load signal: how many OTHER runs are simultaneously active for
+# the same market/area right now. This is a real, already-computable
+# signal (not invented) -- it only happens when demand within one
+# cadence window genuinely exceeds a single run's capacity (10.4
+# overflow, see get_or_create_open_run) or multiple cutoff-timed runs
+# are concurrently mid-flight for the same zone -- rather than a fake
+# time-of-day heuristic with no data behind it.
+SURGE_MULTIPLIER_PER_CONCURRENT_RUN = 0.15
+SURGE_MULTIPLIER_CAP = 2.0
+
+# Run statuses that represent real, still-active demand for a market/area
+# -- excludes terminal states (COMPLETED/CANCELLED/PARTIALLY_COMPLETED/
+# RIDER_FAILED is itself non-terminal, see the model, but a genuinely
+# stuck run isn't a demand signal worth surging on) and, deliberately,
+# the run being priced itself (see calculate_surge_multiplier).
+ACTIVE_RUN_STATUSES_FOR_SURGE = (
+    DeliveryRunStatus.OPEN,
+    DeliveryRunStatus.CUTOFF_REACHED,
+    DeliveryRunStatus.PLANNING,
+    DeliveryRunStatus.RIDER_ASSIGNMENT,
+    DeliveryRunStatus.RIDER_ACCEPTED,
+    DeliveryRunStatus.PICKUP_IN_PROGRESS,
+    DeliveryRunStatus.DELIVERY_IN_PROGRESS,
+)
+
 
 class DeliveryRunService:
     @staticmethod
@@ -69,7 +97,21 @@ class DeliveryRunService:
         """Returns the current OPEN run for this market/area pair that
         still has package-count capacity, creating one if none exists or
         every existing one is full (10.4's "next compatible run"
-        overflow)."""
+        overflow).
+
+        Row-locks every OPEN candidate for this market/area (FOR UPDATE)
+        so two concurrent callers can't both read "29 of 30, fits" for
+        the same run and both attach, pushing it over capacity -- a
+        real race this module didn't originally close (unlike
+        InventoryService.reserve_stock/DeliveryRunAssignmentService.accept_run,
+        which already lock the row they're checking). The second caller
+        blocks until the first's transaction commits, then re-counts
+        with that attach already reflected. Doesn't lock against a
+        *duplicate new run* being created by two simultaneous first-ever
+        callers for a market/area with no OPEN run yet -- that's not a
+        capacity violation (multiple concurrent runs for one zone is a
+        legitimate, expected state once overflow happens), just a minor
+        efficiency loss, not worth the extra locking complexity here."""
         candidates = (
             session.query(DeliveryRun)
             .filter_by(
@@ -78,6 +120,7 @@ class DeliveryRunService:
                 status=DeliveryRunStatus.OPEN,
             )
             .order_by(DeliveryRun.created_at.asc())
+            .with_for_update()
             .all()
         )
         for run in candidates:
@@ -372,6 +415,28 @@ class DeliveryRunService:
             return run_order
 
     @staticmethod
+    def calculate_surge_multiplier(session, run: DeliveryRun) -> float:
+        """10.3 "surge-aware" pricing (Phase 11) -- see the module-level
+        SURGE_* constants' own comment for why this formula (concurrent
+        active runs for the same market/area, not a time-of-day guess)
+        and why it's a documented judgment call rather than a spec
+        number. 1.0 = no surge; capped at SURGE_MULTIPLIER_CAP."""
+        concurrent_active_runs = (
+            session.query(DeliveryRun)
+            .filter(
+                DeliveryRun.market_id == run.market_id,
+                DeliveryRun.area_id == run.area_id,
+                DeliveryRun.id != run.id,
+                DeliveryRun.status.in_(ACTIVE_RUN_STATUSES_FOR_SURGE),
+            )
+            .count()
+        )
+        multiplier = 1.0 + (
+            concurrent_active_runs * SURGE_MULTIPLIER_PER_CONCURRENT_RUN
+        )
+        return min(multiplier, SURGE_MULTIPLIER_CAP)
+
+    @staticmethod
     def close_runs_past_cutoff() -> dict:
         """10.2: OPEN -> CUTOFF_REACHED once cutoff_at passes, priced
         (10.3), advanced to PLANNING and then straight to RIDER_ASSIGNMENT
@@ -463,8 +528,13 @@ class DeliveryRunService:
                 # 10.3: cost-sharing -- the flat run-level base price
                 # split across however many orders actually survived to
                 # this point, so the per-order share naturally drops as a
-                # run fills.
-                run.base_price = DEFAULT_BASE_PRICE
+                # run fills. Surge-adjusted (Phase 11) by how much other
+                # concurrent demand exists for this same market/area.
+                surge_multiplier = DeliveryRunService.calculate_surge_multiplier(
+                    session, run
+                )
+                run.surge_multiplier = surge_multiplier
+                run.base_price = round(DEFAULT_BASE_PRICE * surge_multiplier, 2)
                 run.price_per_order = round(run.base_price / len(surviving_orders), 2)
                 run.transition_to(DeliveryRunStatus.PLANNING)
                 # 10.2/Phase 10: no separate rider-ranking/offer step exists
