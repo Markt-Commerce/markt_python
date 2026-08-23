@@ -120,4 +120,9 @@ CELERYBEAT_SCHEDULE = {
         "schedule": crontab(minute="*/10"),  # 10.2/10.3 -- cadence itself is ~2h
         "options": {"queue": "default"},
     },
+    "notify-thin-volume-delivery-orders": {
+        "task": "app.deliveries.tasks.notify_thin_volume_orders",
+        "schedule": crontab(minute="*/10"),  # 10.3
+        "options": {"queue": "default"},
+    },
 }

@@ -28,6 +28,8 @@ from .schemas import (
     OrderReturnResponseSchema,
     OrderReturnActionSchema,
     OrderEventSchema,
+    DeliveryWaitChoiceSchema,
+    DeliveryWaitChoiceResponseSchema,
 )
 
 bp = Blueprint("orders", __name__, description="Order operations", url_prefix="/orders")
@@ -201,6 +203,35 @@ class CancelOrder(MethodView):
                 "cancelled_at": order.cancelled_at,
                 "cancel_reason": order.cancel_reason,
                 "refund_amount": refund_amount,
+            }
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/<order_id>/delivery-wait-choice")
+class OrderDeliveryWaitChoice(MethodView):
+    @login_required
+    @buyer_required
+    @bp.arguments(DeliveryWaitChoiceSchema)
+    @bp.response(200, DeliveryWaitChoiceResponseSchema)
+    def post(self, choice_data, order_id):
+        """10.3: buyer responds to the thin-volume delivery prompt --
+        wait for a fuller run (optionally consenting to the single-drop
+        fallback rate) or pay now for single/near-single delivery."""
+        from app.deliveries.models import DeliveryRunWaitChoice
+        from app.deliveries.runs import DeliveryRunService
+
+        try:
+            run_order = DeliveryRunService.set_wait_choice(
+                order_id,
+                current_user.buyer_account.id,
+                DeliveryRunWaitChoice(choice_data["choice"]),
+                fallback_consent=choice_data.get("fallback_consent", False),
+            )
+            return {
+                "order_id": run_order.order_id,
+                "choice": run_order.wait_choice.value,
+                "fallback_consent": run_order.fallback_consent,
             }
         except APIError as e:
             abort(e.status_code, message=e.message)

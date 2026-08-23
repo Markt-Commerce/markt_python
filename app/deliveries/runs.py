@@ -17,12 +17,21 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from app.fulfilment.models import FulfilmentAllocation, FulfilmentAllocationStatus
+from app.inventory.models import HandlingClass, ProductHandling
+from app.libs.errors import ForbiddenError, NotFoundError, ValidationError
 from app.libs.session import session_scope
+from app.notifications.models import NotificationType
+from app.notifications.services import NotificationService
 from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
 from app.products.models import Product
 from app.users.models import Seller
 
-from .models import DeliveryRun, DeliveryRunOrder, DeliveryRunStatus
+from .models import (
+    DeliveryRun,
+    DeliveryRunOrder,
+    DeliveryRunStatus,
+    DeliveryRunWaitChoice,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +55,12 @@ READY_ALLOCATION_STATUSES = (
     FulfilmentAllocationStatus.ACCEPTED,
     FulfilmentAllocationStatus.PREPARING,
 )
+
+# 10.3: not spec-mandated (the spec gives no number for "thin") -- a run
+# with fewer than this many orders counts as not having "enough sharing
+# available" yet. A judgment call, flagged the same way
+# MAX_REROUTE_ATTEMPTS was in Phase 6.
+THIN_VOLUME_THRESHOLD = 3
 
 
 class DeliveryRunService:
@@ -154,6 +169,47 @@ class DeliveryRunService:
         return market_ids.pop()
 
     @staticmethod
+    def _tighten_cutoff_for_perishables(
+        session, run: DeliveryRun, order: Order
+    ) -> None:
+        """10.5: "a run respects the strictest constraint among its load."
+        If this order carries a perishable item with a dwell cap, and that
+        cap would be exceeded before the run's own planned cutoff, pull
+        the run's cutoff in to match -- reusing the existing cutoff worker
+        (close_runs_past_cutoff) to actually dispatch it in time, rather
+        than building a separate perishable-specific path. The dwell
+        clock starts now (the moment the order joins this run), matching
+        10.5's "next viable shared run" framing.
+
+        Deliberately does NOT implement true single-drop dispatch (a
+        genuinely different delivery mechanism) -- Phase 10 owns real
+        dispatch. This only makes sure the run carrying a perishable item
+        can never sit open longer than that item's dwell window allows."""
+        active_items = [
+            item for item in order.items if item.status != OrderItem.Status.CANCELLED
+        ]
+        product_ids = {item.product_id for item in active_items}
+        if not product_ids:
+            return
+
+        handling_rows = (
+            session.query(ProductHandling)
+            .filter(
+                ProductHandling.product_id.in_(product_ids),
+                ProductHandling.handling_class == HandlingClass.PERISHABLE,
+                ProductHandling.max_dwell_minutes.isnot(None),
+            )
+            .all()
+        )
+        if not handling_rows:
+            return
+
+        tightest_dwell_minutes = min(h.max_dwell_minutes for h in handling_rows)
+        dwell_deadline = datetime.utcnow() + timedelta(minutes=tightest_dwell_minutes)
+        if dwell_deadline < run.cutoff_at:
+            run.cutoff_at = dwell_deadline
+
+    @staticmethod
     def attach_eligible_orders() -> dict:
         """10.1: attach every not-yet-attached, fully-routed-and-confirmed
         order to the current open run for its market/area, applying the
@@ -212,6 +268,7 @@ class DeliveryRunService:
                     )
 
                 session.add(DeliveryRunOrder(delivery_run_id=run.id, order_id=order.id))
+                DeliveryRunService._tighten_cutoff_for_perishables(session, run, order)
                 attached += 1
 
         logger.info(
@@ -223,14 +280,117 @@ class DeliveryRunService:
         return {"attached": attached, "skipped_unresolved": skipped_unresolved}
 
     @staticmethod
+    def notify_thin_volume_orders() -> dict:
+        """10.3: notify the buyer of every order attached to a still-OPEN
+        run that doesn't have "enough sharing available" yet
+        (< THIN_VOLUME_THRESHOLD orders), offering the wait-vs-pay-now
+        choice. Only ever notifies once per order (notified_thin_volume_at
+        guards it) -- safe to call repeatedly on a schedule."""
+        notified = 0
+
+        with session_scope() as session:
+            thin_runs = (
+                session.query(DeliveryRun)
+                .filter(DeliveryRun.status == DeliveryRunStatus.OPEN)
+                .all()
+            )
+            to_notify = []
+            for run in thin_runs:
+                run_orders = (
+                    session.query(DeliveryRunOrder)
+                    .filter_by(delivery_run_id=run.id)
+                    .all()
+                )
+                if not run_orders or len(run_orders) >= THIN_VOLUME_THRESHOLD:
+                    continue
+                for run_order in run_orders:
+                    if run_order.notified_thin_volume_at is not None:
+                        continue
+                    order = session.query(Order).get(run_order.order_id)
+                    buyer_user_id = (
+                        order.buyer.user_id if order and order.buyer else None
+                    )
+                    if not buyer_user_id:
+                        continue
+                    run_order.notified_thin_volume_at = datetime.utcnow()
+                    to_notify.append((buyer_user_id, run_order.order_id, run.cutoff_at))
+
+        for buyer_user_id, order_id, cutoff_at in to_notify:
+            NotificationService.create_notification(
+                user_id=buyer_user_id,
+                notification_type=NotificationType.THIN_VOLUME_DELIVERY_CHOICE,
+                reference_type="order",
+                reference_id=order_id,
+                metadata_={
+                    "message": (
+                        "Not many orders heading your way right now. We'll "
+                        f"wait for a fuller run (held until {cutoff_at.isoformat()}) "
+                        "unless you choose to pay now for single/near-single "
+                        "delivery."
+                    ),
+                    "wait_deadline": cutoff_at.isoformat(),
+                },
+            )
+            notified += 1
+
+        logger.info("Notified %s order(s) of thin delivery volume (10.3)", notified)
+        return {"notified": notified}
+
+    @staticmethod
+    def set_wait_choice(
+        order_id: str,
+        buyer_id: int,
+        choice: DeliveryRunWaitChoice,
+        fallback_consent: bool = False,
+    ) -> DeliveryRunOrder:
+        """10.3: record the buyer's wait-vs-pay-now choice (and, if
+        waiting, whether they consent to being charged the single-drop
+        rate as the fallback if the run still hasn't filled by cutoff --
+        see close_runs_past_cutoff's fallback handling)."""
+        with session_scope() as session:
+            run_order = (
+                session.query(DeliveryRunOrder).filter_by(order_id=order_id).first()
+            )
+            if not run_order:
+                raise NotFoundError("Order is not attached to a delivery run")
+
+            order = session.query(Order).get(order_id)
+            if not order or order.buyer_id != buyer_id:
+                raise ForbiddenError("Not authorized to act on this order")
+
+            if choice not in (
+                DeliveryRunWaitChoice.WAIT,
+                DeliveryRunWaitChoice.PAY_NOW,
+            ):
+                raise ValidationError("choice must be 'wait' or 'pay_now'")
+
+            run_order.wait_choice = choice
+            run_order.fallback_consent = bool(fallback_consent) and (
+                choice == DeliveryRunWaitChoice.WAIT
+            )
+            session.flush()
+            return run_order
+
+    @staticmethod
     def close_runs_past_cutoff() -> dict:
         """10.2: OPEN -> CUTOFF_REACHED once cutoff_at passes, priced
         (10.3) and advanced to PLANNING -- Phase 10 takes it from there
         (rider assignment). An empty run at cutoff ("with little or no
         order volume, a run may not run at all", 10.1) is cancelled
-        instead of planned with nothing to plan."""
+        instead of planned with nothing to plan.
+
+        10.3 wait-deadline fallback: if the run is STILL thin at cutoff,
+        every attached order that didn't consent to the single-drop
+        fallback (the default -- PENDING/WAIT with no consent) gets a
+        free cancellation, per the spec's own "or offer free cancellation"
+        alternative. An order that DID consent (or explicitly chose
+        PAY_NOW) proceeds in the run -- but actually collecting the
+        single-drop upcharge is a real payment-flow gap, not built here
+        (see this module's own docstring); flagged via a warning log
+        rather than silently pretending it was charged."""
         closed = 0
         cancelled_empty = 0
+        free_cancellations = 0
         now = datetime.utcnow()
 
         with session_scope() as session:
@@ -243,30 +403,116 @@ class DeliveryRunService:
                 .all()
             )
 
-            for run in due:
-                order_count = (
+            run_ids = [run.id for run in due]
+            run_orders_by_run = {}
+            for run_id in run_ids:
+                run_orders_by_run[run_id] = (
                     session.query(DeliveryRunOrder)
-                    .filter_by(delivery_run_id=run.id)
-                    .count()
+                    .filter_by(delivery_run_id=run_id)
+                    .all()
                 )
-                if order_count == 0:
+
+            to_cancel = []
+            for run in due:
+                run_orders = run_orders_by_run[run.id]
+                if not run_orders:
                     run.transition_to(DeliveryRunStatus.CANCELLED)
                     run.cancel_reason = "No orders joined before cutoff"
                     cancelled_empty += 1
                     continue
 
+                # 10.3 wait-deadline fallback: still thin at cutoff -- an
+                # order without fallback consent gets a free cancellation
+                # (removed from `surviving_orders` before pricing, so the
+                # ones left behind never share the cost with someone who
+                # was just refunded out). A consenting order stays in --
+                # see the module docstring on why the actual upcharge
+                # isn't collected yet.
+                surviving_orders = run_orders
+                if len(run_orders) < THIN_VOLUME_THRESHOLD:
+                    surviving_orders = []
+                    for run_order in run_orders:
+                        consented = (
+                            run_order.wait_choice == DeliveryRunWaitChoice.PAY_NOW
+                            or run_order.fallback_consent
+                        )
+                        if consented:
+                            logger.warning(
+                                "Order %s consented to the single-drop fallback "
+                                "rate, but collecting it is not implemented -- "
+                                "proceeding without an extra charge (10.3 gap)",
+                                run_order.order_id,
+                            )
+                            surviving_orders.append(run_order)
+                        else:
+                            to_cancel.append(run_order.order_id)
+
+                if not surviving_orders:
+                    run.transition_to(DeliveryRunStatus.CANCELLED)
+                    run.cancel_reason = (
+                        "All orders free-cancelled on wait-deadline fallback"
+                    )
+                    cancelled_empty += 1
+                    continue
+
                 run.transition_to(DeliveryRunStatus.CUTOFF_REACHED)
                 # 10.3: cost-sharing -- the flat run-level base price
-                # split across however many orders actually joined, so
-                # the per-order share naturally drops as a run fills.
+                # split across however many orders actually survived to
+                # this point, so the per-order share naturally drops as a
+                # run fills.
                 run.base_price = DEFAULT_BASE_PRICE
-                run.price_per_order = round(run.base_price / order_count, 2)
+                run.price_per_order = round(run.base_price / len(surviving_orders), 2)
                 run.transition_to(DeliveryRunStatus.PLANNING)
                 closed += 1
 
+            order_buyer_ids = {}
+            if to_cancel:
+                for order_id, buyer_id in (
+                    session.query(Order.id, Order.buyer_id)
+                    .filter(Order.id.in_(to_cancel))
+                    .all()
+                ):
+                    order_buyer_ids[order_id] = buyer_id
+
+        if to_cancel:
+            from app.orders.services import OrderService
+
+            for order_id in to_cancel:
+                buyer_id = order_buyer_ids.get(order_id)
+                if not buyer_id:
+                    continue
+                try:
+                    OrderService.cancel_order(
+                        order_id,
+                        buyer_id,
+                        reason=(
+                            "Delivery run didn't fill by the wait deadline "
+                            "(10.3) -- free cancellation, no fallback consent "
+                            "on file"
+                        ),
+                    )
+                    free_cancellations += 1
+                except Exception:
+                    logger.exception(
+                        "Failed to auto-cancel order %s on thin-volume "
+                        "wait-deadline fallback",
+                        order_id,
+                    )
+
+            with session_scope() as session:
+                session.query(DeliveryRunOrder).filter(
+                    DeliveryRunOrder.order_id.in_(to_cancel)
+                ).delete(synchronize_session=False)
+
         logger.info(
-            "Closed %s delivery run(s) into planning, cancelled %s empty run(s)",
+            "Closed %s delivery run(s) into planning, cancelled %s empty run(s), "
+            "%s order(s) free-cancelled on wait-deadline fallback",
             closed,
             cancelled_empty,
+            free_cancellations,
         )
-        return {"closed": closed, "cancelled_empty": cancelled_empty}
+        return {
+            "closed": closed,
+            "cancelled_empty": cancelled_empty,
+            "free_cancellations": free_cancellations,
+        }

@@ -36,6 +36,10 @@ class NotificationType(Enum):
     # 6.1 ASK gate: a reroute-created substitution needs buyer approval
     # before it commits.
     SUBSTITUTION_APPROVAL_REQUIRED = "substitution_approval_required"
+    # 10.3: this order's delivery run doesn't have enough sharing yet --
+    # wait for a fuller run (default) or pay now for single/near-single
+    # delivery.
+    THIN_VOLUME_DELIVERY_CHOICE = "thin_volume_delivery_choice"
     # Social notifications
     NICHE_INVITATION = "niche_invitation"
     NICHE_POST_APPROVED = "niche_post_approved"

@@ -28,15 +28,31 @@ def attach_eligible_orders():
 @celery_app.task(name="app.deliveries.tasks.close_runs_past_cutoff", queue="default")
 def close_runs_past_cutoff():
     """10.2/10.3: close OPEN runs past their cutoff into PLANNING (priced),
-    or CANCELLED if nothing joined."""
+    or CANCELLED if nothing joined (or nothing survived the wait-deadline
+    fallback -- see DeliveryRunService.close_runs_past_cutoff)."""
     with record_worker_run("app.deliveries.tasks.close_runs_past_cutoff") as run:
         from app.deliveries.runs import DeliveryRunService
 
         result = DeliveryRunService.close_runs_past_cutoff()
         logger.info(
-            "Closed %s delivery run(s) into planning (%s cancelled empty)",
+            "Closed %s delivery run(s) into planning (%s cancelled empty, "
+            "%s free-cancelled on fallback)",
             result["closed"],
             result["cancelled_empty"],
+            result["free_cancellations"],
         )
+        run.result = result
+        return result
+
+
+@celery_app.task(name="app.deliveries.tasks.notify_thin_volume_orders", queue="default")
+def notify_thin_volume_orders():
+    """10.3: notify buyers on a still-thin OPEN run of the wait-vs-pay-now
+    choice."""
+    with record_worker_run("app.deliveries.tasks.notify_thin_volume_orders") as run:
+        from app.deliveries.runs import DeliveryRunService
+
+        result = DeliveryRunService.notify_thin_volume_orders()
+        logger.info("Notified %s order(s) of thin delivery volume", result["notified"])
         run.result = result
         return result
