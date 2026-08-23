@@ -99,6 +99,21 @@ class OrderCancelResponseSchema(Schema):
     status = fields.Str()
     cancelled_at = fields.DateTime(allow_none=True)
     cancel_reason = fields.Str(allow_none=True)
+
+
+class DeliveryWaitChoiceSchema(Schema):
+    """10.3: the buyer's response to the thin-volume delivery prompt."""
+
+    choice = fields.Str(required=True, validate=validate.OneOf(["wait", "pay_now"]))
+    # Only meaningful for "wait" -- consent to being charged the
+    # single-drop rate if the run still hasn't filled by cutoff.
+    fallback_consent = fields.Bool(load_default=False)
+
+
+class DeliveryWaitChoiceResponseSchema(Schema):
+    order_id = fields.Str()
+    choice = fields.Str()
+    fallback_consent = fields.Bool()
     refund_amount = fields.Float()
 
 

@@ -1,10 +1,18 @@
 """Unit tests for DeliveryRunService: batching, capacity, and cutoff
 pricing (10.1-10.4)."""
 
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from app.deliveries.models import DeliveryRun, DeliveryRunStatus
+import pytest
+
+from app.deliveries.models import (
+    DeliveryRun,
+    DeliveryRunOrder,
+    DeliveryRunStatus,
+    DeliveryRunWaitChoice,
+)
 from app.deliveries.runs import (
     DEFAULT_BASE_PRICE,
     RUN_MAX_PACKAGES,
@@ -12,6 +20,7 @@ from app.deliveries.runs import (
     DeliveryRunService,
 )
 from app.fulfilment.models import FulfilmentAllocationStatus
+from app.libs.errors import ForbiddenError, NotFoundError
 from app.orders.models import OrderItem
 
 
@@ -192,6 +201,25 @@ def test_order_weight_grams_sums_active_items_only():
 # --- close_runs_past_cutoff ------------------------------------------------
 
 
+def _cutoff_query_side_effect(run, run_orders):
+    def query_side_effect(*args):
+        model = args[0]
+        m = MagicMock()
+        if model is DeliveryRun:
+            m.filter.return_value.all.return_value = [run]
+        elif model is DeliveryRunOrder:
+            m.filter_by.return_value.all.return_value = run_orders
+            m.filter.return_value.delete.return_value = None
+        else:
+            # session.query(Order.id, Order.buyer_id)
+            m.filter.return_value.all.return_value = [
+                (ro.order_id, 1) for ro in run_orders
+            ]
+        return m
+
+    return query_side_effect
+
+
 @patch("app.deliveries.runs.session_scope")
 def test_close_runs_past_cutoff_cancels_empty_run(mock_scope):
     run = SimpleNamespace(id="RUN_1", status=DeliveryRunStatus.OPEN)
@@ -199,13 +227,12 @@ def test_close_runs_past_cutoff_cancels_empty_run(mock_scope):
         _r, new_status
     )
     session = MagicMock()
-    session.query.return_value.filter.return_value.all.return_value = [run]
-    session.query.return_value.filter_by.return_value.count.return_value = 0
+    session.query.side_effect = _cutoff_query_side_effect(run, [])
     mock_scope.return_value.__enter__.return_value = session
 
     result = DeliveryRunService.close_runs_past_cutoff()
 
-    assert result == {"closed": 0, "cancelled_empty": 1}
+    assert result == {"closed": 0, "cancelled_empty": 1, "free_cancellations": 0}
     assert run.status == DeliveryRunStatus.CANCELLED
     assert run.cancel_reason == "No orders joined before cutoff"
 
@@ -216,17 +243,96 @@ def test_close_runs_past_cutoff_prices_and_plans_nonempty_run(mock_scope):
     run.transition_to = lambda new_status, _r=run: DeliveryRun.transition_to(
         _r, new_status
     )
+    # 4 orders >= THIN_VOLUME_THRESHOLD (3) -- not thin, no fallback checks.
+    run_orders = [
+        SimpleNamespace(
+            order_id=f"ORD_{i}",
+            wait_choice=DeliveryRunWaitChoice.PENDING,
+            fallback_consent=False,
+        )
+        for i in range(4)
+    ]
     session = MagicMock()
-    session.query.return_value.filter.return_value.all.return_value = [run]
-    session.query.return_value.filter_by.return_value.count.return_value = 4
+    session.query.side_effect = _cutoff_query_side_effect(run, run_orders)
     mock_scope.return_value.__enter__.return_value = session
 
     result = DeliveryRunService.close_runs_past_cutoff()
 
-    assert result == {"closed": 1, "cancelled_empty": 0}
+    assert result == {"closed": 1, "cancelled_empty": 0, "free_cancellations": 0}
     assert run.status == DeliveryRunStatus.PLANNING
     assert run.base_price == DEFAULT_BASE_PRICE
     assert run.price_per_order == round(DEFAULT_BASE_PRICE / 4, 2)
+
+
+@patch("app.orders.services.OrderService.cancel_order")
+@patch("app.deliveries.runs.session_scope")
+def test_close_runs_past_cutoff_free_cancels_unconsented_thin_orders(
+    mock_scope, mock_cancel
+):
+    """10.3 wait-deadline fallback: still thin at cutoff, nobody
+    consented -- both orders get a free cancellation and the run, left
+    with nothing, is cancelled rather than planned."""
+    run = SimpleNamespace(id="RUN_1", status=DeliveryRunStatus.OPEN)
+    run.transition_to = lambda new_status, _r=run: DeliveryRun.transition_to(
+        _r, new_status
+    )
+    run_orders = [
+        SimpleNamespace(
+            order_id="ORD_1",
+            wait_choice=DeliveryRunWaitChoice.PENDING,
+            fallback_consent=False,
+        ),
+        SimpleNamespace(
+            order_id="ORD_2",
+            wait_choice=DeliveryRunWaitChoice.WAIT,
+            fallback_consent=False,
+        ),
+    ]
+    session = MagicMock()
+    session.query.side_effect = _cutoff_query_side_effect(run, run_orders)
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = DeliveryRunService.close_runs_past_cutoff()
+
+    assert result == {"closed": 0, "cancelled_empty": 1, "free_cancellations": 2}
+    assert run.status == DeliveryRunStatus.CANCELLED
+    assert run.cancel_reason == "All orders free-cancelled on wait-deadline fallback"
+    assert mock_cancel.call_count == 2
+
+
+@patch("app.orders.services.OrderService.cancel_order")
+@patch("app.deliveries.runs.session_scope")
+def test_close_runs_past_cutoff_keeps_consented_order_cancels_the_rest(
+    mock_scope, mock_cancel
+):
+    """A PAY_NOW/consenting order survives the fallback and the run still
+    plans -- priced against only the surviving order(s)."""
+    run = SimpleNamespace(id="RUN_1", status=DeliveryRunStatus.OPEN)
+    run.transition_to = lambda new_status, _r=run: DeliveryRun.transition_to(
+        _r, new_status
+    )
+    run_orders = [
+        SimpleNamespace(
+            order_id="ORD_CONSENTED",
+            wait_choice=DeliveryRunWaitChoice.PAY_NOW,
+            fallback_consent=False,
+        ),
+        SimpleNamespace(
+            order_id="ORD_UNCONSENTED",
+            wait_choice=DeliveryRunWaitChoice.PENDING,
+            fallback_consent=False,
+        ),
+    ]
+    session = MagicMock()
+    session.query.side_effect = _cutoff_query_side_effect(run, run_orders)
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = DeliveryRunService.close_runs_past_cutoff()
+
+    assert result == {"closed": 1, "cancelled_empty": 0, "free_cancellations": 1}
+    assert run.status == DeliveryRunStatus.PLANNING
+    assert run.price_per_order == round(DEFAULT_BASE_PRICE / 1, 2)
+    mock_cancel.assert_called_once()
 
 
 # --- attach_eligible_orders ------------------------------------------------
@@ -348,3 +454,203 @@ def test_attach_eligible_orders_skips_when_not_ready(mock_scope, mock_ready):
 
     assert result == {"attached": 0, "skipped_unresolved": 0}
     session.add.assert_not_called()
+
+
+# --- _tighten_cutoff_for_perishables ---------------------------------------
+
+
+def test_tighten_cutoff_for_perishables_pulls_cutoff_in():
+    item = SimpleNamespace(id=1, status=OrderItem.Status.PROCESSING, product_id="P1")
+    order = SimpleNamespace(items=[item])
+    run = SimpleNamespace(cutoff_at=datetime.utcnow() + timedelta(hours=2))
+    handling = SimpleNamespace(max_dwell_minutes=30)
+
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = [handling]
+
+    DeliveryRunService._tighten_cutoff_for_perishables(session, run, order)
+
+    assert run.cutoff_at <= datetime.utcnow() + timedelta(minutes=31)
+
+
+def test_tighten_cutoff_for_perishables_noop_when_looser_than_cutoff():
+    item = SimpleNamespace(id=1, status=OrderItem.Status.PROCESSING, product_id="P1")
+    order = SimpleNamespace(items=[item])
+    original_cutoff = datetime.utcnow() + timedelta(minutes=10)
+    run = SimpleNamespace(cutoff_at=original_cutoff)
+    handling = SimpleNamespace(max_dwell_minutes=120)
+
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = [handling]
+
+    DeliveryRunService._tighten_cutoff_for_perishables(session, run, order)
+
+    assert run.cutoff_at == original_cutoff
+
+
+def test_tighten_cutoff_for_perishables_noop_when_no_perishable_items():
+    item = SimpleNamespace(id=1, status=OrderItem.Status.PROCESSING, product_id="P1")
+    order = SimpleNamespace(items=[item])
+    original_cutoff = datetime.utcnow() + timedelta(hours=2)
+    run = SimpleNamespace(cutoff_at=original_cutoff)
+
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = []
+
+    DeliveryRunService._tighten_cutoff_for_perishables(session, run, order)
+
+    assert run.cutoff_at == original_cutoff
+
+
+# --- notify_thin_volume_orders ----------------------------------------------
+
+
+def _thin_volume_query_side_effect(run, run_orders, order=None):
+    def query_side_effect(*args):
+        model = args[0]
+        m = MagicMock()
+        if model is DeliveryRun:
+            m.filter.return_value.all.return_value = [run]
+        elif model is DeliveryRunOrder:
+            m.filter_by.return_value.all.return_value = run_orders
+        else:
+            m.get.return_value = order
+        return m
+
+    return query_side_effect
+
+
+@patch("app.deliveries.runs.NotificationService.create_notification")
+@patch("app.deliveries.runs.session_scope")
+def test_notify_thin_volume_orders_notifies_once(mock_scope, mock_notify):
+    cutoff = datetime.utcnow() + timedelta(hours=1)
+    run = SimpleNamespace(id="RUN_1", status=DeliveryRunStatus.OPEN, cutoff_at=cutoff)
+    run_order = SimpleNamespace(order_id="ORD_1", notified_thin_volume_at=None)
+    order = SimpleNamespace(buyer=SimpleNamespace(user_id="USR_1"))
+
+    session = MagicMock()
+    session.query.side_effect = _thin_volume_query_side_effect(run, [run_order], order)
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = DeliveryRunService.notify_thin_volume_orders()
+
+    assert result == {"notified": 1}
+    assert run_order.notified_thin_volume_at is not None
+    mock_notify.assert_called_once()
+    call_kwargs = mock_notify.call_args.kwargs
+    assert call_kwargs["user_id"] == "USR_1"
+    assert call_kwargs["reference_id"] == "ORD_1"
+
+
+@patch("app.deliveries.runs.NotificationService.create_notification")
+@patch("app.deliveries.runs.session_scope")
+def test_notify_thin_volume_orders_skips_already_notified(mock_scope, mock_notify):
+    run = SimpleNamespace(
+        id="RUN_1", status=DeliveryRunStatus.OPEN, cutoff_at=datetime.utcnow()
+    )
+    run_order = SimpleNamespace(
+        order_id="ORD_1", notified_thin_volume_at=datetime.utcnow()
+    )
+
+    session = MagicMock()
+    session.query.side_effect = _thin_volume_query_side_effect(run, [run_order])
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = DeliveryRunService.notify_thin_volume_orders()
+
+    assert result == {"notified": 0}
+    mock_notify.assert_not_called()
+
+
+@patch("app.deliveries.runs.NotificationService.create_notification")
+@patch("app.deliveries.runs.session_scope")
+def test_notify_thin_volume_orders_skips_runs_at_or_above_threshold(
+    mock_scope, mock_notify
+):
+    run = SimpleNamespace(
+        id="RUN_1", status=DeliveryRunStatus.OPEN, cutoff_at=datetime.utcnow()
+    )
+    run_orders = [
+        SimpleNamespace(order_id=f"ORD_{i}", notified_thin_volume_at=None)
+        for i in range(3)
+    ]
+
+    session = MagicMock()
+    session.query.side_effect = _thin_volume_query_side_effect(run, run_orders)
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = DeliveryRunService.notify_thin_volume_orders()
+
+    assert result == {"notified": 0}
+    mock_notify.assert_not_called()
+
+
+# --- set_wait_choice ---------------------------------------------------------
+
+
+def _wait_choice_session(run_order, order):
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.first.return_value = run_order
+    session.query.return_value.get.return_value = order
+    return session
+
+
+def test_set_wait_choice_records_choice_and_consent():
+    run_order = SimpleNamespace(
+        order_id="ORD_1",
+        wait_choice=DeliveryRunWaitChoice.PENDING,
+        fallback_consent=False,
+    )
+    order = SimpleNamespace(id="ORD_1", buyer_id=42)
+    session = _wait_choice_session(run_order, order)
+
+    with patch("app.deliveries.runs.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        result = DeliveryRunService.set_wait_choice(
+            "ORD_1", 42, DeliveryRunWaitChoice.WAIT, fallback_consent=True
+        )
+
+    assert result.wait_choice == DeliveryRunWaitChoice.WAIT
+    assert result.fallback_consent is True
+
+
+def test_set_wait_choice_drops_consent_for_pay_now():
+    """fallback_consent is only meaningful alongside WAIT -- PAY_NOW
+    doesn't need it (the buyer already opted straight into paying)."""
+    run_order = SimpleNamespace(
+        order_id="ORD_1",
+        wait_choice=DeliveryRunWaitChoice.PENDING,
+        fallback_consent=False,
+    )
+    order = SimpleNamespace(id="ORD_1", buyer_id=42)
+    session = _wait_choice_session(run_order, order)
+
+    with patch("app.deliveries.runs.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        result = DeliveryRunService.set_wait_choice(
+            "ORD_1", 42, DeliveryRunWaitChoice.PAY_NOW, fallback_consent=True
+        )
+
+    assert result.wait_choice == DeliveryRunWaitChoice.PAY_NOW
+    assert result.fallback_consent is False
+
+
+def test_set_wait_choice_raises_not_found_when_order_not_attached():
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.first.return_value = None
+
+    with patch("app.deliveries.runs.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        with pytest.raises(NotFoundError):
+            DeliveryRunService.set_wait_choice("ORD_1", 42, DeliveryRunWaitChoice.WAIT)
+
+
+def test_set_wait_choice_raises_forbidden_for_wrong_buyer():
+    run_order = SimpleNamespace(order_id="ORD_1")
+    order = SimpleNamespace(id="ORD_1", buyer_id=99)
+    session = _wait_choice_session(run_order, order)
+
+    with patch("app.deliveries.runs.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        with pytest.raises(ForbiddenError):
+            DeliveryRunService.set_wait_choice("ORD_1", 42, DeliveryRunWaitChoice.WAIT)

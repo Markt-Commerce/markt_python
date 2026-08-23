@@ -287,6 +287,18 @@ class DeliveryRun(BaseModel, UniqueIdMixin):
         self.status = new_status
 
 
+class DeliveryRunWaitChoice(Enum):
+    """10.3's thin-volume prompt: the buyer's choice when their run
+    doesn't have enough sharing yet. PENDING (the default, before the
+    buyer responds) behaves exactly like WAIT -- the spec's own wording
+    marks "wait for a fuller run" as the default, so a buyer who never
+    answers is treated the same as one who explicitly chose to wait."""
+
+    PENDING = "pending"
+    WAIT = "wait"
+    PAY_NOW = "pay_now"
+
+
 class DeliveryRunOrder(BaseModel):
     """Which orders are attached to which run (10.1). A join table rather
     than a column on Order: an order can only ever be in one *active* run
@@ -305,6 +317,25 @@ class DeliveryRunOrder(BaseModel):
         db.String(12), db.ForeignKey("orders.id"), nullable=False, unique=True
     )
     joined_at = db.Column(db.DateTime, server_default=db.func.now())
+
+    # 10.3 thin-volume prompt/fallback -- see DeliveryRunWaitChoice and
+    # app.deliveries.runs.DeliveryRunService.notify_thin_volume_orders/
+    # set_wait_choice/close_runs_past_cutoff's fallback handling.
+    wait_choice = db.Column(
+        db.Enum(DeliveryRunWaitChoice),
+        default=DeliveryRunWaitChoice.PENDING,
+        nullable=False,
+    )
+    # Only meaningful alongside WAIT: did the buyer pre-consent to being
+    # charged the single-drop rate if the run still hasn't filled by
+    # cutoff? False (the default, including for PENDING/never-responded)
+    # means the fallback is free cancellation instead -- see 10.3's own
+    # "auto-fall-back to the single-drop rate (with the buyer's up-front
+    # consent to that price) or offer free cancellation."
+    fallback_consent = db.Column(db.Boolean, default=False, nullable=False)
+    # Set once the thin-volume notification has actually been sent, so
+    # the periodic sweep doesn't re-notify on every run.
+    notified_thin_volume_at = db.Column(db.DateTime, nullable=True)
 
     delivery_run = db.relationship("DeliveryRun", back_populates="run_orders")
     order = db.relationship("Order")
