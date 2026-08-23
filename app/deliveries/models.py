@@ -279,6 +279,13 @@ class DeliveryRun(BaseModel, UniqueIdMixin):
     # until the run stops accepting new orders).
     base_price = db.Column(db.Float, nullable=True)
     price_per_order = db.Column(db.Float, nullable=True)
+    # 10.3 "surge-aware": the multiplier actually applied to the
+    # placeholder base rate for this run, kept for transparency/audit --
+    # see app.deliveries.runs' SURGE_* constants for how it's computed
+    # and why (the spec names "surge-aware" in its section heading but
+    # never defines a formula in the body text -- this is a documented
+    # judgment call, not a spec-given number).
+    surge_multiplier = db.Column(db.Float, nullable=True)
 
     cancelled_at = db.Column(db.DateTime, nullable=True)
     cancel_reason = db.Column(db.Text, nullable=True)

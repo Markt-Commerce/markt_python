@@ -29,7 +29,7 @@ from app.orders.models import OrderItem
 
 def test_get_or_create_open_run_creates_new_when_none_exist():
     session = MagicMock()
-    session.query.return_value.filter_by.return_value.order_by.return_value.all.return_value = (
+    session.query.return_value.filter_by.return_value.order_by.return_value.with_for_update.return_value.all.return_value = (
         []
     )
     session.add.side_effect = lambda obj: setattr(obj, "id", "RUN_NEW01")
@@ -51,7 +51,7 @@ def test_get_or_create_open_run_returns_existing_under_capacity():
     def query_side_effect(model):
         m = MagicMock()
         if model is DeliveryRun:
-            m.filter_by.return_value.order_by.return_value.all.return_value = [
+            m.filter_by.return_value.order_by.return_value.with_for_update.return_value.all.return_value = [
                 existing_run
             ]
         else:
@@ -73,7 +73,9 @@ def test_get_or_create_open_run_creates_new_when_existing_is_full():
     def query_side_effect(model):
         m = MagicMock()
         if model is DeliveryRun:
-            m.filter_by.return_value.order_by.return_value.all.return_value = [full_run]
+            m.filter_by.return_value.order_by.return_value.with_for_update.return_value.all.return_value = [
+                full_run
+            ]
         else:
             m.filter_by.return_value.count.return_value = 30
         return m
@@ -198,15 +200,48 @@ def test_order_weight_grams_sums_active_items_only():
     assert total == 200.0
 
 
+# --- calculate_surge_multiplier ---------------------------------------------
+
+
+def test_calculate_surge_multiplier_is_one_with_no_concurrent_runs():
+    run = SimpleNamespace(id="RUN_1", market_id=1, area_id=2)
+    session = MagicMock()
+    session.query.return_value.filter.return_value.count.return_value = 0
+
+    assert DeliveryRunService.calculate_surge_multiplier(session, run) == 1.0
+
+
+def test_calculate_surge_multiplier_scales_with_concurrent_runs():
+    run = SimpleNamespace(id="RUN_1", market_id=1, area_id=2)
+    session = MagicMock()
+    session.query.return_value.filter.return_value.count.return_value = 2
+
+    result = DeliveryRunService.calculate_surge_multiplier(session, run)
+
+    assert result == pytest.approx(1.0 + 2 * 0.15)
+
+
+def test_calculate_surge_multiplier_caps_at_maximum():
+    run = SimpleNamespace(id="RUN_1", market_id=1, area_id=2)
+    session = MagicMock()
+    session.query.return_value.filter.return_value.count.return_value = 100
+
+    assert DeliveryRunService.calculate_surge_multiplier(session, run) == 2.0
+
+
 # --- close_runs_past_cutoff ------------------------------------------------
 
 
-def _cutoff_query_side_effect(run, run_orders):
+def _cutoff_query_side_effect(run, run_orders, concurrent_active_runs=0):
     def query_side_effect(*args):
         model = args[0]
         m = MagicMock()
         if model is DeliveryRun:
             m.filter.return_value.all.return_value = [run]
+            # calculate_surge_multiplier's own count() query -- default
+            # to "no other concurrent runs" (surge_multiplier == 1.0) so
+            # existing tests' base_price assertions don't need to change.
+            m.filter.return_value.count.return_value = concurrent_active_runs
         elif model is DeliveryRunOrder:
             m.filter_by.return_value.all.return_value = run_orders
             m.filter.return_value.delete.return_value = None
@@ -222,7 +257,9 @@ def _cutoff_query_side_effect(run, run_orders):
 
 @patch("app.deliveries.runs.session_scope")
 def test_close_runs_past_cutoff_cancels_empty_run(mock_scope):
-    run = SimpleNamespace(id="RUN_1", status=DeliveryRunStatus.OPEN)
+    run = SimpleNamespace(
+        id="RUN_1", status=DeliveryRunStatus.OPEN, market_id=1, area_id=1
+    )
     run.transition_to = lambda new_status, _r=run: DeliveryRun.transition_to(
         _r, new_status
     )
@@ -239,7 +276,9 @@ def test_close_runs_past_cutoff_cancels_empty_run(mock_scope):
 
 @patch("app.deliveries.runs.session_scope")
 def test_close_runs_past_cutoff_prices_and_plans_nonempty_run(mock_scope):
-    run = SimpleNamespace(id="RUN_1", status=DeliveryRunStatus.OPEN)
+    run = SimpleNamespace(
+        id="RUN_1", status=DeliveryRunStatus.OPEN, market_id=1, area_id=1
+    )
     run.transition_to = lambda new_status, _r=run: DeliveryRun.transition_to(
         _r, new_status
     )
@@ -260,8 +299,39 @@ def test_close_runs_past_cutoff_prices_and_plans_nonempty_run(mock_scope):
 
     assert result == {"closed": 1, "cancelled_empty": 0, "free_cancellations": 0}
     assert run.status == DeliveryRunStatus.RIDER_ASSIGNMENT
+    assert run.surge_multiplier == 1.0
     assert run.base_price == DEFAULT_BASE_PRICE
     assert run.price_per_order == round(DEFAULT_BASE_PRICE / 4, 2)
+
+
+@patch("app.deliveries.runs.session_scope")
+def test_close_runs_past_cutoff_applies_surge_multiplier(mock_scope):
+    run = SimpleNamespace(
+        id="RUN_1", status=DeliveryRunStatus.OPEN, market_id=1, area_id=1
+    )
+    run.transition_to = lambda new_status, _r=run: DeliveryRun.transition_to(
+        _r, new_status
+    )
+    run_orders = [
+        SimpleNamespace(
+            order_id=f"ORD_{i}",
+            wait_choice=DeliveryRunWaitChoice.PENDING,
+            fallback_consent=False,
+        )
+        for i in range(4)
+    ]
+    session = MagicMock()
+    # Two other concurrent active runs for the same market/area --
+    # surge_multiplier = 1.0 + 2*0.15 = 1.3.
+    session.query.side_effect = _cutoff_query_side_effect(
+        run, run_orders, concurrent_active_runs=2
+    )
+    mock_scope.return_value.__enter__.return_value = session
+
+    DeliveryRunService.close_runs_past_cutoff()
+
+    assert run.surge_multiplier == pytest.approx(1.3)
+    assert run.base_price == round(DEFAULT_BASE_PRICE * 1.3, 2)
 
 
 @patch("app.orders.services.OrderService.cancel_order")
@@ -272,7 +342,9 @@ def test_close_runs_past_cutoff_free_cancels_unconsented_thin_orders(
     """10.3 wait-deadline fallback: still thin at cutoff, nobody
     consented -- both orders get a free cancellation and the run, left
     with nothing, is cancelled rather than planned."""
-    run = SimpleNamespace(id="RUN_1", status=DeliveryRunStatus.OPEN)
+    run = SimpleNamespace(
+        id="RUN_1", status=DeliveryRunStatus.OPEN, market_id=1, area_id=1
+    )
     run.transition_to = lambda new_status, _r=run: DeliveryRun.transition_to(
         _r, new_status
     )
@@ -307,7 +379,9 @@ def test_close_runs_past_cutoff_keeps_consented_order_cancels_the_rest(
 ):
     """A PAY_NOW/consenting order survives the fallback and the run still
     plans -- priced against only the surviving order(s)."""
-    run = SimpleNamespace(id="RUN_1", status=DeliveryRunStatus.OPEN)
+    run = SimpleNamespace(
+        id="RUN_1", status=DeliveryRunStatus.OPEN, market_id=1, area_id=1
+    )
     run.transition_to = lambda new_status, _r=run: DeliveryRun.transition_to(
         _r, new_status
     )
