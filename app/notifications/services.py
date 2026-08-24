@@ -223,6 +223,24 @@ class NotificationService:
             "always_email": True,
             "always_push": True,
         },
+        # Seller fulfilment notifications (12.1-12.2). Same "no entry ->
+        # WEBSOCKET-only, so an offline seller/buyer never gets pushed" gap
+        # documented below at ITEM_UNFULFILLED -- caught the same way, by
+        # tracing how this reaches the phone rather than by a test. Both
+        # carry a hard response countdown (SELLER_RESPONSE_TIMEOUT_MINUTES /
+        # the 9.1 ASK deadline), so a missed push here directly costs the
+        # seller's Reliability score or strands the buyer's order -- no
+        # email, the window is too short for it to help.
+        NotificationType.FULFILMENT_REQUEST: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.SUBSTITUTION_APPROVAL_REQUIRED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
         # Buyer request notifications
         NotificationType.REQUEST_OFFER: {
             "channels": [
