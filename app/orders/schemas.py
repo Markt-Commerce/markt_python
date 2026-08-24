@@ -36,6 +36,7 @@ class OrderSchema(OrderCreateSchema):
     created_at = fields.DateTime(dump_only=True)
     # For responses, serialize ORM relationship via helper dict on model
     shipping_address = fields.Dict(dump_only=True, attribute="shipping_address_dict")
+    items = fields.Nested(lambda: OrderItemSchema(many=True), dump_only=True)
 
 
 class OrderPaginationSchema(Schema):
