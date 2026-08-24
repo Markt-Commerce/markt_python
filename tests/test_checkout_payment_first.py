@@ -568,10 +568,13 @@ def test_verify_payment_routes_checkout_payment_to_checkout_completion(
         json=lambda: {"status": True, "data": {"status": "success", "amount": 100}},
     )
 
-    PaymentService.verify_payment("PAY_1")
+    result = PaymentService.verify_payment("PAY_1")
 
     mock_complete_checkout.assert_called_once()
     mock_complete_payment.assert_not_called()
+    # Mobile client (which never had an order_id to begin with, for a
+    # payment-first checkout) learns the resulting order from here.
+    assert result["order_id"] == payment.order_id
 
 
 @patch("app.payments.services.requests.get")

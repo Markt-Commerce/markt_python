@@ -87,7 +87,7 @@ class ProductService:
             raise APIError("Failed to fetch product", 500)
 
     @staticmethod
-    def search_products(args):
+    def search_products(args, market_id=None):
         with session_scope() as session:
             base_query = (
                 session.query(Product)
@@ -100,6 +100,14 @@ class ProductService:
                     joinedload(Product.categories).joinedload(ProductCategory.category),
                 )
             )
+
+            # Market browsing (markets feature): server-determined from the
+            # URL path, not a client-supplied filter, so it bypasses
+            # ProductSearchSchema entirely -- see app.markets.services.
+            if market_id is not None:
+                base_query = base_query.join(
+                    Seller, Product.seller_id == Seller.id
+                ).filter(Seller.market_id == market_id)
 
             # Initialize paginator
             paginator = Paginator(

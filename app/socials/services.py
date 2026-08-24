@@ -1522,7 +1522,7 @@ class PostService:
             }
 
     @staticmethod
-    def get_posts(args):
+    def get_posts(args, market_id=None):
         """Get paginated posts with filtering"""
         with session_scope() as session:
             base_query = (
@@ -1538,6 +1538,14 @@ class PostService:
                     joinedload(Post.niche_posts).joinedload(NichePost.niche),
                 )
             )
+
+            # Market browsing (markets feature): posts by sellers assigned
+            # to this market. Server-determined from the URL path, not a
+            # client-supplied filter -- see app.markets.services.
+            if market_id is not None:
+                base_query = base_query.join(
+                    Seller, Seller.user_id == Post.user_id
+                ).filter(Seller.market_id == market_id)
 
             # Apply filters
             # 1) Basic filters from args (user, category)
