@@ -618,6 +618,10 @@ class PaymentService:
                     "amount": payment.amount,
                     "gateway_response": payment.gateway_response,
                     "already_completed": True,
+                    # Payment-first checkout (initialize_checkout_payment) has
+                    # no order at request time -- the client only learns the
+                    # resulting order_id from this response, once it exists.
+                    "order_id": payment.order_id,
                 }
 
             if not payment.transaction_id:
@@ -666,10 +670,19 @@ class PaymentService:
                             "success (payment %s); webhook will reconcile",
                             payment_id,
                         )
+                    order_id = None
+                    with session_scope() as session:
+                        refreshed = session.query(Payment).get(payment_id)
+                        if refreshed:
+                            order_id = refreshed.order_id
                     return {
                         "verified": True,
                         "amount": data["data"]["amount"] / 100,
                         "gateway_response": data,
+                        # None if local completion above failed (webhook will
+                        # still reconcile it) or this wasn't a checkout
+                        # payment to begin with.
+                        "order_id": order_id,
                     }
                 return {"verified": False, "gateway_response": data}
             raise APIError("Failed to verify payment with gateway", 500)

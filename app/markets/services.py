@@ -17,12 +17,27 @@ auto-rejection.
 
 from typing import Any, Dict, Optional
 
+from sqlalchemy import func
+
 from app.libs.errors import NotFoundError, ValidationError
 from app.libs.session import session_scope
 from app.orders.shipping import geocode_address
 from app.users.models import MarketVerificationStatus, Seller
 
 from .models import Area, Market
+
+
+def _market_to_dict(market: Market, seller_count: int) -> Dict[str, Any]:
+    return {
+        "id": market.id,
+        "name": market.name,
+        "slug": market.slug,
+        "latitude": market.latitude,
+        "longitude": market.longitude,
+        "is_active": market.is_active,
+        "seller_count": seller_count,
+    }
+
 
 # Generous on purpose -- see module docstring on geocoding accuracy for
 # informal market addresses.
@@ -143,3 +158,76 @@ class MarketService:
             session.add(market)
             session.flush()
             return market
+
+    # ------------------------------------------------------------------
+    # Market browsing (Phase 13 mobile): "click a market, see the sellers,
+    # products, and posts in it." Markets are a small, curated set (see
+    # this module's docstring), so the list itself isn't paginated -- only
+    # the sellers/products/posts inside one are.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def list_markets(active_only: bool = True) -> list:
+        with session_scope() as session:
+            query = session.query(Market)
+            if active_only:
+                query = query.filter(Market.is_active.is_(True))
+            markets = query.order_by(Market.name.asc()).all()
+
+            market_ids = [m.id for m in markets]
+            counts = (
+                dict(
+                    session.query(Seller.market_id, func.count(Seller.id))
+                    .filter(Seller.market_id.in_(market_ids))
+                    .group_by(Seller.market_id)
+                    .all()
+                )
+                if market_ids
+                else {}
+            )
+
+            return [_market_to_dict(m, counts.get(m.id, 0)) for m in markets]
+
+    @staticmethod
+    def get_market(market_id: int) -> Dict[str, Any]:
+        with session_scope() as session:
+            market = session.query(Market).get(market_id)
+            if not market:
+                raise NotFoundError("Market not found")
+
+            seller_count = (
+                session.query(Seller).filter(Seller.market_id == market_id).count()
+            )
+            return _market_to_dict(market, seller_count)
+
+    @staticmethod
+    def list_market_sellers(
+        market_id: int, args: Dict[str, Any], user_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        from app.users.services import ShopService
+
+        with session_scope() as session:
+            if not session.query(Market).get(market_id):
+                raise NotFoundError("Market not found")
+
+        return ShopService.search_shops(args, user_id=user_id, market_id=market_id)
+
+    @staticmethod
+    def list_market_products(market_id: int, args: Dict[str, Any]) -> Dict[str, Any]:
+        from app.products.services import ProductService
+
+        with session_scope() as session:
+            if not session.query(Market).get(market_id):
+                raise NotFoundError("Market not found")
+
+        return ProductService.search_products(args, market_id=market_id)
+
+    @staticmethod
+    def list_market_posts(market_id: int, args: Dict[str, Any]) -> Dict[str, Any]:
+        from app.socials.services import PostService
+
+        with session_scope() as session:
+            if not session.query(Market).get(market_id):
+                raise NotFoundError("Market not found")
+
+        return PostService.get_posts(args, market_id=market_id)

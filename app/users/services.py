@@ -842,12 +842,18 @@ class ShopService:
     """Service for shop/seller discovery and search"""
 
     @staticmethod
-    def search_shops(args, user_id=None):
+    def search_shops(args, user_id=None, market_id=None):
         """Search for shops with filters and pagination"""
         try:
             with session_scope() as session:
                 # Build base query
                 query = session.query(Seller).join(User)
+
+                # Market browsing (markets feature): server-determined from
+                # the URL path, not a client-supplied filter -- see
+                # app.markets.services.
+                if market_id is not None:
+                    query = query.filter(Seller.market_id == market_id)
 
                 # Apply filters
                 if args.get("search"):
