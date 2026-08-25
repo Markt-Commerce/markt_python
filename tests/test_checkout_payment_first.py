@@ -252,8 +252,10 @@ def test_initialize_checkout_payment_reserves_each_item_and_snapshots_cart(
     assert payment.buyer_id == 42
     assert payment.order_id is None
     assert payment.pending_checkout_data["items"][0]["reservation_id"] == "RSV_1"
-    # subtotal=1000 + shipping_fee(flat 10.00 placeholder) + service_fee(2.5% of 1000 = 25)
-    assert payment.pending_checkout_data["total"] == 1035.0
+    # subtotal=1000 + shipping_fee(DEFAULT_BASE_PRICE=500, one delivery -- no
+    # seller.market_id on this fixture, counts as one unresolved delivery)
+    # + service_fee(2.5% of 1000 = 25)
+    assert payment.pending_checkout_data["total"] == 1525.0
     assert payment.pending_checkout_data["service_fee"] == 25.0
     assert payment.pending_checkout_data["reliability_fee_opted_in"] is False
     assert payment.pending_checkout_data["reliability_fee_estimate"] == 0.0

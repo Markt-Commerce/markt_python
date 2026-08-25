@@ -9,7 +9,12 @@ import pytest
 
 from app.fulfilment.models import FulfilmentAllocation, FulfilmentAllocationStatus
 from app.fulfilment.services import FulfilmentService
-from app.libs.errors import ConflictError, ForbiddenError, NotFoundError
+from app.libs.errors import (
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    ValidationError,
+)
 from app.orders.events import OrderEventType
 from app.orders.models import FulfilmentPreference
 from app.payments.models import PaymentStatus
@@ -28,7 +33,7 @@ def _allocation(status, **overrides):
 @patch("app.fulfilment.services.NotificationService.create_notification")
 @patch("app.fulfilment.services.session_scope")
 def test_create_allocation_notifies_seller(mock_scope, mock_notify):
-    order_item = SimpleNamespace(product_id="PRD_1", order_id="ORD_1")
+    order_item = SimpleNamespace(product_id="PRD_1", order_id="ORD_1", quantity=2)
     seller = SimpleNamespace(user_id="USR_SELLER1")
     fetched = SimpleNamespace(id=99)
     session = MagicMock()
@@ -38,8 +43,13 @@ def test_create_allocation_notifies_seller(mock_scope, mock_notify):
 
     session.add.side_effect = add_side_effect
     # Call order: order_item lookup (product_id default), seller lookup,
-    # then the second session_scope's re-fetch by id.
+    # then the second session_scope's re-fetch by id. The 5.2 capacity
+    # check's own query (.filter().with_for_update().all()) is a
+    # different attribute chain, so it doesn't consume from this list.
     session.query.return_value.get.side_effect = [order_item, seller, fetched]
+    session.query.return_value.filter.return_value.with_for_update.return_value.all.return_value = (
+        []
+    )
 
     mock_scope.return_value.__enter__.return_value = session
 
@@ -63,13 +73,16 @@ def test_create_allocation_notifies_seller(mock_scope, mock_notify):
 def test_create_allocation_skips_notification_when_seller_missing(
     mock_scope, mock_notify
 ):
-    order_item = SimpleNamespace(product_id="PRD_1", order_id="ORD_1")
+    order_item = SimpleNamespace(product_id="PRD_1", order_id="ORD_1", quantity=2)
     session = MagicMock()
     session.query.return_value.get.side_effect = [
         order_item,
         None,
         SimpleNamespace(id=99),
     ]
+    session.query.return_value.filter.return_value.with_for_update.return_value.all.return_value = (
+        []
+    )
     session.add.side_effect = lambda obj: setattr(obj, "id", 99)
     mock_scope.return_value.__enter__.return_value = session
 
@@ -87,12 +100,17 @@ def test_create_allocation_uses_explicit_product_id_for_reroutes(
     replacement seller's own Product row) and must not use
     OrderItem.product_id's value -- OrderItem is still looked up (now
     unconditionally) for its order_id, needed for the 14.2 event log."""
-    order_item = SimpleNamespace(product_id="PRD_ORIGINAL", order_id="ORD_1")
+    order_item = SimpleNamespace(
+        product_id="PRD_ORIGINAL", order_id="ORD_1", quantity=2
+    )
     seller = SimpleNamespace(user_id="USR_SELLER1")
     fetched = SimpleNamespace(id=99)
     session = MagicMock()
     session.add.side_effect = lambda obj: setattr(obj, "id", 99)
     session.query.return_value.get.side_effect = [order_item, seller, fetched]
+    session.query.return_value.filter.return_value.with_for_update.return_value.all.return_value = (
+        []
+    )
 
     mock_scope.return_value.__enter__.return_value = session
 
@@ -107,6 +125,52 @@ def test_create_allocation_uses_explicit_product_id_for_reroutes(
     # not ITEM_ALLOCATED.
     emitted_event = session.add.call_args_list[1][0][0]
     assert emitted_event.event_type == OrderEventType.ITEM_REROUTED
+
+
+@patch("app.fulfilment.services.session_scope")
+def test_create_allocation_rejects_over_commitment(mock_scope):
+    """5.2: a new allocation that would push the item's total active
+    quantity past what was actually requested is rejected outright --
+    the real invariant now that more than one active allocation per item
+    is possible."""
+    order_item = SimpleNamespace(product_id="PRD_1", order_id="ORD_1", quantity=10)
+    existing = SimpleNamespace(quantity=7)
+    session = MagicMock()
+    session.query.return_value.get.side_effect = [order_item]
+    session.query.return_value.filter.return_value.with_for_update.return_value.all.return_value = [
+        existing
+    ]
+    mock_scope.return_value.__enter__.return_value = session
+
+    with pytest.raises(ConflictError):
+        FulfilmentService.create_allocation(10, 7, 5)  # 7 + 5 > 10
+
+    session.add.assert_not_called()
+
+
+@patch("app.fulfilment.services.NotificationService.create_notification")
+@patch("app.fulfilment.services.session_scope")
+def test_create_allocation_allows_split_within_capacity(mock_scope, mock_notify):
+    """5.1: a second, smaller allocation for the same item succeeds as
+    long as it fits alongside what's already active -- this is what
+    quantity splitting actually looks like at the create_allocation
+    layer (A already holds 4 of 10, C takes the remaining 6)."""
+    order_item = SimpleNamespace(product_id="PRD_1", order_id="ORD_1", quantity=10)
+    seller = SimpleNamespace(user_id="USR_SELLER_C")
+    fetched = SimpleNamespace(id=100)
+    existing = SimpleNamespace(quantity=4)
+    session = MagicMock()
+    session.add.side_effect = lambda obj: setattr(obj, "id", 100)
+    session.query.return_value.get.side_effect = [order_item, seller, fetched]
+    session.query.return_value.filter.return_value.with_for_update.return_value.all.return_value = [
+        existing
+    ]
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = FulfilmentService.create_allocation(10, 8, 6)
+
+    assert result is fetched
+    assert order_item.fulfilled_quantity == 10
 
 
 @patch("app.fulfilment.services.session_scope")
@@ -608,3 +672,49 @@ def test_expire_stale_buyer_approvals_no_op_when_none_stale(mock_scope, mock_ref
 
     assert result == {"timed_out": 0}
     mock_refund.assert_not_called()
+
+
+# ---- list_seller_allocations ----
+
+
+@patch("app.fulfilment.services.session_scope")
+def test_list_seller_allocations_defaults_to_active_statuses(mock_scope):
+    expected = [SimpleNamespace(id=1)]
+    session = MagicMock()
+    active_query = (
+        session.query.return_value.options.return_value.filter_by.return_value
+    )
+    active_query.filter.return_value.order_by.return_value.all.return_value = expected
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = FulfilmentService.list_seller_allocations(7)
+
+    assert result == expected
+    active_query.filter.assert_called_once()
+    active_query.filter_by.assert_not_called()
+
+
+@patch("app.fulfilment.services.session_scope")
+def test_list_seller_allocations_filters_by_explicit_status(mock_scope):
+    expected = [SimpleNamespace(id=2)]
+    session = MagicMock()
+    base_query = session.query.return_value.options.return_value.filter_by.return_value
+    base_query.filter_by.return_value.order_by.return_value.all.return_value = expected
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = FulfilmentService.list_seller_allocations(7, status="timeout")
+
+    assert result == expected
+    base_query.filter_by.assert_called_once_with(
+        status=FulfilmentAllocationStatus.TIMEOUT
+    )
+    base_query.filter.assert_not_called()
+
+
+@patch("app.fulfilment.services.session_scope")
+def test_list_seller_allocations_rejects_unknown_status(mock_scope):
+    session = MagicMock()
+    mock_scope.return_value.__enter__.return_value = session
+
+    with pytest.raises(ValidationError):
+        FulfilmentService.list_seller_allocations(7, status="not_a_real_status")

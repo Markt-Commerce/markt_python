@@ -710,6 +710,61 @@ class DeliveryService:
             return {"status": assignment.logistical_status.value}
 
     @staticmethod
+    def get_buyer_pod_code(order_id: str, user_id: str) -> Dict:
+        """10.6 POD handshake, buyer side: the buyer's app displays this
+        code so the rider can read/enter it back at the door -- both
+        existing rider-side confirm calls (confirm_order_qr_code below,
+        and DeliveryRunPodService.confirm_order_pod) already just take a
+        `qr_code` string with no assumption about how the rider learned
+        it, so neither needed any change for this. Before this, the only
+        way to fetch either code was the rider-authenticated GET
+        endpoints (get_order_qr_code below, DeliveryRunPodService.
+        get_order_pod_qr) -- meaning a rider could always fetch and
+        immediately submit their own code back with no buyer step at all,
+        which isn't real proof of anything. This is what closes that gap.
+
+        Checks both delivery systems, since an order can be served by
+        either today (10's own note: single-order is what actually works
+        end-to-end right now; the batched DeliveryRun model is the real
+        target direction, not yet fully rider-driven) -- single-order
+        first, then the run-based join table. Same ownership-check
+        convention as OrderService.track_order (user_id is the buyer's
+        own User.id, not their Buyer account id).
+        """
+        with session_scope() as session:
+            order = session.query(Order).options(joinedload(Order.buyer)).get(order_id)
+            if not order:
+                raise NotFoundError("Order not found")
+            if not order.buyer or order.buyer.user_id != user_id:
+                raise ForbiddenError("You can only view your own order's delivery code")
+
+            assignment = (
+                session.query(DeliveryOrderAssignment)
+                .filter_by(order_id=order_id, status=AssignmentStatus.ACCEPTED)
+                .order_by(DeliveryOrderAssignment.assigned_at.desc())
+                .first()
+            )
+            if assignment and assignment.escrow_qr_code:
+                return {
+                    "ready": True,
+                    "system": "single_order",
+                    "code": assignment.escrow_qr_code,
+                }
+
+            from .models import DeliveryRunOrder, DeliveryRunOrderPodStatus
+
+            run_order = (
+                session.query(DeliveryRunOrder).filter_by(order_id=order_id).first()
+            )
+            if (
+                run_order
+                and run_order.pod_status == DeliveryRunOrderPodStatus.QR_ISSUED
+            ):
+                return {"ready": True, "system": "run", "code": run_order.qr_code}
+
+            return {"ready": False, "system": None, "code": None}
+
+    @staticmethod
     def get_order_qr_code(user_id: str, order_id: str) -> Dict:
         with session_scope() as session:
             assignment = (

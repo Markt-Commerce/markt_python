@@ -176,6 +176,24 @@ class TrackOrder(MethodView):
             abort(e.status_code, message=e.message)
 
 
+@bp.route("/<order_id>/pod-code")
+class OrderPodCode(MethodView):
+    @login_required
+    @buyer_required
+    @bp.response(200)
+    def get(self, order_id):
+        """10.6: the buyer's proof-of-delivery code -- displayed on this
+        screen for the rider to read/enter back. See
+        DeliveryService.get_buyer_pod_code for why the buyer needed a
+        fetch endpoint of their own at all."""
+        from app.deliveries.services import DeliveryService
+
+        try:
+            return DeliveryService.get_buyer_pod_code(order_id, current_user.id)
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
 @bp.route("/<order_id>/cancel")
 class CancelOrder(MethodView):
     @login_required
@@ -233,6 +251,50 @@ class OrderDeliveryWaitChoice(MethodView):
                 "choice": run_order.wait_choice.value,
                 "fallback_consent": run_order.fallback_consent,
             }
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/items/<int:order_item_id>/escalation")
+class OrderItemEscalation(MethodView):
+    @login_required
+    @buyer_required
+    @bp.response(200)
+    def get(self, order_item_id):
+        """7.3: buyer-facing view of an item Markt couldn't find a
+        replacement seller for -- the auto-generated reroute request's
+        pending offers (if any), so the buyer can choose a seller without
+        digging through their general requests list. See
+        app.fulfilment.rerouting.get_item_escalation for what counts as
+        "escalated" and why only 3 of 7.3's 4 options are offered."""
+        from app.fulfilment.rerouting import get_item_escalation
+
+        try:
+            return get_item_escalation(order_item_id, current_user.buyer_account.id)
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/items/<int:order_item_id>/escalation/remove")
+class OrderItemEscalationRemove(MethodView):
+    @login_required
+    @buyer_required
+    @bp.arguments(OrderCancelSchema)
+    @bp.response(200)
+    def post(self, cancel_data, order_item_id):
+        """7.3 option: remove this escalated item and refund it, without
+        cancelling the rest of the order. (The "cancel order" and "choose
+        seller" options reuse the existing POST /orders/<id>/cancel and
+        POST /requests/offers/<id>/accept endpoints respectively -- no
+        new backend needed for those.)"""
+        from app.fulfilment.rerouting import remove_escalated_item
+
+        try:
+            return remove_escalated_item(
+                order_item_id,
+                current_user.buyer_account.id,
+                reason=cancel_data.get("reason"),
+            )
         except APIError as e:
             abort(e.status_code, message=e.message)
 

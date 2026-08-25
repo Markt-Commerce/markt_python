@@ -195,6 +195,48 @@ class DeliveryRunFailRequestSchema(Schema):
     reason = fields.String(allow_none=True)
 
 
+class DeliveryRunStopDetailSchema(Schema):
+    seller_id = fields.Integer()
+    seller_name = fields.String(allow_none=True)
+    shop_address = fields.String(allow_none=True)
+    status = fields.String(validate=validate.OneOf(["pending", "arrived", "picked_up"]))
+    arrived_at = fields.String(allow_none=True)
+    picked_up_at = fields.String(allow_none=True)
+
+
+class DeliveryRunOrderAddressSchema(Schema):
+    street_address = fields.String(allow_none=True)
+    city = fields.String(allow_none=True)
+    state = fields.String(allow_none=True)
+
+
+class DeliveryRunOrderDetailSchema(Schema):
+    order_id = fields.String()
+    order_number = fields.String(allow_none=True)
+    buyer_name = fields.String(allow_none=True)
+    delivery_address = fields.Nested(DeliveryRunOrderAddressSchema, allow_none=True)
+    pod_status = fields.String(
+        validate=validate.OneOf(["pending", "qr_issued", "delivered"])
+    )
+    delivered_at = fields.String(allow_none=True)
+
+
+class DeliveryRunDetailResponseSchema(Schema):
+    """Full rider-facing run state -- GET /runs/active and
+    GET /runs/<run_id>. `run_id` is the only field guaranteed present:
+    GET /runs/active returns just `{"run_id": null}` when the rider has
+    no run in progress, rather than a 404 (there's genuinely nothing
+    wrong, just nothing active)."""
+
+    run_id = fields.String(allow_none=True)
+    status = fields.String(allow_none=True)
+    market = fields.String(allow_none=True)
+    area = fields.String(allow_none=True)
+    price_per_order = fields.Float(allow_none=True)
+    stops = fields.List(fields.Nested(DeliveryRunStopDetailSchema), missing=list)
+    orders = fields.List(fields.Nested(DeliveryRunOrderDetailSchema), missing=list)
+
+
 # --- DeliveryRun pickup-per-stop / POD (10.6, Phase 10) ---------------------
 
 

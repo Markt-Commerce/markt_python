@@ -158,6 +158,24 @@ class OrderItem(BaseModel, StatusMixin):
         default=FulfilmentPreference.AUTO,
         nullable=False,
     )
+    # 5.1: sum of this item's currently-ACTIVE FulfilmentAllocation
+    # quantities -- "actual seller commitments," distinct from `quantity`
+    # (the *requested* amount). Recomputed (not incrementally tracked) by
+    # FulfilmentService.create_allocation and ReroutingService.attempt_reroute
+    # whenever this item's allocations change, since a live recompute at
+    # those specific touch points is more robust than a change-by-change
+    # counter threaded through every allocation-lifecycle call site.
+    fulfilled_quantity = db.Column(db.Integer, default=0, nullable=False)
+    # 5.1: "all-or-nothing" flag. True (default): if a shortfall can't be
+    # fully covered by the fulfilment deadline, accept whatever quantity
+    # WAS secured -- `quantity` itself is reduced to match, and the buyer
+    # is refunded for the difference (see
+    # ReroutingService.attempt_reroute's give-up branch and
+    # OrderService.refund_partial_quantity). False: never ship less than
+    # requested -- release everything secured so far and escalate the
+    # whole item instead (5.2's own explicit "all-or-nothing" example: 10
+    # units needed for an event, a partial delivery is useless).
+    allow_partial_quantity = db.Column(db.Boolean, default=True, nullable=False)
 
     # Relationships
     order = db.relationship("Order", back_populates="items")

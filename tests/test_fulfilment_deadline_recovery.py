@@ -34,6 +34,7 @@ def _mock_session(
     history_by_item,
     allocations_by_id=None,
     order_items_by_id=None,
+    active_siblings=None,
 ):
     session = MagicMock()
 
@@ -59,6 +60,11 @@ def _mock_session(
 
             m.filter_by.side_effect = filter_by
             m.get.side_effect = lambda aid: (allocations_by_id or {}).get(aid)
+            # 5.1: the stuck-REROUTING resolution path's sibling lookup
+            # (.filter(order_item_id==X, status.in_(ACTIVE_STATUSES)).all())
+            # -- only ever one order item under test at a time here, so no
+            # need to parse the actual filter args.
+            m.filter.return_value.all.return_value = active_siblings or []
             return m
 
         if name == "OrderItem":
@@ -124,23 +130,26 @@ def test_recover_stuck_allocations_ignores_superseded_history(mock_scope):
     mock_attempt.assert_not_called()
 
 
-@patch("app.fulfilment.rerouting.escalate_unfulfilled_item")
+@patch("app.fulfilment.rerouting._finish_unfulfilled")
 @patch("app.fulfilment.services.session_scope")
-def test_recover_stuck_allocations_resolves_stuck_rerouting(mock_scope, mock_escalate):
+def test_recover_stuck_allocations_resolves_stuck_rerouting(mock_scope, mock_finish):
     """REROUTING has no deadline column/worker of its own -- the sweep
-    resolves it straight to UNFULFILLED (attempt_reroute() itself won't
-    accept REROUTING as a starting status, so calling it would no-op) and
-    escalates, same outcome attempt_reroute() reaches internally."""
+    resolves it by delegating to the same shared give-up path
+    attempt_reroute() itself uses (5.1: so a crash-recovery resolution
+    respects allow_partial_quantity/siblings exactly like the primary
+    path would), since attempt_reroute() won't accept REROUTING as a
+    starting status (calling it would silently no-op)."""
     allocation = _stuck_allocation(
         FulfilmentAllocationStatus.REROUTING, id=5, order_item_id=20
     )
-    order_item = SimpleNamespace(id=20, order_id="ORD_1")
+    order_item = SimpleNamespace(id=20, order_id="ORD_1", allow_partial_quantity=True)
 
     session = _mock_session(
         [(20,)],
         {20: [allocation]},
         allocations_by_id={5: allocation},
         order_items_by_id={20: order_item},
+        active_siblings=[],
     )
     mock_scope.return_value.__enter__.return_value = session
 
@@ -151,14 +160,15 @@ def test_recover_stuck_allocations_resolves_stuck_rerouting(mock_scope, mock_esc
 
     assert result == {"retried": 0, "resolved_stuck_rerouting": 1}
     mock_attempt.assert_not_called()
-    assert allocation.status == FulfilmentAllocationStatus.UNFULFILLED
-    mock_escalate.assert_called_once_with(5)
+    mock_finish.assert_called_once_with(
+        20, 5, 0, True, "stuck_rerouting_deadline_recovery"
+    )
 
 
-@patch("app.fulfilment.rerouting.escalate_unfulfilled_item")
+@patch("app.fulfilment.rerouting._finish_unfulfilled")
 @patch("app.fulfilment.services.session_scope")
 def test_recover_stuck_allocations_stuck_rerouting_no_op_if_already_resolved(
-    mock_scope, mock_escalate
+    mock_scope, mock_finish
 ):
     """Guards against double-processing if the allocation moved on between
     the sweep query and this resolution step (e.g. a concurrent normal
@@ -180,4 +190,4 @@ def test_recover_stuck_allocations_stuck_rerouting_no_op_if_already_resolved(
     result = FulfilmentService.recover_stuck_allocations()
 
     assert result == {"retried": 0, "resolved_stuck_rerouting": 0}
-    mock_escalate.assert_not_called()
+    mock_finish.assert_not_called()

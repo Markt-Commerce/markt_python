@@ -932,6 +932,131 @@ class OrderService:
         return None
 
     @staticmethod
+    def refund_partial_quantity(
+        order_item_id: int,
+        new_quantity: int,
+        shortfall_ref: str,
+        reason: Optional[str] = None,
+    ) -> Optional["WalletEntry"]:
+        """5.1/5.2: accept a partial fulfilment -- reduce
+        OrderItem.quantity down to what was actually secured
+        (`new_quantity`) and refund the buyer for the difference,
+        WITHOUT cancelling the item (distinct from refund_unresolved_item,
+        which is whole-item). Only caller today is
+        ReroutingService.attempt_reroute's give-up branch, when
+        OrderItem.allow_partial_quantity is True and at least one
+        allocation for the item is still active.
+
+        `shortfall_ref` discriminates the wallet idempotency key from
+        refund_order_item_to_wallet's own `refund:item:{id}` key (which
+        assumes at most one refund ever happens per item -- true for a
+        full cancellation, not true here, since the same item could face
+        more than one shortfall over its lifetime as different
+        allocations fail). Pass something that uniquely and
+        deterministically identifies THIS shortfall event -- the failed
+        allocation's own id is the natural choice, see attempt_reroute --
+        so a retry of the same event doesn't double-credit.
+
+        No-op (returns None) if new_quantity >= the item's current
+        quantity -- nothing to refund, and this never raises quantity
+        back up.
+        """
+        from app.wallet.models import WalletReferenceType
+        from app.wallet.services import WalletService
+
+        refund_amount = 0.0
+        buyer_user_id = None
+        dropped_quantity = 0
+
+        with session_scope() as session:
+            order_item = (
+                session.query(OrderItem)
+                .options(
+                    db.joinedload(OrderItem.order).joinedload(Order.payments),
+                    db.joinedload(OrderItem.order).joinedload(Order.buyer),
+                )
+                .get(order_item_id)
+            )
+            if not order_item:
+                raise NotFoundError("Order item not found")
+
+            if new_quantity >= (order_item.quantity or 0):
+                return None
+
+            order = order_item.order
+            dropped_quantity = order_item.quantity - new_quantity
+            refund_amount = round((order_item.price or 0) * dropped_quantity, 2)
+
+            if refund_amount > 0:
+                OrderService._assert_refund_within_captured(
+                    order, refund_amount, session=session
+                )
+
+            order_item.quantity = new_quantity
+
+            for payment in order.payments or []:
+                if payment.status in (
+                    PaymentStatus.COMPLETED,
+                    PaymentStatus.PARTIALLY_REFUNDED,
+                ):
+                    payment.transition_to(PaymentStatus.PARTIALLY_REFUNDED)
+
+            buyer_user_id = order.buyer.user_id if order.buyer else None
+
+            OrderEventService.emit(
+                session,
+                order_id=order.id,
+                order_item_id=order_item_id,
+                event_type=OrderEventType.ITEM_REFUNDED,
+                actor_type=ActorType.SYSTEM,
+                metadata={
+                    "reason": reason,
+                    "refund_amount": refund_amount,
+                    "dropped_quantity": dropped_quantity,
+                    "new_quantity": new_quantity,
+                },
+                idempotency_key=f"event:item_refunded:partial:{shortfall_ref}",
+            )
+
+            session.flush()
+
+        if refund_amount > 0 and buyer_user_id:
+            entry = WalletService.credit(
+                buyer_user_id,
+                refund_amount,
+                WalletReferenceType.ORDER_REFUND,
+                str(order_item_id),
+                description=(
+                    f"Partial refund for order item {order_item_id}: "
+                    f"{dropped_quantity} unit(s) couldn't be fulfilled"
+                    + (f" ({reason})" if reason else "")
+                ),
+                idempotency_key=f"refund:item:{order_item_id}:partial:{shortfall_ref}",
+            )
+            try:
+                NotificationService.create_notification(
+                    user_id=buyer_user_id,
+                    notification_type=NotificationType.REFUND_ISSUED,
+                    reference_type="order_item",
+                    reference_id=str(order_item_id),
+                    metadata_={
+                        "message": (
+                            f"We could only secure {new_quantity} of your "
+                            f"requested {new_quantity + dropped_quantity} "
+                            f"unit(s) for an item. ₦{refund_amount:.2f} was "
+                            "refunded to your wallet for the rest."
+                        )
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to notify buyer of item %s partial refund",
+                    order_item_id,
+                )
+            return entry
+        return None
+
+    @staticmethod
     def reject_return(
         return_id: str, seller_id: int, seller_notes: Optional[str] = None
     ):

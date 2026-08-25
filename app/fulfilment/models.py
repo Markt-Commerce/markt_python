@@ -148,34 +148,18 @@ class FulfilmentAllocation(BaseModel):
     seller = db.relationship("Seller")
     product = db.relationship("Product")
 
-    __table_args__ = (
-        # "One active fulfilment owner per allocation-quantity" (14.5,
-        # moved here from Phase 2 once this model existed to constrain).
-        # Partial unique index: only ACTIVE_STATUSES rows are constrained,
-        # so history from earlier reroute attempts never collides with a
-        # new active allocation for the same item.
-        db.Index(
-            "uq_fulfilment_allocations_active_owner",
-            "order_item_id",
-            unique=True,
-            # SQLAlchemy's db.Enum(SomeEnum) stores each Postgres enum
-            # value as the Python member's NAME (e.g. "AWAITING_SELLER"),
-            # not its .value, unless values_callable overrides that --
-            # this codebase never does. Built from ACTIVE_STATUSES'
-            # .name rather than hand-typed lowercase literals so this
-            # can't drift out of sync with the real enum type again (an
-            # earlier hardcoded-lowercase version of this WHERE clause
-            # made db.create_all() fail outright against a real Postgres
-            # DB -- caught by the CI job's disposable-database tests,
-            # never in local mocked-session tests, since those never
-            # touch a real enum type at all).
-            postgresql_where=db.text(
-                "status IN ({})".format(
-                    ", ".join(f"'{s.name}'" for s in ACTIVE_STATUSES)
-                )
-            ),
-        ),
-    )
+    # Was "one active fulfilment owner per item" (14.5, a unique partial
+    # index on order_item_id where status IN ACTIVE_STATUSES). Removed for
+    # 5.1/5.2 quantity splitting: a requested quantity can now be covered
+    # by more than one seller's simultaneously-active allocation (e.g.
+    # A->4, C->6 for a 10-unit item), which that constraint categorically
+    # forbade. The real invariant now needed -- "sum of an item's active
+    # allocation quantities never exceeds OrderItem.quantity" -- isn't a
+    # unique index; it's enforced at the application level instead
+    # (FulfilmentService.create_allocation's row-locked capacity check),
+    # same discipline already used for InventoryReservation (Phase 3) and
+    # DeliveryRun capacity (Phase 11) -- both flagged the same way when a
+    # DB-level constraint wasn't practical.
 
     def transition_to(self, new_status: "FulfilmentAllocationStatus") -> None:
         """Apply a status change, raising ValueError if it isn't a legal transition."""

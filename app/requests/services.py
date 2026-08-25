@@ -3,7 +3,6 @@ import logging
 import json
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, List
-from enum import Enum
 
 # package imports
 from sqlalchemy.orm import joinedload
@@ -22,7 +21,7 @@ from app.libs.errors import (
 )
 
 # app imports
-from .models import BuyerRequest, SellerOffer, RequestStatus, RequestSource
+from .models import BuyerRequest, SellerOffer, RequestStatus, RequestSource, OfferStatus
 from app.users.models import MarketVerificationStatus, User, Seller
 from app.products.models import Product
 from app.notifications.services import NotificationService
@@ -34,12 +33,10 @@ from app.orders.models import OrderItem
 
 logger = logging.getLogger(__name__)
 
-
-class OfferStatus(Enum):
-    PENDING = "pending"
-    ACCEPTED = "accepted"
-    REJECTED = "rejected"
-    WITHDRAWN = "withdrawn"
+# OfferStatus now lives in .models (see SellerOffer.status's own comment for
+# why) -- re-exported here so `from app.requests.services import OfferStatus`
+# (existing callers, incl. tests) keeps working unchanged.
+__all__ = ["BuyerRequestService", "OfferStatus"]
 
 
 class BuyerRequestService:
@@ -476,7 +473,7 @@ class BuyerRequestService:
                 product_id=data.get("product_id"),
                 price=data.get("price"),
                 message=data.get("message"),
-                status="pending",
+                status=OfferStatus.PENDING,
             )
 
             session.add(offer)

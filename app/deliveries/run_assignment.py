@@ -190,6 +190,137 @@ class DeliveryRunAssignmentService:
             }
 
     @staticmethod
+    def get_active_run(user_id: str) -> Dict:
+        """Rider-facing "do I have a run in progress" lookup, mirroring
+        the existing single-order get_active_assignment. Previously
+        nothing let the app find its own current run without already
+        knowing the run_id (e.g. after a restart) -- accept_run's own
+        response is the only place a run_id was ever returned."""
+        with session_scope() as session:
+            assignment = (
+                session.query(DeliveryRunAssignment)
+                .join(
+                    DeliveryRun, DeliveryRun.id == DeliveryRunAssignment.delivery_run_id
+                )
+                .filter(
+                    DeliveryRunAssignment.delivery_user_id == user_id,
+                    DeliveryRunAssignment.status == AssignmentStatus.ACCEPTED,
+                    DeliveryRun.status.in_(
+                        (
+                            DeliveryRunStatus.RIDER_ACCEPTED,
+                            DeliveryRunStatus.PICKUP_IN_PROGRESS,
+                            DeliveryRunStatus.DELIVERY_IN_PROGRESS,
+                        )
+                    ),
+                )
+                .order_by(DeliveryRunAssignment.id.desc())
+                .first()
+            )
+            if not assignment:
+                return {"run_id": None}
+            run_id = assignment.delivery_run_id
+
+        return DeliveryRunAssignmentService.get_run_detail(user_id, run_id)
+
+    @staticmethod
+    def get_run_detail(user_id: str, run_id: str) -> Dict:
+        """Rider-facing full detail for a run they've accepted -- per-
+        seller pickup progress (stops) and per-order POD progress
+        (orders). Previously nothing let a rider re-fetch this after the
+        initial accept_run response, which only returns a thin
+        {run_id, status, assignment_id} -- no way to recover the stop/
+        order list on app restart or after navigating away."""
+        from app.orders.models import Order
+
+        from .pickup import _accepted_assignment
+        from .models import DeliveryRunOrder, DeliveryRunStop
+
+        with session_scope() as session:
+            if not _accepted_assignment(session, run_id, user_id):
+                raise NotFoundError("No accepted assignment found for this run")
+
+            run = (
+                session.query(DeliveryRun)
+                .options(joinedload(DeliveryRun.area), joinedload(DeliveryRun.market))
+                .filter_by(id=run_id)
+                .first()
+            )
+            if not run:
+                raise NotFoundError("Delivery run not found")
+
+            stops = (
+                session.query(DeliveryRunStop)
+                .options(joinedload(DeliveryRunStop.seller))
+                .filter_by(delivery_run_id=run_id)
+                .all()
+            )
+            run_orders = (
+                session.query(DeliveryRunOrder).filter_by(delivery_run_id=run_id).all()
+            )
+
+            orders_detail = []
+            for run_order in run_orders:
+                order = (
+                    session.query(Order)
+                    .options(
+                        joinedload(Order.buyer),
+                        joinedload(Order.shipping_address),
+                    )
+                    .get(run_order.order_id)
+                )
+                shipping = order.shipping_address if order else None
+                orders_detail.append(
+                    {
+                        "order_id": run_order.order_id,
+                        "order_number": order.order_number if order else None,
+                        "buyer_name": (
+                            order.buyer.buyername if order and order.buyer else None
+                        ),
+                        "delivery_address": (
+                            {
+                                "street_address": shipping.street_address,
+                                "city": shipping.city,
+                                "state": shipping.state,
+                            }
+                            if shipping
+                            else None
+                        ),
+                        "pod_status": run_order.pod_status.value,
+                        "delivered_at": (
+                            run_order.delivered_at.isoformat()
+                            if run_order.delivered_at
+                            else None
+                        ),
+                    }
+                )
+
+            return {
+                "run_id": run.id,
+                "status": run.status.value,
+                "market": run.market.name if run.market else None,
+                "area": run.area.name if run.area else None,
+                "price_per_order": run.price_per_order,
+                "stops": [
+                    {
+                        "seller_id": stop.seller_id,
+                        "seller_name": stop.seller.shop_name if stop.seller else None,
+                        "shop_address": (
+                            stop.seller.shop_address if stop.seller else None
+                        ),
+                        "status": stop.status.value,
+                        "arrived_at": (
+                            stop.arrived_at.isoformat() if stop.arrived_at else None
+                        ),
+                        "picked_up_at": (
+                            stop.picked_up_at.isoformat() if stop.picked_up_at else None
+                        ),
+                    }
+                    for stop in stops
+                ],
+                "orders": orders_detail,
+            }
+
+    @staticmethod
     def reject_run(user_id: str, run_id: str) -> Dict:
         """Records a decline -- doesn't change the run's own status
         (nothing was committed), matching reject_order's behaviour. A

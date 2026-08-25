@@ -84,6 +84,70 @@ def test_refund_unresolved_item_is_idempotent(mock_scope, mock_refund):
     mock_refund.assert_not_called()
 
 
+@patch("app.orders.services.NotificationService.create_notification")
+@patch("app.wallet.services.WalletService.credit")
+@patch("app.orders.services.session_scope")
+def test_refund_partial_quantity_happy_path(mock_scope, mock_credit, mock_notify):
+    """5.1/5.2: accept a partial fulfilment -- reduces quantity and
+    refunds the dropped units WITHOUT cancelling the item."""
+    payment = _payment(PaymentStatus.COMPLETED, amount=1000.0)
+    order = SimpleNamespace(
+        id="ORD_1",
+        buyer=SimpleNamespace(user_id="USR_BUYER1"),
+        payments=[payment],
+        items=[],
+    )
+    order_item = _order_item(price=100.0, quantity=10, order=order)
+
+    session = MagicMock()
+    session.query.return_value.options.return_value.get.return_value = order_item
+    session.query.return_value.filter.return_value.scalar.return_value = 0.0
+    mock_scope.return_value.__enter__.return_value = session
+
+    OrderService.refund_partial_quantity(1, 7, "ALLOC_5", reason="shortfall")
+
+    assert order_item.quantity == 7
+    assert order_item.status != OrderItem.Status.CANCELLED
+    assert payment.status == PaymentStatus.PARTIALLY_REFUNDED
+    mock_credit.assert_called_once()
+    args, kwargs = mock_credit.call_args
+    assert args[0] == "USR_BUYER1"
+    assert args[1] == 300.0  # 3 dropped units * ₦100
+    assert kwargs["idempotency_key"] == "refund:item:1:partial:ALLOC_5"
+    mock_notify.assert_called_once()
+    assert (
+        mock_notify.call_args.kwargs["notification_type"]
+        == NotificationType.REFUND_ISSUED
+    )
+
+
+@patch("app.wallet.services.WalletService.credit")
+@patch("app.orders.services.session_scope")
+def test_refund_partial_quantity_no_op_when_not_actually_reduced(
+    mock_scope, mock_credit
+):
+    order_item = _order_item(price=100.0, quantity=10)
+    session = MagicMock()
+    session.query.return_value.options.return_value.get.return_value = order_item
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = OrderService.refund_partial_quantity(1, 10, "ALLOC_5")
+
+    assert result is None
+    assert order_item.quantity == 10
+    mock_credit.assert_not_called()
+
+
+@patch("app.orders.services.session_scope")
+def test_refund_partial_quantity_raises_not_found(mock_scope):
+    session = MagicMock()
+    session.query.return_value.options.return_value.get.return_value = None
+    mock_scope.return_value.__enter__.return_value = session
+
+    with pytest.raises(NotFoundError):
+        OrderService.refund_partial_quantity(1, 5, "ALLOC_5")
+
+
 @patch("app.orders.services.session_scope")
 def test_refund_unresolved_item_raises_not_found(mock_scope):
     session = MagicMock()

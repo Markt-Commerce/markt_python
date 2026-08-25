@@ -31,6 +31,7 @@ from .schemas import (
     DeliveryOrderQRConfirmResponseSchema,
     DeliveryAvailableRunsQuerySchema,
     DeliveryAvailableRunsResponseSchema,
+    DeliveryRunDetailResponseSchema,
     DeliveryRunAcceptResponseSchema,
     DeliveryRunFailRequestSchema,
     DeliveryRunStopActionResponseSchema,
@@ -214,6 +215,30 @@ class DeliveryAvailableRuns(MethodView):
             page=args.get("page", 1),
             per_page=args.get("per_page", 20),
         )
+
+
+@bp.route("/runs/active")
+class DeliveryActiveRun(MethodView):
+    @login_required
+    @bp.response(200, DeliveryRunDetailResponseSchema)
+    def get(self):
+        """10.6: the rider's own run currently in progress (RIDER_ACCEPTED
+        through DELIVERY_IN_PROGRESS), if any -- mirrors GET
+        /assignments/active for the existing single-order flow. Returns
+        {"run_id": null} rather than 404 when there's none."""
+        return DeliveryRunAssignmentService.get_active_run(current_user.id)
+
+
+@bp.route("/runs/<string:run_id>")
+class DeliveryRunDetail(MethodView):
+    @login_required
+    @bp.response(200, DeliveryRunDetailResponseSchema)
+    def get(self, run_id):
+        """10.6: full detail for a run the rider has accepted -- per-
+        seller pickup stops and per-order POD status. Used to refresh
+        state after the thin accept_run response, or to recover on app
+        restart."""
+        return DeliveryRunAssignmentService.get_run_detail(current_user.id, run_id)
 
 
 @bp.route("/runs/<string:run_id>/accept")

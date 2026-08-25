@@ -468,6 +468,7 @@ class PaymentService:
             shipping_fee = CartService._calculate_shipping_fee(
                 cart, shipping_normalized
             )
+            delivery_count = CartService.count_distinct_deliveries(cart)
             # No tax/discount line here: Phase 0 deferred VAT (the old
             # flow's hardcoded 5% charge is a placeholder that contradicts
             # that decision) and there's no coupon system to discount
@@ -479,6 +480,7 @@ class PaymentService:
                 reliability_fee_opted_in=bool(
                     checkout_data.get("reliability_fee_opted_in")
                 ),
+                delivery_count=delivery_count,
             )
             total = breakdown["total"]
 
