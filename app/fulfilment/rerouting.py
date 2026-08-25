@@ -48,14 +48,21 @@ import re
 from datetime import datetime, timedelta
 from typing import List, Optional
 
+from external.database import db
+
 from app.categories.models import ProductCategory
 from app.inventory.confidence import ConfidenceBand, InventoryConfidenceService
-from app.libs.errors import ConflictError, NotFoundError
+from app.libs.errors import (
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    ValidationError,
+)
 from app.libs.session import session_scope
 from app.notifications.models import NotificationType
 from app.notifications.services import NotificationService
 from app.orders.events import ActorType, OrderEventService, OrderEventType
-from app.orders.models import FulfilmentPreference, OrderItem
+from app.orders.models import FulfilmentPreference, Order, OrderItem
 from app.products.models import Product
 from app.users.models import MarketVerificationStatus, Seller
 
@@ -341,6 +348,177 @@ def escalate_unfulfilled_item(failed_allocation_id: int) -> None:
             "Failed to escalate unfulfilled allocation %s to Buyer Requests",
             failed_allocation_id,
         )
+
+
+def _latest_allocation(session, order_item_id: int) -> Optional[FulfilmentAllocation]:
+    return (
+        session.query(FulfilmentAllocation)
+        .filter_by(order_item_id=order_item_id)
+        .order_by(FulfilmentAllocation.created_at.desc())
+        .first()
+    )
+
+
+def get_item_escalation(order_item_id: int, buyer_id: int) -> dict:
+    """7.3: buyer-facing view of an item Markt couldn't find a
+    replacement seller for -- surfaces the auto-generated reroute
+    BuyerRequest (escalate_unfulfilled_item above) and its pending offers
+    so the buyer can choose a replacement seller (7.3 option 1) directly
+    from the order, rather than having to find it buried in their general
+    /requests list. "Escalated" here means the item's most recent
+    FulfilmentAllocation is UNFULFILLED and the item itself hasn't
+    already been resolved (removed/cancelled) -- the same state
+    escalate_unfulfilled_item itself acts on.
+
+    Only 3 of 7.3's 4 options are surfaced by this module (this one, plus
+    remove_escalated_item below, plus the existing whole-order
+    OrderService.cancel_order): "source from a second market for a fee"
+    needs a real cross-market delivery-fee calculation that doesn't exist
+    yet (CartService._calculate_shipping_fee is still a flat-rate stub --
+    same gap already flagged against Phase 13's multi-market basket UI).
+    Offering that choice without a real fee behind it would be dishonest,
+    so it's left out rather than faked.
+    """
+    with session_scope() as session:
+        order_item = (
+            session.query(OrderItem)
+            .options(db.joinedload(OrderItem.order))
+            .get(order_item_id)
+        )
+        if not order_item:
+            raise NotFoundError("Order item not found")
+        if not order_item.order or order_item.order.buyer_id != buyer_id:
+            raise ForbiddenError("You can only view your own order items")
+
+        latest = _latest_allocation(session, order_item_id)
+        escalated = bool(
+            latest
+            and latest.status == FulfilmentAllocationStatus.UNFULFILLED
+            and order_item.status != OrderItem.Status.CANCELLED
+        )
+
+        result = {
+            "order_item_id": order_item.id,
+            "order_id": order_item.order_id,
+            "product_id": order_item.product_id,
+            "quantity": order_item.quantity,
+            "price": order_item.price,
+            "item_status": order_item.status.value,
+            "escalated": escalated,
+            "reroute_request": None,
+        }
+        if not escalated:
+            return result
+
+        from app.requests.models import BuyerRequest, RequestStatus, SellerOffer
+        from app.requests.services import OfferStatus
+
+        reroute_request = (
+            session.query(BuyerRequest)
+            .options(db.joinedload(BuyerRequest.offers).joinedload(SellerOffer.seller))
+            .filter_by(order_item_id=order_item_id, status=RequestStatus.OPEN)
+            .order_by(BuyerRequest.created_at.desc())
+            .first()
+        )
+        if reroute_request:
+            result["reroute_request"] = {
+                "id": reroute_request.id,
+                "status": reroute_request.status.value,
+                "expires_at": (
+                    reroute_request.expires_at.isoformat()
+                    if reroute_request.expires_at
+                    else None
+                ),
+                "offers": [
+                    {
+                        "id": offer.id,
+                        "seller_id": offer.seller_id,
+                        "seller_name": (
+                            offer.seller.shop_name if offer.seller else None
+                        ),
+                        "product_id": offer.product_id,
+                        "price": offer.price,
+                        "message": offer.message,
+                        "status": offer.status.value,
+                    }
+                    for offer in reroute_request.offers
+                    if offer.status == OfferStatus.PENDING
+                ],
+            }
+        return result
+
+
+def remove_escalated_item(
+    order_item_id: int, buyer_id: int, reason: Optional[str] = None
+) -> dict:
+    """7.3 option: buyer removes an item Markt couldn't find a
+    replacement seller for, refunding just that item without cancelling
+    the rest of the order. Reuses OrderService.refund_unresolved_item
+    (11.8/9.1's same primitive) but adds the ownership + eligibility
+    check that primitive doesn't have on its own -- its only prior
+    callers are trusted system workers, not a buyer-facing HTTP request.
+
+    Also closes the open reroute BuyerRequest (if one exists) so a seller
+    can't have a stale offer accepted against an item that's already been
+    removed and refunded -- best-effort, logged rather than raised on
+    failure, since the item removal/refund itself is the part that must
+    not be rolled back or masked.
+    """
+    with session_scope() as session:
+        order_item = (
+            session.query(OrderItem)
+            .options(
+                db.joinedload(OrderItem.order).joinedload(Order.buyer),
+            )
+            .get(order_item_id)
+        )
+        if not order_item:
+            raise NotFoundError("Order item not found")
+        if not order_item.order or order_item.order.buyer_id != buyer_id:
+            raise ForbiddenError("You can only manage your own order items")
+        if order_item.status == OrderItem.Status.CANCELLED:
+            raise ConflictError("This item has already been removed")
+
+        latest = _latest_allocation(session, order_item_id)
+        if not latest or latest.status != FulfilmentAllocationStatus.UNFULFILLED:
+            raise ValidationError(
+                "This item isn't in an escalated state -- nothing to remove"
+            )
+
+        buyer_user_id = (
+            order_item.order.buyer.user_id if order_item.order.buyer else None
+        )
+
+    from app.orders.services import OrderService
+
+    OrderService.refund_unresolved_item(
+        order_item_id, reason=reason or "buyer_removed_after_escalation"
+    )
+
+    from app.requests.models import BuyerRequest, RequestStatus
+    from app.requests.services import BuyerRequestService
+
+    with session_scope() as session:
+        open_request = (
+            session.query(BuyerRequest)
+            .filter_by(order_item_id=order_item_id, status=RequestStatus.OPEN)
+            .first()
+        )
+        request_id = open_request.id if open_request else None
+
+    if request_id and buyer_user_id:
+        try:
+            BuyerRequestService.update_request_status(
+                request_id, buyer_user_id, RequestStatus.CLOSED
+            )
+        except Exception:
+            logger.exception(
+                "Failed to close reroute request %s after removing item %s",
+                request_id,
+                order_item_id,
+            )
+
+    return {"order_item_id": order_item_id, "status": "removed"}
 
 
 class ReroutingService:
