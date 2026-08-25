@@ -196,6 +196,7 @@ def _order_item(**overrides):
         variant_id=None,
         seller_id=7,
         fulfilment_preference=FulfilmentPreference.AUTO,
+        allow_partial_quantity=True,
         order=SimpleNamespace(buyer_id="BYR_1"),
     )
     defaults.update(overrides)
@@ -232,7 +233,7 @@ def test_attempt_reroute_no_op_when_not_declined_or_timeout(mock_scope):
 
     result = ReroutingService.attempt_reroute(1)
 
-    assert result is None
+    assert result == []
     assert failed.status == FulfilmentAllocationStatus.ACCEPTED
 
 
@@ -259,9 +260,9 @@ def test_attempt_reroute_starts_from_buyer_rejected(mock_scope, mock_escalate):
     result = ReroutingService.attempt_reroute(1)
 
     # Routed through to the SELLER_ONLY short-circuit below rather than
-    # returning None immediately for being off DECLINED/TIMEOUT -- proves
+    # returning [] immediately for being off DECLINED/TIMEOUT -- proves
     # BUYER_REJECTED is accepted as a valid starting status.
-    assert result is None
+    assert result == []
     assert failed.status == FulfilmentAllocationStatus.UNFULFILLED
     # SELLER_ONLY must never escalate to Buyer Requests either -- the
     # buyer explicitly opted out of rerouting altogether.
@@ -290,7 +291,7 @@ def test_attempt_reroute_seller_only_skips_straight_to_unfulfilled(
 
     result = ReroutingService.attempt_reroute(1)
 
-    assert result is None
+    assert result == []
     assert failed.status == FulfilmentAllocationStatus.UNFULFILLED
     # Never got as far as computing the deadline/retry-limit or looking up
     # candidates -- SELLER_ONLY short-circuits before any of that.
@@ -366,7 +367,7 @@ def test_attempt_reroute_swallows_notification_failure(
 
     result = ReroutingService.attempt_reroute(1)
 
-    assert result is None
+    assert result == []
     assert failed.status == FulfilmentAllocationStatus.UNFULFILLED
 
 
@@ -385,7 +386,9 @@ def test_attempt_reroute_marks_unfulfilled_past_deadline(mock_scope, mock_escala
     fa_mock.filter_by.return_value.order_by.return_value.first.return_value = (
         first_attempt
     )
-    fa_mock.filter_by.return_value.count.return_value = 1
+    # No active siblings (5.1) -- nothing secured, so this is the plain
+    # pre-5.1 "nothing at all secured" give-up path.
+    fa_mock.filter.return_value.all.return_value = []
 
     oi_mock = MagicMock()
     oi_mock.get.return_value = order_item
@@ -398,7 +401,7 @@ def test_attempt_reroute_marks_unfulfilled_past_deadline(mock_scope, mock_escala
 
     result = ReroutingService.attempt_reroute(1)
 
-    assert result is None
+    assert result == []
     assert failed.status == FulfilmentAllocationStatus.UNFULFILLED
     mock_escalate.assert_called_once_with(1)
 
@@ -415,7 +418,8 @@ def test_attempt_reroute_marks_unfulfilled_past_retry_limit(mock_scope, mock_esc
     fa_mock.filter_by.return_value.order_by.return_value.first.return_value = (
         first_attempt
     )
-    fa_mock.filter_by.return_value.count.return_value = MAX_REROUTE_ATTEMPTS
+    fa_mock.filter.return_value.count.return_value = MAX_REROUTE_ATTEMPTS
+    fa_mock.filter.return_value.all.return_value = []
 
     oi_mock = MagicMock()
     oi_mock.get.return_value = order_item
@@ -428,7 +432,7 @@ def test_attempt_reroute_marks_unfulfilled_past_retry_limit(mock_scope, mock_esc
 
     result = ReroutingService.attempt_reroute(1)
 
-    assert result is None
+    assert result == []
     assert failed.status == FulfilmentAllocationStatus.UNFULFILLED
     mock_escalate.assert_called_once_with(1)
 
@@ -448,7 +452,8 @@ def test_attempt_reroute_marks_unfulfilled_when_no_eligible_candidates(
     fa_mock.filter_by.return_value.order_by.return_value.first.return_value = (
         first_attempt
     )
-    fa_mock.filter_by.return_value.count.return_value = 1
+    fa_mock.filter.return_value.count.return_value = 1
+    fa_mock.filter.return_value.all.return_value = []
 
     oi_mock = MagicMock()
     oi_mock.get.return_value = order_item
@@ -469,18 +474,19 @@ def test_attempt_reroute_marks_unfulfilled_when_no_eligible_candidates(
 
     result = ReroutingService.attempt_reroute(1)
 
-    assert result is None
+    assert result == []
     assert failed.status == FulfilmentAllocationStatus.UNFULFILLED
     mock_escalate.assert_called_once_with(1)
 
 
+@patch("app.inventory.services.InventoryService.get_available_quantity")
 @patch("app.fulfilment.services.FulfilmentService.create_allocation")
 @patch("app.inventory.services.InventoryService.reserve_stock")
 @patch("app.fulfilment.ranking.rank_candidates")
 @patch("app.fulfilment.rerouting.filter_eligible_candidates")
 @patch("app.fulfilment.rerouting.session_scope")
 def test_attempt_reroute_reserves_top_ranked_candidate(
-    mock_scope, mock_filter, mock_rank, mock_reserve, mock_create
+    mock_scope, mock_filter, mock_rank, mock_reserve, mock_create, mock_available
 ):
     failed = _failed_allocation(FulfilmentAllocationStatus.DECLINED)
     order_item = _order_item()
@@ -491,7 +497,8 @@ def test_attempt_reroute_reserves_top_ranked_candidate(
     fa_mock.filter_by.return_value.order_by.return_value.first.return_value = (
         first_attempt
     )
-    fa_mock.filter_by.return_value.count.return_value = 1
+    fa_mock.filter.return_value.count.return_value = 1
+    fa_mock.filter.return_value.all.return_value = []
 
     oi_mock = MagicMock()
     oi_mock.get.return_value = order_item
@@ -510,18 +517,20 @@ def test_attempt_reroute_reserves_top_ranked_candidate(
 
     mock_filter.return_value = [SimpleNamespace(id="PRD_2", seller_id="SLR_2")]
     mock_rank.return_value = [{"product_id": "PRD_2", "seller_id": "SLR_2"}]
+    mock_available.return_value = 2  # covers the full shortfall alone
     mock_reserve.return_value = SimpleNamespace(id="RSV_9")
     mock_create.return_value = SimpleNamespace(id=200)
 
     result = ReroutingService.attempt_reroute(1)
 
-    assert result is mock_create.return_value
+    assert result == [mock_create.return_value]
     mock_reserve.assert_called_once_with("PRD_2", "BYR_1", 2)
     mock_create.assert_called_once_with(
         10, "SLR_2", 2, product_id="PRD_2", reservation_id="RSV_9"
     )
 
 
+@patch("app.inventory.services.InventoryService.get_available_quantity")
 @patch("app.fulfilment.rerouting.escalate_unfulfilled_item")
 @patch("app.fulfilment.services.FulfilmentService.create_allocation")
 @patch("app.inventory.services.InventoryService.reserve_stock")
@@ -529,7 +538,13 @@ def test_attempt_reroute_reserves_top_ranked_candidate(
 @patch("app.fulfilment.rerouting.filter_eligible_candidates")
 @patch("app.fulfilment.rerouting.session_scope")
 def test_attempt_reroute_marks_unfulfilled_when_every_candidate_loses_race(
-    mock_scope, mock_filter, mock_rank, mock_reserve, mock_create, mock_escalate
+    mock_scope,
+    mock_filter,
+    mock_rank,
+    mock_reserve,
+    mock_create,
+    mock_escalate,
+    mock_available,
 ):
     from app.libs.errors import ConflictError
 
@@ -542,7 +557,8 @@ def test_attempt_reroute_marks_unfulfilled_when_every_candidate_loses_race(
     fa_mock.filter_by.return_value.order_by.return_value.first.return_value = (
         first_attempt
     )
-    fa_mock.filter_by.return_value.count.return_value = 1
+    fa_mock.filter.return_value.count.return_value = 1
+    fa_mock.filter.return_value.all.return_value = []
 
     oi_mock = MagicMock()
     oi_mock.get.return_value = order_item
@@ -561,11 +577,12 @@ def test_attempt_reroute_marks_unfulfilled_when_every_candidate_loses_race(
 
     mock_filter.return_value = [SimpleNamespace(id="PRD_2", seller_id="SLR_2")]
     mock_rank.return_value = [{"product_id": "PRD_2", "seller_id": "SLR_2"}]
+    mock_available.return_value = 2
     mock_reserve.side_effect = ConflictError("lost the race")
 
     result = ReroutingService.attempt_reroute(1)
 
-    assert result is None
+    assert result == []
     mock_create.assert_not_called()
     assert failed.status == FulfilmentAllocationStatus.UNFULFILLED
     mock_escalate.assert_called_once_with(1)

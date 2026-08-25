@@ -10,7 +10,9 @@ import pytest
 from app.deliveries.models import (
     AssignmentStatus,
     DeliveryRun,
+    DeliveryRunOrderPodStatus,
     DeliveryRunStatus,
+    DeliveryRunStopStatus,
     DeliveryStatus,
 )
 from app.deliveries.run_assignment import DeliveryRunAssignmentService
@@ -339,3 +341,132 @@ def test_fail_run_raises_conflict_when_run_cannot_transition():
         mock_scope.return_value.__enter__.return_value = session
         with pytest.raises(ConflictError):
             DeliveryRunAssignmentService.fail_run("DEL_1", "RUN_1")
+
+
+# --- get_run_detail / get_active_run ----------------------------------------
+
+
+@patch("app.deliveries.pickup._accepted_assignment")
+def test_get_run_detail_raises_not_found_without_accepted_assignment(mock_accepted):
+    mock_accepted.return_value = None
+    session = MagicMock()
+
+    with patch("app.deliveries.run_assignment.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        with pytest.raises(NotFoundError):
+            DeliveryRunAssignmentService.get_run_detail("DEL_1", "RUN_1")
+
+
+@patch("app.deliveries.pickup._accepted_assignment")
+def test_get_run_detail_builds_stops_and_orders(mock_accepted):
+    mock_accepted.return_value = SimpleNamespace()
+
+    run = SimpleNamespace(
+        id="RUN_1",
+        status=DeliveryRunStatus.PICKUP_IN_PROGRESS,
+        market=SimpleNamespace(name="Main Market"),
+        area=SimpleNamespace(name="Campus A"),
+        price_per_order=250.0,
+    )
+    stop = SimpleNamespace(
+        seller_id=7,
+        seller=SimpleNamespace(shop_name="Rice Shop", shop_address="Stall 4"),
+        status=DeliveryRunStopStatus.ARRIVED,
+        arrived_at=None,
+        picked_up_at=None,
+    )
+    run_order = SimpleNamespace(
+        order_id="ORD_1",
+        pod_status=DeliveryRunOrderPodStatus.PENDING,
+        delivered_at=None,
+    )
+    order = SimpleNamespace(
+        order_number="1001",
+        buyer=SimpleNamespace(buyername="Ada"),
+        shipping_address=SimpleNamespace(
+            street_address="1 Main St", city="Ibadan", state="Oyo"
+        ),
+    )
+
+    session = MagicMock()
+
+    def run_query(m):
+        m.options.return_value.filter_by.return_value.first.return_value = run
+
+    def stop_query(m):
+        m.options.return_value.filter_by.return_value.all.return_value = [stop]
+
+    def run_order_query(m):
+        m.filter_by.return_value.all.return_value = [run_order]
+
+    def order_query(m):
+        m.options.return_value.get.return_value = order
+
+    session.query.side_effect = _query_side_effect(
+        DeliveryRun=run_query,
+        DeliveryRunStop=stop_query,
+        DeliveryRunOrder=run_order_query,
+        Order=order_query,
+    )
+
+    with patch("app.deliveries.run_assignment.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        result = DeliveryRunAssignmentService.get_run_detail("DEL_1", "RUN_1")
+
+    assert result["run_id"] == "RUN_1"
+    assert result["status"] == DeliveryRunStatus.PICKUP_IN_PROGRESS.value
+    assert result["market"] == "Main Market"
+    assert result["stops"] == [
+        {
+            "seller_id": 7,
+            "seller_name": "Rice Shop",
+            "shop_address": "Stall 4",
+            "status": DeliveryRunStopStatus.ARRIVED.value,
+            "arrived_at": None,
+            "picked_up_at": None,
+        }
+    ]
+    assert result["orders"] == [
+        {
+            "order_id": "ORD_1",
+            "order_number": "1001",
+            "buyer_name": "Ada",
+            "delivery_address": {
+                "street_address": "1 Main St",
+                "city": "Ibadan",
+                "state": "Oyo",
+            },
+            "pod_status": DeliveryRunOrderPodStatus.PENDING.value,
+            "delivered_at": None,
+        }
+    ]
+
+
+def test_get_active_run_returns_null_run_id_when_none_in_progress():
+    session = MagicMock()
+    session.query.return_value.join.return_value.filter.return_value.order_by.return_value.first.return_value = (
+        None
+    )
+
+    with patch("app.deliveries.run_assignment.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        result = DeliveryRunAssignmentService.get_active_run("DEL_1")
+
+    assert result == {"run_id": None}
+
+
+@patch("app.deliveries.run_assignment.DeliveryRunAssignmentService.get_run_detail")
+def test_get_active_run_delegates_to_get_run_detail(mock_get_detail):
+    assignment = SimpleNamespace(delivery_run_id="RUN_9")
+    session = MagicMock()
+    session.query.return_value.join.return_value.filter.return_value.order_by.return_value.first.return_value = (
+        assignment
+    )
+    mock_get_detail.return_value = {"run_id": "RUN_9"}
+
+    with patch("app.deliveries.run_assignment.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        result = DeliveryRunAssignmentService.get_active_run("DEL_1")
+
+    assert result == {"run_id": "RUN_9"}
+    mock_get_detail.assert_called_once_with("DEL_1", "RUN_9")

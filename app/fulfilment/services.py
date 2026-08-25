@@ -74,7 +74,16 @@ class FulfilmentService:
         seller, whose Product row is a different id (see
         FulfilmentAllocation.product_id's docstring). reservation_id, if
         given, is released automatically if this allocation ends up
-        DECLINED/TIMEOUT (see decline()/expire_stale_allocations())."""
+        DECLINED/TIMEOUT (see decline()/expire_stale_allocations()).
+
+        5.2: row-locked capacity check -- now that more than one active
+        allocation can exist per item (quantity splitting), this is the
+        real "never over-commit an item's requested quantity" invariant,
+        replacing the unique-index guarantee that used to make this
+        structurally impossible (see FulfilmentAllocation's own
+        docstring). Also recomputes OrderItem.fulfilled_quantity, since
+        this is the one place every new commitment against an item is
+        created."""
         with session_scope() as session:
             # Captured before product_id is possibly overwritten below --
             # an explicitly-passed product_id is exactly what marks this as
@@ -85,6 +94,28 @@ class FulfilmentService:
             if product_id is None:
                 product_id = order_item.product_id if order_item else None
             order_id = order_item.order_id if order_item else None
+
+            already_committed = 0
+            if order_item is not None:
+                existing_active = (
+                    session.query(FulfilmentAllocation)
+                    .filter(
+                        FulfilmentAllocation.order_item_id == order_item_id,
+                        FulfilmentAllocation.status.in_(
+                            FulfilmentAllocation.ACTIVE_STATUSES
+                        ),
+                    )
+                    .with_for_update()
+                    .all()
+                )
+                already_committed = sum(a.quantity for a in existing_active)
+                if already_committed + quantity > order_item.quantity:
+                    raise ConflictError(
+                        f"Allocation would over-commit order item "
+                        f"{order_item_id}: {already_committed} already "
+                        f"active + {quantity} requested > "
+                        f"{order_item.quantity} total requested"
+                    )
 
             allocation = FulfilmentAllocation(
                 order_item_id=order_item_id,
@@ -98,6 +129,9 @@ class FulfilmentService:
             )
             session.add(allocation)
             session.flush()
+
+            if order_item is not None:
+                order_item.fulfilled_quantity = already_committed + quantity
 
             seller = session.query(Seller).get(seller_id)
             seller_user_id = seller.user_id if seller else None
@@ -634,7 +668,7 @@ class FulfilmentService:
         from .rerouting import (
             FULFILMENT_DEADLINE_MINUTES,
             ReroutingService,
-            escalate_unfulfilled_item,
+            _finish_unfulfilled,
         )
 
         stuck_statuses = (
@@ -706,25 +740,39 @@ class FulfilmentService:
                 ):
                     continue
 
-                allocation.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
-                resolved += 1
-
                 order_item = session.query(OrderItem).get(allocation.order_item_id)
-                if order_item:
-                    OrderEventService.emit(
-                        session,
-                        order_id=order_item.order_id,
-                        order_item_id=allocation.order_item_id,
-                        event_type=OrderEventType.ITEM_UNFULFILLED,
-                        actor_type=ActorType.SYSTEM,
-                        metadata={"reason": "stuck_rerouting_deadline_recovery"},
-                        idempotency_key=(
-                            f"event:item_unfulfilled_stuck_recovery:{allocation.id}"
+                if not order_item:
+                    continue
+
+                # 5.1: route through the same shared give-up path
+                # attempt_reroute() itself uses, so a crash-recovery
+                # resolution respects allow_partial_quantity and any
+                # sibling allocations from an earlier split exactly like
+                # the primary path would -- this used to resolve inline
+                # and unconditionally escalate the whole item, which
+                # would have ignored a successful sibling split.
+                siblings = (
+                    session.query(FulfilmentAllocation)
+                    .filter(
+                        FulfilmentAllocation.order_item_id == allocation.order_item_id,
+                        FulfilmentAllocation.status.in_(
+                            FulfilmentAllocation.ACTIVE_STATUSES
                         ),
                     )
-                session.flush()
+                    .all()
+                )
+                already_secured = sum(a.quantity for a in siblings)
+                order_item_id = order_item.id
+                allow_partial_quantity = order_item.allow_partial_quantity
 
-            escalate_unfulfilled_item(allocation_id)
+            resolved += 1
+            _finish_unfulfilled(
+                order_item_id,
+                allocation_id,
+                already_secured,
+                allow_partial_quantity,
+                "stuck_rerouting_deadline_recovery",
+            )
 
         return {
             "retried": len(retryable_ids),

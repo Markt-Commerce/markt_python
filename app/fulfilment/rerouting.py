@@ -521,29 +521,150 @@ def remove_escalated_item(
     return {"order_item_id": order_item_id, "status": "removed"}
 
 
+# Terminal-or-being-retried statuses: everything that ISN'T a currently
+# live, successful commitment. Used for MAX_REROUTE_ATTEMPTS instead of
+# a raw count of every allocation ever created for an item, now that
+# quantity splitting (5.1) means several allocations can be
+# simultaneously ACTIVE and successful for one item -- those must not
+# count against the failure-retry budget the same way an actual
+# decline/timeout does.
+_FAILURE_OR_RETRY_STATUSES = (
+    FulfilmentAllocationStatus.DECLINED,
+    FulfilmentAllocationStatus.TIMEOUT,
+    FulfilmentAllocationStatus.BUYER_REJECTED,
+    FulfilmentAllocationStatus.CANCELLED_BY_SELLER,
+    FulfilmentAllocationStatus.UNFULFILLED,
+    FulfilmentAllocationStatus.REROUTING,
+)
+
+
+def _finish_unfulfilled(
+    order_item_id: int,
+    failed_allocation_id: int,
+    secured_quantity: int,
+    allow_partial_quantity: bool,
+    reason: str,
+) -> List[FulfilmentAllocation]:
+    """5.1/5.2: the shared give-up path for every attempt_reroute exit
+    that couldn't (fully) cover an item's shortfall. Finalizes the
+    failed allocation to UNFULFILLED, then branches on what's actually
+    been secured for the item so far (siblings from earlier successful
+    allocations, if any -- quantity splitting means there can be some
+    even though THIS allocation failed):
+
+    - secured_quantity <= 0: nothing at all was ever secured -- mark the
+      whole item UNFULFILLED and escalate (7.3). Unchanged from
+      pre-5.1/5.2 behaviour.
+    - secured_quantity > 0 and allow_partial_quantity: accept the
+      partial fulfilment -- OrderItem.quantity is reduced to match what
+      was actually secured and the buyer is refunded for the difference
+      (OrderService.refund_partial_quantity). The item is NOT escalated;
+      it proceeds normally at its new, smaller quantity.
+    - secured_quantity > 0 and not allow_partial_quantity: 5.2's
+      explicit all-or-nothing case -- release every OTHER still-active
+      allocation for this item too (not just the failed one), refund the
+      WHOLE item (OrderService.refund_unresolved_item), and escalate.
+    """
+    accept_partial = secured_quantity > 0 and allow_partial_quantity
+    full_give_up = not accept_partial
+    siblings_to_release: List[str] = []
+
+    with session_scope() as session:
+        failed = session.query(FulfilmentAllocation).get(failed_allocation_id)
+        if failed and failed.status == FulfilmentAllocationStatus.REROUTING:
+            failed.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
+
+        order_item = session.query(OrderItem).get(order_item_id)
+        if not order_item:
+            return []
+
+        order_item.fulfilled_quantity = max(secured_quantity, 0)
+
+        if full_give_up and secured_quantity > 0:
+            siblings = (
+                session.query(FulfilmentAllocation)
+                .filter(
+                    FulfilmentAllocation.order_item_id == order_item_id,
+                    FulfilmentAllocation.status.in_(
+                        FulfilmentAllocation.ACTIVE_STATUSES
+                    ),
+                )
+                .all()
+            )
+            for sibling in siblings:
+                if sibling.reservation_id:
+                    siblings_to_release.append(sibling.reservation_id)
+                sibling.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
+
+        if full_give_up:
+            OrderEventService.emit(
+                session,
+                order_id=order_item.order_id,
+                order_item_id=order_item_id,
+                event_type=OrderEventType.ITEM_UNFULFILLED,
+                actor_type=ActorType.SYSTEM,
+                metadata={"reason": reason, "secured_quantity": secured_quantity},
+            )
+            session.flush()
+            _notify_buyer_item_unfulfilled(order_item, reason)
+        else:
+            session.flush()
+
+    if siblings_to_release:
+        from app.inventory.services import InventoryService
+
+        InventoryService.release_reservations(siblings_to_release)
+
+    if accept_partial:
+        from app.orders.services import OrderService
+
+        OrderService.refund_partial_quantity(
+            order_item_id,
+            secured_quantity,
+            str(failed_allocation_id),
+            reason=reason,
+        )
+        return []
+
+    if secured_quantity > 0:
+        # all-or-nothing, had partial success -> refund the whole item.
+        from app.orders.services import OrderService
+
+        OrderService.refund_unresolved_item(order_item_id, reason=reason)
+
+    escalate_unfulfilled_item(failed_allocation_id)
+    return []
+
+
 class ReroutingService:
     @staticmethod
-    def attempt_reroute(failed_allocation_id: int) -> Optional[FulfilmentAllocation]:
-        """7.1 steps 2-9: called when an allocation lands at DECLINED,
-        TIMEOUT, BUYER_REJECTED (6.1's ASK-gate rejection -- see
-        FulfilmentService.buyer_reject_reroute), or CANCELLED_BY_SELLER
-        (13.4 anti-gaming "accept-then-cancel" -- see
-        FulfilmentService.cancel_after_accept). Finds and ranks eligible
-        in-market candidates (excluding every seller already tried for
-        this item) and reserves stock against the top-ranked one, retrying
-        down the ranked list if a reservation loses a race. Returns the
-        new AWAITING_SELLER allocation on success.
+    def attempt_reroute(failed_allocation_id: int) -> List[FulfilmentAllocation]:
+        """7.1 steps 2-9, extended for 5.1/5.2 quantity splitting: called
+        when an allocation lands at DECLINED, TIMEOUT, BUYER_REJECTED
+        (6.1's ASK-gate rejection -- see FulfilmentService.buyer_reject_reroute),
+        or CANCELLED_BY_SELLER (13.4 anti-gaming "accept-then-cancel" --
+        see FulfilmentService.cancel_after_accept).
 
-        Returns None if the item couldn't be rerouted -- SELLER_ONLY
-        preference (7.1 step 2), fulfilment deadline or retry limit
-        reached, or no eligible candidates at all -- after marking the
-        failed allocation UNFULFILLED. 7.3's escalation flow (surfacing
-        that to the buyer) isn't built yet; this only gets the state
-        honestly to where escalation would pick it up.
+        Computes the item's actual shortfall (requested quantity minus
+        whatever OTHER allocations are still active for it -- siblings
+        from an earlier split), then finds and ranks eligible in-market
+        candidates for exactly that shortfall (excluding every seller
+        already tried for this item) and reserves against them in ranked
+        order -- taking a *partial* amount from a candidate who can't
+        cover the whole shortfall alone and continuing down the list for
+        the rest, rather than requiring one seller to cover everything.
+        Returns every newly-created AWAITING_SELLER allocation (zero, one,
+        or several).
 
-        A no-op (returns None without raising) if the allocation isn't
-        actually at one of those four statuses -- this can be invoked more
-        than once for the same failure without double-processing it.
+        If the shortfall can't be fully covered (deadline/retry limit,
+        original product missing, no eligible candidates, or ranked
+        candidates exhausted before the shortfall closes), hands off to
+        _finish_unfulfilled with whatever WAS secured -- see that
+        function for the accept-partial vs. all-or-nothing branching.
+
+        A no-op (returns []  without raising) if the allocation isn't
+        actually at one of those four statuses -- this can be invoked
+        more than once for the same failure without double-processing it.
         """
         with session_scope() as session:
             failed = session.query(FulfilmentAllocation).get(failed_allocation_id)
@@ -556,16 +677,17 @@ class ReroutingService:
                 FulfilmentAllocationStatus.BUYER_REJECTED,
                 FulfilmentAllocationStatus.CANCELLED_BY_SELLER,
             ):
-                return None
+                return []
 
             order_item = session.query(OrderItem).get(failed.order_item_id)
             if not order_item:
-                return None
+                return []
 
             # 7.1 step 2: SELLER_ONLY means no rerouting at all -- skip
-            # straight to the same UNFULFILLED end state 7.3's (unbuilt)
-            # escalation flow would pick up from, without even looking for
-            # candidates.
+            # straight to the same UNFULFILLED end state 7.3's escalation
+            # flow picks up from, without even looking for candidates.
+            # SELLER_ONLY items never split (there's only ever the one
+            # allocation), so no sibling bookkeeping applies here.
             if order_item.fulfilment_preference == FulfilmentPreference.SELLER_ONLY:
                 failed.transition_to(FulfilmentAllocationStatus.REROUTING)
                 failed.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
@@ -579,7 +701,7 @@ class ReroutingService:
                 )
                 session.flush()
                 _notify_buyer_item_unfulfilled(order_item, "seller_only_preference")
-                return None
+                return []
 
             first_attempt = (
                 session.query(FulfilmentAllocation)
@@ -592,129 +714,141 @@ class ReroutingService:
             )
             deadline = deadline_anchor + timedelta(minutes=FULFILMENT_DEADLINE_MINUTES)
 
-            attempt_count = (
+            failure_count = (
                 session.query(FulfilmentAllocation)
-                .filter_by(order_item_id=order_item.id)
+                .filter(
+                    FulfilmentAllocation.order_item_id == order_item.id,
+                    FulfilmentAllocation.status.in_(_FAILURE_OR_RETRY_STATUSES),
+                )
                 .count()
             )
 
             failed.transition_to(FulfilmentAllocationStatus.REROUTING)
 
-            if datetime.utcnow() >= deadline or attempt_count >= MAX_REROUTE_ATTEMPTS:
-                failed.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
-                OrderEventService.emit(
-                    session,
-                    order_id=order_item.order_id,
-                    order_item_id=order_item.id,
-                    event_type=OrderEventType.ITEM_UNFULFILLED,
-                    actor_type=ActorType.SYSTEM,
-                    metadata={"reason": "deadline_or_retry_limit_reached"},
+            # 5.1: what OTHER active allocations already hold for this
+            # item (a split from an earlier round of this same reroute
+            # loop) -- `failed` itself is excluded automatically, since
+            # it just moved to REROUTING, which isn't in ACTIVE_STATUSES.
+            siblings = (
+                session.query(FulfilmentAllocation)
+                .filter(
+                    FulfilmentAllocation.order_item_id == order_item.id,
+                    FulfilmentAllocation.status.in_(
+                        FulfilmentAllocation.ACTIVE_STATUSES
+                    ),
                 )
-                session.flush()
-                _notify_buyer_item_unfulfilled(
-                    order_item, "deadline_or_retry_limit_reached"
-                )
-                escalate_unfulfilled_item(failed_allocation_id)
-                return None
-
-            original_product = session.query(Product).get(order_item.product_id)
-            if not original_product:
-                failed.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
-                OrderEventService.emit(
-                    session,
-                    order_id=order_item.order_id,
-                    order_item_id=order_item.id,
-                    event_type=OrderEventType.ITEM_UNFULFILLED,
-                    actor_type=ActorType.SYSTEM,
-                    metadata={"reason": "original_product_missing"},
-                )
-                session.flush()
-                _notify_buyer_item_unfulfilled(order_item, "original_product_missing")
-                return None
-
-            tried_seller_ids = {
-                row[0]
-                for row in session.query(FulfilmentAllocation.seller_id)
-                .filter_by(order_item_id=order_item.id)
                 .all()
-            }
-
-            eligible = filter_eligible_candidates(
-                session,
-                original_product,
-                order_item.price,
-                exclude_seller_id=order_item.seller_id,
-                variant_id=order_item.variant_id,
             )
-            eligible = [p for p in eligible if p.seller_id not in tried_seller_ids]
+            already_secured = sum(a.quantity for a in siblings)
+            shortfall = order_item.quantity - already_secured
 
-            if not eligible:
-                failed.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
-                OrderEventService.emit(
-                    session,
-                    order_id=order_item.order_id,
-                    order_item_id=order_item.id,
-                    event_type=OrderEventType.ITEM_UNFULFILLED,
-                    actor_type=ActorType.SYSTEM,
-                    metadata={"reason": "no_eligible_candidates"},
-                )
-                session.flush()
-                _notify_buyer_item_unfulfilled(order_item, "no_eligible_candidates")
-                escalate_unfulfilled_item(failed_allocation_id)
-                return None
-
-            from .ranking import rank_candidates
-
-            ranked = rank_candidates(eligible, order_item.price, order_item.quantity)
-            buyer_id = order_item.order.buyer_id
-            quantity = order_item.quantity
             order_item_id = order_item.id
+            allow_partial_quantity = order_item.allow_partial_quantity
 
+            if datetime.utcnow() >= deadline or failure_count >= MAX_REROUTE_ATTEMPTS:
+                session.flush()
+                give_up_reason = "deadline_or_retry_limit_reached"
+                ranked = None
+            else:
+                original_product = session.query(Product).get(order_item.product_id)
+                if not original_product:
+                    session.flush()
+                    give_up_reason = "original_product_missing"
+                    ranked = None
+                else:
+                    tried_seller_ids = {
+                        row[0]
+                        for row in session.query(FulfilmentAllocation.seller_id)
+                        .filter_by(order_item_id=order_item.id)
+                        .all()
+                    }
+
+                    eligible = filter_eligible_candidates(
+                        session,
+                        original_product,
+                        order_item.price,
+                        exclude_seller_id=order_item.seller_id,
+                        variant_id=order_item.variant_id,
+                    )
+                    eligible = [
+                        p for p in eligible if p.seller_id not in tried_seller_ids
+                    ]
+
+                    if not eligible:
+                        session.flush()
+                        give_up_reason = "no_eligible_candidates"
+                        ranked = None
+                    else:
+                        from .ranking import rank_candidates
+
+                        ranked = rank_candidates(eligible, order_item.price, shortfall)
+                        give_up_reason = None
+
+            buyer_id = order_item.order.buyer_id
             session.flush()
+
+        if ranked is None:
+            return _finish_unfulfilled(
+                order_item_id,
+                failed_allocation_id,
+                already_secured,
+                allow_partial_quantity,
+                give_up_reason,
+            )
 
         # Reservation is its own atomic transaction (row lock) -- see
         # InventoryService.reserve_stock -- so trying candidates in ranked
-        # order happens outside the session block above.
+        # order happens outside the session block above. Takes a PARTIAL
+        # amount from a candidate who can't cover the whole remaining
+        # shortfall alone (5.1) and keeps going down the ranked list,
+        # rather than requiring one seller to cover it all.
         from app.inventory.services import InventoryService
         from .services import FulfilmentService
 
+        remaining = shortfall
+        created: List[FulfilmentAllocation] = []
         for candidate in ranked:
+            if remaining <= 0:
+                break
+
+            available = InventoryService.get_available_quantity(candidate["product_id"])
+            take = min(available, remaining)
+            if take <= 0:
+                continue
+
             try:
                 reservation = InventoryService.reserve_stock(
                     candidate["product_id"],
                     buyer_id,
-                    quantity,
+                    take,
                 )
             except ConflictError:
                 # Lost a race for this candidate's stock -- try the next.
                 continue
 
-            return FulfilmentService.create_allocation(
-                order_item_id,
-                candidate["seller_id"],
-                quantity,
-                product_id=candidate["product_id"],
-                reservation_id=reservation.id,
+            created.append(
+                FulfilmentService.create_allocation(
+                    order_item_id,
+                    candidate["seller_id"],
+                    take,
+                    product_id=candidate["product_id"],
+                    reservation_id=reservation.id,
+                )
             )
+            remaining -= take
 
-        # Every ranked candidate lost the stock race.
-        with session_scope() as session:
-            failed = session.query(FulfilmentAllocation).get(failed_allocation_id)
-            if failed and failed.status == FulfilmentAllocationStatus.REROUTING:
-                failed.transition_to(FulfilmentAllocationStatus.UNFULFILLED)
-                order_item = session.query(OrderItem).get(failed.order_item_id)
-                if order_item:
-                    OrderEventService.emit(
-                        session,
-                        order_id=order_item.order_id,
-                        order_item_id=order_item.id,
-                        event_type=OrderEventType.ITEM_UNFULFILLED,
-                        actor_type=ActorType.SYSTEM,
-                        metadata={"reason": "every_candidate_lost_stock_race"},
-                    )
-                    _notify_buyer_item_unfulfilled(
-                        order_item, "every_candidate_lost_stock_race"
-                    )
+        if remaining <= 0:
+            return created
 
-        escalate_unfulfilled_item(failed_allocation_id)
-        return None
+        # Ranked candidates exhausted without fully covering the
+        # shortfall -- whatever got secured this round (plus any
+        # siblings from before) is what allow_partial_quantity decides
+        # between.
+        secured_this_round = shortfall - remaining
+        return _finish_unfulfilled(
+            order_item_id,
+            failed_allocation_id,
+            already_secured + secured_this_round,
+            allow_partial_quantity,
+            "shortfall_not_fully_covered",
+        )

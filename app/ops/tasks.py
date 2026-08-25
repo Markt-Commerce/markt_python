@@ -19,9 +19,10 @@ log, same as when the dedicated Beat entry runs it.
 Covers every entry in 14.3's own worker list that has a concrete,
 buildable implementation today: reservation-expiry, seller-timeout, 9.1
 buyer-approval-timeout, fulfilment-deadline recovery, payment/escrow
-reconciliation, and unpaid-order expiry (the old order-first flow's own
-equivalent of payment reconciliation). Delivery-window close is NOT
-included -- it needs `DeliveryRun` (Phase 9), which doesn't exist yet.
+reconciliation, unpaid-order expiry (the old order-first flow's own
+equivalent of payment reconciliation), and delivery-window close (added
+once `DeliveryRun` existed -- Phase 9 postdates this worker's original
+build).
 """
 
 import logging
@@ -35,6 +36,7 @@ logger = logging.getLogger(__name__)
 @celery_app.task(name="app.ops.tasks.recover_stuck_orders", queue="default")
 def recover_stuck_orders():
     with record_worker_run("app.ops.tasks.recover_stuck_orders") as run:
+        from app.deliveries.runs import DeliveryRunService
         from app.fulfilment.tasks import (
             expire_stale_allocations,
             expire_stale_buyer_approvals,
@@ -51,6 +53,7 @@ def recover_stuck_orders():
             "fulfilment_deadline_recovery": recover_stuck_fulfilment_allocations,
             "payment_reconciliation": expire_abandoned_checkout_payments,
             "unpaid_order_expiry": expire_unpaid_orders,
+            "delivery_window_close": DeliveryRunService.close_runs_past_cutoff,
         }
 
         summary = {}
