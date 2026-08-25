@@ -176,6 +176,24 @@ class TrackOrder(MethodView):
             abort(e.status_code, message=e.message)
 
 
+@bp.route("/<order_id>/pod-code")
+class OrderPodCode(MethodView):
+    @login_required
+    @buyer_required
+    @bp.response(200)
+    def get(self, order_id):
+        """10.6: the buyer's proof-of-delivery code -- displayed on this
+        screen for the rider to read/enter back. See
+        DeliveryService.get_buyer_pod_code for why the buyer needed a
+        fetch endpoint of their own at all."""
+        from app.deliveries.services import DeliveryService
+
+        try:
+            return DeliveryService.get_buyer_pod_code(order_id, current_user.id)
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
 @bp.route("/<order_id>/cancel")
 class CancelOrder(MethodView):
     @login_required

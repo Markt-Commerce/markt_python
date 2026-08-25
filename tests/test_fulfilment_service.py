@@ -9,7 +9,12 @@ import pytest
 
 from app.fulfilment.models import FulfilmentAllocation, FulfilmentAllocationStatus
 from app.fulfilment.services import FulfilmentService
-from app.libs.errors import ConflictError, ForbiddenError, NotFoundError
+from app.libs.errors import (
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    ValidationError,
+)
 from app.orders.events import OrderEventType
 from app.orders.models import FulfilmentPreference
 from app.payments.models import PaymentStatus
@@ -608,3 +613,49 @@ def test_expire_stale_buyer_approvals_no_op_when_none_stale(mock_scope, mock_ref
 
     assert result == {"timed_out": 0}
     mock_refund.assert_not_called()
+
+
+# ---- list_seller_allocations ----
+
+
+@patch("app.fulfilment.services.session_scope")
+def test_list_seller_allocations_defaults_to_active_statuses(mock_scope):
+    expected = [SimpleNamespace(id=1)]
+    session = MagicMock()
+    active_query = (
+        session.query.return_value.options.return_value.filter_by.return_value
+    )
+    active_query.filter.return_value.order_by.return_value.all.return_value = expected
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = FulfilmentService.list_seller_allocations(7)
+
+    assert result == expected
+    active_query.filter.assert_called_once()
+    active_query.filter_by.assert_not_called()
+
+
+@patch("app.fulfilment.services.session_scope")
+def test_list_seller_allocations_filters_by_explicit_status(mock_scope):
+    expected = [SimpleNamespace(id=2)]
+    session = MagicMock()
+    base_query = session.query.return_value.options.return_value.filter_by.return_value
+    base_query.filter_by.return_value.order_by.return_value.all.return_value = expected
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = FulfilmentService.list_seller_allocations(7, status="timeout")
+
+    assert result == expected
+    base_query.filter_by.assert_called_once_with(
+        status=FulfilmentAllocationStatus.TIMEOUT
+    )
+    base_query.filter.assert_not_called()
+
+
+@patch("app.fulfilment.services.session_scope")
+def test_list_seller_allocations_rejects_unknown_status(mock_scope):
+    session = MagicMock()
+    mock_scope.return_value.__enter__.return_value = session
+
+    with pytest.raises(ValidationError):
+        FulfilmentService.list_seller_allocations(7, status="not_a_real_status")

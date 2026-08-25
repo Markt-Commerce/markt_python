@@ -24,6 +24,12 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
 
     is_buyer = db.Column(db.Boolean, default=False)
     is_seller = db.Column(db.Boolean, default=False)
+    # Admin gate for app.libs.decorators.admin_required/_has_permission --
+    # no self-serve path to set this; an admin sets it directly (DB or a
+    # future internal tool), same "flagged permanently until someone
+    # edits the DB" treatment already used for MarketVerificationStatus.FLAGGED
+    # and SellerReliabilityScore.gaming_flagged.
+    is_admin = db.Column(db.Boolean, default=False, nullable=False)
     is_active = db.Column(db.Boolean, default=True)
     deactivated_at = db.Column(db.DateTime)
 

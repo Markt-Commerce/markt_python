@@ -527,15 +527,78 @@ class CartService:
 
     @staticmethod
     def _calculate_shipping_fee(cart: Cart, shipping_address: Optional[Dict]) -> float:
-        """Calculate shipping fee based on cart and shipping address"""
-        # TODO: Implement actual shipping calculation logic
-        # For now, return a flat rate or calculate based on address/weight
-        # Example: Flat rate of 10.00 for now
-        if not shipping_address:
+        """1.1/10.3: flat fee per market the cart's items come from
+        (Phase 0: "flat fee per market->area pair, not zone/distance-
+        based"). Was a hardcoded flat ₦10 regardless of cart contents --
+        shared by both checkout flows (this one and
+        PaymentService.initialize_checkout_payment), so fixing it here
+        fixes both without touching either flow's own code.
+
+        Real fix, still approximate: DEFAULT_BASE_PRICE (the same
+        placeholder DeliveryRun pricing itself uses at run cutoff --
+        app.deliveries.runs) once per DISTINCT market among the cart's
+        sellers, so a basket spanning two markets is honestly charged for
+        two separate delivery runs instead of one flat number regardless
+        of size. This is what makes a multi-market basket have a real,
+        non-fabricated second fee to warn the buyer about (Phase 13's
+        multi-market basket UI item) -- previously there was nothing real
+        to show.
+
+        Not yet the true per-(market,area)-pair rate Phase 0 ultimately
+        wants -- that needs real rate data, same TBD status as
+        DeliveryRun's own pricing (Phase 11's "tune zone-based pricing"
+        item, blocked on real numbers). Deliberately doesn't resolve the
+        buyer's Area here (no DB session available at this call site,
+        and the number wouldn't change yet either way since there's only
+        one placeholder rate) -- revisit together once real per-pair
+        rates exist.
+
+        FLAGGED, NOT SOLVED (Unfinished-Tasks.md): this checkout-time
+        captured shipping_fee and the real cost
+        DeliveryRunService.close_runs_past_cutoff computes later
+        (run.price_per_order, once the run's actual roster is known) are
+        two unconnected numbers today -- nothing reconciles a difference
+        between what was captured here and what delivery actually costs
+        once batched with other orders. Needs a real decision (hard
+        estimate Markt absorbs the variance on, vs. reconciling via a
+        wallet credit/debit after the run closes) before that's truly
+        solved.
+        """
+        if not shipping_address or not cart.items:
             return 0.0
 
-        # Basic flat rate shipping (can be enhanced with weight-based, distance-based, etc.)
-        return 10.00
+        from app.deliveries.runs import DEFAULT_BASE_PRICE
+
+        distinct_deliveries = CartService.count_distinct_deliveries(cart)
+        return round(DEFAULT_BASE_PRICE * distinct_deliveries, 2)
+
+    @staticmethod
+    def count_distinct_deliveries(cart: Cart) -> int:
+        """How many separate delivery runs this cart's items will need --
+        one per distinct market among its sellers (rerouting/delivery are
+        both within-market only, ADR 18.2). Used by _calculate_shipping_fee
+        above, and surfaced directly to the checkout response
+        (PaymentService.initialize_checkout_payment) so the buyer can see
+        *why* the shipping fee is what it is when it spans more than one
+        market (1.1/7.3's multi-market basket warning) -- not just a
+        bigger number with no explanation."""
+        if not cart.items:
+            return 0
+
+        market_ids = set()
+        unresolved_sellers = False
+        for item in cart.items:
+            seller = getattr(item.product, "seller", None) if item.product else None
+            market_id = getattr(seller, "market_id", None) if seller else None
+            if market_id:
+                market_ids.add(market_id)
+            else:
+                # No market assigned (nullable column; shouldn't happen
+                # post-Phase 6 but isn't enforced) -- still counts as one
+                # more delivery rather than being silently dropped.
+                unresolved_sellers = True
+
+        return max(len(market_ids) + (1 if unresolved_sellers else 0), 1)
 
     @staticmethod
     def _calculate_tax(subtotal: float, shipping_address: Optional[Dict]) -> float:

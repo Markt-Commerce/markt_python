@@ -210,6 +210,7 @@ class CheckoutPaymentInitialize(MethodView):
                     "amount": payment.amount,
                     "subtotal": breakdown.get("subtotal"),
                     "shipping_fee": breakdown.get("shipping_fee"),
+                    "delivery_count": breakdown.get("delivery_count", 1),
                     "service_fee": breakdown.get("service_fee"),
                     "reliability_fee_opted_in": breakdown.get(
                         "reliability_fee_opted_in", False

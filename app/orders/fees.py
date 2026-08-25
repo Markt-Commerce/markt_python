@@ -68,6 +68,7 @@ def build_fee_breakdown(
     subtotal: float,
     shipping_fee: float,
     reliability_fee_opted_in: bool = False,
+    delivery_count: int = 1,
 ) -> Dict[str, Any]:
     """11.5: every component itemised and visible before payment.
 
@@ -76,6 +77,13 @@ def build_fee_breakdown(
     the reliability fee is never captured, only estimated/toggled).
     `capture_ceiling` is the separate, larger figure for 11.4 transparency
     about the worst case if a reroute happens.
+
+    `delivery_count` (1.1/7.3): how many separate delivery runs this cart
+    needs -- one per distinct market among its sellers (see
+    CartService.count_distinct_deliveries, which shipping_fee is already
+    derived from). Passed through as its own field rather than making the
+    client infer it from the shipping_fee number, so a multi-market
+    basket can show a real, specific warning instead of guessing.
     """
     service_fee = calculate_service_fee(subtotal)
     reliability_fee_estimate = (
@@ -88,6 +96,7 @@ def build_fee_breakdown(
     return {
         "subtotal": round(subtotal, 2),
         "shipping_fee": round(shipping_fee, 2),
+        "delivery_count": delivery_count,
         "service_fee": service_fee,
         "reliability_fee_opted_in": reliability_fee_opted_in,
         "reliability_fee_estimate": reliability_fee_estimate,

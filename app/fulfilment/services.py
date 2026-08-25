@@ -23,10 +23,17 @@ in the rerouting engine itself.
 """
 
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import List, Optional
+
+from sqlalchemy.orm import joinedload
 
 from external.database import db
-from app.libs.errors import ConflictError, ForbiddenError, NotFoundError
+from app.libs.errors import (
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    ValidationError,
+)
 from app.libs.session import session_scope
 from app.notifications.models import NotificationType
 from app.notifications.services import NotificationService
@@ -127,6 +134,44 @@ class FulfilmentService:
 
         with session_scope() as session:
             return session.query(FulfilmentAllocation).get(allocation_id)
+
+    @staticmethod
+    def list_seller_allocations(
+        seller_id: int, status: Optional[str] = None
+    ) -> List[FulfilmentAllocation]:
+        """Seller-facing list of their own fulfilment allocations --
+        previously nothing let a seller see these at all outside the
+        FULFILMENT_REQUEST notification, which has nowhere to deep-link
+        to (see Unfinished-Tasks.md's "no seller-side screen" item).
+
+        Defaults to ACTIVE_STATUSES (AWAITING_SELLER through PREPARING,
+        plus AWAITING_BUYER_APPROVAL -- not seller-actionable but still
+        relevant to see) rather than every historical DECLINED/TIMEOUT/
+        UNFULFILLED row, which would just be noise for a seller checking
+        "what do I need to act on." Pass an explicit `status` to see a
+        specific one instead (e.g. a seller's own history)."""
+        with session_scope() as session:
+            query = (
+                session.query(FulfilmentAllocation)
+                .options(
+                    joinedload(FulfilmentAllocation.product),
+                    joinedload(FulfilmentAllocation.order_item),
+                )
+                .filter_by(seller_id=seller_id)
+            )
+            if status:
+                try:
+                    status_enum = FulfilmentAllocationStatus[status.upper()]
+                except KeyError:
+                    raise ValidationError(f"Unknown status: {status}")
+                query = query.filter_by(status=status_enum)
+            else:
+                query = query.filter(
+                    FulfilmentAllocation.status.in_(
+                        FulfilmentAllocation.ACTIVE_STATUSES
+                    )
+                )
+            return query.order_by(FulfilmentAllocation.created_at.desc()).all()
 
     @staticmethod
     def accept(allocation_id: int, seller_id: int) -> FulfilmentAllocation:

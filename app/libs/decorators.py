@@ -51,15 +51,20 @@ def seller_required(f):
 
 
 def admin_required(f):
-    """Decorator to require admin role"""
+    """Decorator to require admin role. Was a stub that unconditionally
+    rejected every caller (including a real admin) -- see
+    Unfinished-Tasks.md item 1. Now checks User.is_admin, which has no
+    self-serve path to set: an admin flips it directly, same treatment
+    as MarketVerificationStatus.FLAGGED / gaming_flagged elsewhere in
+    this codebase."""
 
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if not current_user.is_authenticated:
             abort(401, message="Authentication required")
 
-        # TODO: Implement proper admin check
-        raise ForbiddenError(message="Admin access required")
+        if not current_user.is_admin:
+            raise ForbiddenError(message="Admin access required")
 
         return f(*args, **kwargs)
 

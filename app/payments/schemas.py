@@ -125,6 +125,16 @@ class CheckoutPaymentResponseSchema(Schema):
     amount = fields.Float(required=True)
     subtotal = fields.Float(required=True)
     shipping_fee = fields.Float(required=True)
+    delivery_count = fields.Int(
+        required=True,
+        metadata={
+            "description": (
+                "How many separate delivery runs this order needs -- one "
+                "per distinct market among its sellers (1.1/7.3). >1 means "
+                "the shipping_fee above covers more than one delivery."
+            )
+        },
+    )
     service_fee = fields.Float(required=True)
     reliability_fee_opted_in = fields.Bool(required=True)
     reliability_fee_estimate = fields.Float(required=True)
