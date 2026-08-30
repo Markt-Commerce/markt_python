@@ -7,6 +7,7 @@ Create Date: 2026-08-30 01:31:08.617330
 """
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 from sqlalchemy.dialects import postgresql
 
 
@@ -15,6 +16,24 @@ revision = '72bf175405d5'
 down_revision = 'f2a3b4c5d6e7'
 branch_labels = None
 depends_on = None
+
+
+def _column_exists(table: str, column: str) -> bool:
+    return column in {
+        col["name"] for col in inspect(op.get_bind()).get_columns(table)
+    }
+
+
+def _index_exists(table: str, index: str) -> bool:
+    return index in {
+        ix["name"] for ix in inspect(op.get_bind()).get_indexes(table)
+    }
+
+
+def _fk_exists(table: str, fk: str) -> bool:
+    return fk in {
+        f["name"] for f in inspect(op.get_bind()).get_foreign_keys(table)
+    }
 
 
 def upgrade():
@@ -292,11 +311,24 @@ def upgrade():
         batch_op.add_column(sa.Column('pending_checkout_data', sa.JSON(), nullable=True))
         batch_op.create_foreign_key(None, 'buyers', ['buyer_id'], ['id'])
 
+    # posts cleanup made defensive, not assumed -- found via the test
+    # server's own upgrade log (migration_err.md): that environment's
+    # `posts` table doesn't have `idx_seller_posts` even though the
+    # column/FK it indexes are still there, unlike every DB this
+    # migration was checked against before (local markt_db, the
+    # disposable verification DB) -- same class of independent drift as
+    # markt_db's own delivery_users.id mismatch. Each step now checks
+    # for its own precondition instead of assuming the environment
+    # matches what was verified elsewhere.
     with op.batch_alter_table('posts', schema=None) as batch_op:
-        batch_op.drop_index('idx_seller_posts')
-        batch_op.create_index('idx_user_posts', ['user_id', 'created_at'], unique=False)
-        batch_op.drop_constraint('posts_seller_id_fkey', type_='foreignkey')
-        batch_op.drop_column('seller_id')
+        if _index_exists('posts', 'idx_seller_posts'):
+            batch_op.drop_index('idx_seller_posts')
+        if not _index_exists('posts', 'idx_user_posts'):
+            batch_op.create_index('idx_user_posts', ['user_id', 'created_at'], unique=False)
+        if _fk_exists('posts', 'posts_seller_id_fkey'):
+            batch_op.drop_constraint('posts_seller_id_fkey', type_='foreignkey')
+        if _column_exists('posts', 'seller_id'):
+            batch_op.drop_column('seller_id')
 
     # seller_offers.status: real bug fix (Phase 13/escalation work) --
     # this column was a plain VARCHAR(20), but create_offer() wrote the
