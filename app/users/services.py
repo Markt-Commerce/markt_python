@@ -12,7 +12,13 @@ from sqlalchemy import func, and_, or_
 from external.redis import redis_client
 from external.database import db
 from app.libs.session import session_scope
-from app.libs.errors import AuthError, NotFoundError, APIError, UnverifiedEmailError
+from app.libs.errors import (
+    AuthError,
+    NotFoundError,
+    APIError,
+    ConflictError,
+    UnverifiedEmailError,
+)
 from app.libs.pagination import Paginator
 from app.libs.email_service import email_service
 
@@ -113,7 +119,10 @@ class AuthService:
     def login_user(email, password, account_type=None):
         with session_scope() as session:
             user = session.query(User).filter(User.email == email).first()
-            if not user or not user.check_password(password):
+            # Deleted accounts are indistinguishable from non-existent ones
+            # here on purpose -- "Invalid credentials" rather than confirming
+            # that an account once existed at this address.
+            if not user or user.deleted_at or not user.check_password(password):
                 raise AuthError("Invalid credentials")
 
             # Check if user is active
@@ -836,6 +845,269 @@ class AccountService:
         except Exception as e:
             logger.error(f"Failed to activate seller account: {str(e)}")
             return False
+
+
+class AccountDeletionService:
+    """In-app account deletion (Apple App Store Review Guideline 5.1.1(v)).
+
+    Apple requires that an account created in the app can be *deleted* from
+    inside the app -- deactivation is explicitly not enough. What that has to
+    mean here is constrained by two things pulling in opposite directions:
+
+    * Everything personal about the user must go.
+    * Other people's records must stay intact. Deleting the User row outright
+      would orphan or cascade away posts other users replied to, reviews
+      products are rated on, chat threads the counterparty still needs, and
+      order/transaction history there are financial-record reasons to keep.
+
+    So the row survives as a tombstone with every personal field overwritten,
+    and authorship is presented as "Deleted user". The account can never be
+    signed into again: bearer tokens are stateless signed user ids (see
+    app.libs.auth_tokens), so the loaders in main.setup reject any user whose
+    deleted_at is set, and the password hash is destroyed regardless.
+
+    Deletion is refused outright while the user still has money or open
+    obligations in the system -- see check_blockers.
+    """
+
+    # Statuses that mean an order is still in flight and someone on the other
+    # side of it is owed goods or money.
+    OPEN_ORDER_STATUSES = (
+        "pending_payment",
+        "pending",
+        "processing",
+        "ready_for_delivery",
+        "shipped",
+    )
+
+    @staticmethod
+    def check_blockers(user_id: str) -> List[Dict[str, Any]]:
+        """Reasons this account cannot be deleted yet.
+
+        Returned to the client so the settings screen can explain the problem
+        and link to the fix, rather than just failing the delete.
+        """
+        from app.orders.models import Order, OrderStatus
+        from app.payments.models import Payment, PaymentStatus
+        from app.wallet.models import WalletAccount
+
+        blockers: List[Dict[str, Any]] = []
+
+        with session_scope() as session:
+            user = session.query(User).get(user_id)
+            if not user:
+                raise NotFoundError("User not found")
+
+            funded = (
+                session.query(WalletAccount)
+                .filter(
+                    WalletAccount.user_id == user_id,
+                    WalletAccount.available_balance > 0,
+                )
+                .all()
+            )
+            for account in funded:
+                blockers.append(
+                    {
+                        "code": "wallet_balance",
+                        "message": (
+                            f"You still have {account.currency} "
+                            f"{account.available_balance:,.2f} in your wallet. "
+                            "Withdraw it before deleting your account."
+                        ),
+                        "detail": {
+                            "currency": account.currency,
+                            "available_balance": round(
+                                account.available_balance, 2
+                            ),
+                        },
+                    }
+                )
+
+            open_statuses = [
+                status
+                for status in OrderStatus
+                if status.value in AccountDeletionService.OPEN_ORDER_STATUSES
+            ]
+
+            if user.buyer_account:
+                open_buying = (
+                    session.query(Order)
+                    .filter(
+                        Order.buyer_id == user.buyer_account.id,
+                        Order.status.in_(open_statuses),
+                    )
+                    .count()
+                )
+                if open_buying:
+                    blockers.append(
+                        {
+                            "code": "open_orders_buying",
+                            "message": (
+                                f"You have {open_buying} order(s) still in "
+                                "progress. They must be delivered or "
+                                "cancelled first."
+                            ),
+                            "detail": {"count": open_buying},
+                        }
+                    )
+
+            if user.seller_account:
+                open_selling = (
+                    session.query(OrderItem)
+                    .join(Order, OrderItem.order_id == Order.id)
+                    .filter(
+                        OrderItem.seller_id == user.seller_account.id,
+                        Order.status.in_(open_statuses),
+                    )
+                    .count()
+                )
+                if open_selling:
+                    blockers.append(
+                        {
+                            "code": "open_orders_selling",
+                            "message": (
+                                f"You have {open_selling} item(s) sold but not "
+                                "yet delivered. Fulfil or cancel them first."
+                            ),
+                            "detail": {"count": open_selling},
+                        }
+                    )
+
+            pending_payments = (
+                session.query(Payment)
+                .filter(
+                    Payment.status == PaymentStatus.PENDING,
+                    Payment.buyer_id
+                    == (user.buyer_account.id if user.buyer_account else None),
+                )
+                .count()
+                if user.buyer_account
+                else 0
+            )
+            if pending_payments:
+                blockers.append(
+                    {
+                        "code": "pending_payments",
+                        "message": (
+                            f"You have {pending_payments} payment(s) still "
+                            "being confirmed. Try again shortly."
+                        ),
+                        "detail": {"count": pending_payments},
+                    }
+                )
+
+        return blockers
+
+    @staticmethod
+    def delete_account(user_id: str, password: str) -> Dict[str, Any]:
+        """Irreversibly anonymize the account and everything personal on it."""
+        from app.notifications.models import Notification, PushToken
+        from app.socials.models import Follow
+        from app.cart.models import Cart
+
+        blockers = AccountDeletionService.check_blockers(user_id)
+        if blockers:
+            raise ConflictError(
+                blockers[0]["message"],
+                payload={"blockers": blockers},
+            )
+
+        with session_scope() as session:
+            user = session.query(User).get(user_id)
+            if not user:
+                raise NotFoundError("User not found")
+            if user.deleted_at:
+                raise ConflictError("This account has already been deleted")
+
+            # Re-authenticate. Deletion is irreversible, so knowing the
+            # password -- not merely holding a 30-day bearer token off a
+            # possibly-unattended device -- is the bar.
+            if not user.password_hash or not user.check_password(password):
+                raise AuthError("Password is incorrect")
+
+            deleted_at = datetime.utcnow()
+            # The id is already opaque and non-personal, and reusing it keeps
+            # the tombstone's unique columns unique without a lookup table.
+            tombstone = user.id.replace("USR_", "").lower()
+
+            user.email = f"deleted-{tombstone}@deleted.markt.invalid"
+            user.username = f"deleted_user_{tombstone}"
+            user.phone_number = None
+            user.profile_picture = "default.jpg"
+            user.email_verified = False
+            user.is_active = False
+            user.deactivated_at = deleted_at
+            user.deleted_at = deleted_at
+            # Destroy the credential outright rather than rotating it: there
+            # must be no password that can ever open this account again.
+            user.password_hash = None
+
+            # Postal address and location are pure PII with nothing else
+            # pointing at them -- delete rather than blank.
+            session.query(UserAddress).filter_by(user_id=user_id).delete(
+                synchronize_session=False
+            )
+            # Device push tokens must go immediately or a deleted user keeps
+            # receiving notifications on their phone.
+            session.query(PushToken).filter_by(user_id=user_id).delete(
+                synchronize_session=False
+            )
+            session.query(Notification).filter_by(user_id=user_id).delete(
+                synchronize_session=False
+            )
+            # The social graph is personal to this user and carries no value
+            # for anyone else once the account is gone.
+            session.query(Follow).filter(
+                or_(Follow.follower_id == user_id, Follow.followee_id == user_id)
+            ).delete(synchronize_session=False)
+
+            if user.buyer_account:
+                # An abandoned cart is private and worthless post-deletion.
+                session.query(Cart).filter_by(buyer_id=user.buyer_account.id).delete(
+                    synchronize_session=False
+                )
+
+            seller = user.seller_account
+            if seller:
+                # Bank details are the most sensitive data on the account and
+                # there is no reason to keep any of it: settlement is already
+                # blocked by the open-order check above.
+                seller.payout_bank_code = None
+                seller.payout_account_number = None
+                seller.payout_account_name = None
+                seller.paystack_subaccount_code = None
+                seller.shop_address = None
+                seller.shop_latitude = None
+                seller.shop_longitude = None
+                seller.shop_name = f"Deleted shop {tombstone}"
+                seller.shop_slug = f"deleted-shop-{tombstone}"
+                seller.description = None
+                seller.is_active = False
+                seller.deactivated_at = deleted_at
+
+                # Nothing from a deleted seller should stay buyable. ARCHIVED
+                # rather than DELETED so existing order items still resolve
+                # the product they were bought from.
+                session.query(Product).filter(
+                    Product.seller_id == seller.id,
+                    Product.status != Product.Status.DELETED,
+                ).update(
+                    {"status": Product.Status.ARCHIVED}, synchronize_session=False
+                )
+
+            session.flush()
+
+        UserService._clear_cached_current_role(user_id)
+        logger.info("Account %s deleted (anonymized) by owner request", user_id)
+
+        return {
+            "deleted": True,
+            "user_id": user_id,
+            "message": (
+                "Your account has been deleted. Personal data has been removed."
+            ),
+        }
 
 
 class ShopService:

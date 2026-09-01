@@ -8,7 +8,12 @@ from flask_login import login_user, logout_user, login_required, current_user
 from sqlalchemy import or_
 
 # project imports
-from app.libs.errors import AuthError, NotFoundError, UnverifiedEmailError
+from app.libs.errors import (
+    AuthError,
+    NotFoundError,
+    UnverifiedEmailError,
+    APIError,
+)
 from app.libs.auth_tokens import generate_auth_token
 from app.libs.pagination import Paginator
 from app.libs.schemas import PaginationQueryArgs
@@ -45,11 +50,15 @@ from .schemas import (
     AnalyticsOverviewQuerySchema,
     AddressSchema,
     AddressUpdateSchema,
+    AccountDeletionPreviewSchema,
+    AccountDeletionRequestSchema,
+    AccountDeletionResponseSchema,
 )
 from .services import (
     AuthService,
     UserService,
     AccountService,
+    AccountDeletionService,
     SellerStartCardsService,
     SellerAnalyticsService,
 )
@@ -114,6 +123,50 @@ class UserLogout(MethodView):
     def post(self):
         logout_user()
         return None
+
+
+@bp.route("/account/deletion-check")
+class AccountDeletionCheck(MethodView):
+    @login_required
+    @bp.response(200, AccountDeletionPreviewSchema)
+    def get(self):
+        """Report whether this account can be deleted, and why not if it can't.
+
+        Lets the settings screen explain the problem (money still in the
+        wallet, orders in flight) up front instead of failing the delete.
+        """
+        try:
+            blockers = AccountDeletionService.check_blockers(current_user.id)
+            return {"can_delete": not blockers, "blockers": blockers}
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/account")
+class AccountDeletion(MethodView):
+    @login_required
+    @bp.arguments(AccountDeletionRequestSchema)
+    @bp.response(200, AccountDeletionResponseSchema)
+    def delete(self, data):
+        """Permanently delete the signed-in user's account.
+
+        Required by Apple App Store guideline 5.1.1(v): an account created in
+        the app has to be deletable from inside the app, and deactivation does
+        not satisfy it. Personal data is destroyed; posts, reviews and order
+        history survive attributed to a deleted user so other people's records
+        stay intact (see AccountDeletionService).
+        """
+        user_id = current_user.id
+        try:
+            result = AccountDeletionService.delete_account(user_id, data["password"])
+        except APIError as e:
+            abort(e.status_code, message=e.message, **(e.payload or {}))
+
+        # Drop the session cookie too. Bearer tokens are stateless, so they
+        # are refused by the loaders in main.setup on the strength of
+        # deleted_at rather than being revoked here.
+        logout_user()
+        return result
 
 
 @bp.route("/profile")
