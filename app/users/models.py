@@ -121,6 +121,11 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
     def check_password(self, password):
         from passlib.hash import pbkdf2_sha256
 
+        # Account deletion destroys the hash outright, and passlib raises on a
+        # null hash rather than returning False -- which would surface as a 500
+        # instead of "invalid credentials".
+        if not self.password_hash:
+            return False
         return pbkdf2_sha256.verify(password, self.password_hash)
 
     @property
