@@ -406,6 +406,8 @@ class PostDetailSchema(PostSchema):
     products = fields.List(fields.Nested(PostProductSchema))
     user = fields.Nested("UserSimpleSchema")
     status = fields.Enum(PostStatus, by_value=True, dump_only=True)
+    # Matches the feed's field of the same name. False for anonymous callers.
+    liked_by_me = fields.Bool(dump_only=True, dump_default=False)
 
 
 class PostDetailSearchResultSchema(Schema):

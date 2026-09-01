@@ -1069,6 +1069,24 @@ class PostService:
             raise NotFoundError("Failed to fetch post")
 
     @staticmethod
+    def is_liked_by(post_id: str, user_id: str) -> bool:
+        """Whether this user has already liked the post.
+
+        The feed computes this in batch during hydration; the detail endpoint
+        needs the single-post answer so an already-liked post doesn't open with
+        an empty heart.
+        """
+        if not post_id or not user_id:
+            return False
+        with session_scope() as session:
+            return (
+                session.query(PostLike.post_id)
+                .filter_by(post_id=post_id, user_id=user_id)
+                .first()
+                is not None
+            )
+
+    @staticmethod
     def get_post_with_niche_context(post_id):
         """Get post with niche context if it's posted in a niche"""
         try:
