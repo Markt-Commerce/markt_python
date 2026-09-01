@@ -57,6 +57,14 @@ class TopUpInitializeResponseSchema(Schema):
     reference = fields.Str()
 
 
+class TopUpVerifyResponseSchema(Schema):
+    topup_id = fields.Str()
+    status = fields.Str()
+    verified = fields.Bool()
+    amount = fields.Float()
+    currency = fields.Str()
+
+
 class SellerPayoutAccountSchema(Schema):
     bank_code = fields.Str(required=True)
     account_number = fields.Str(required=True)

@@ -698,6 +698,88 @@ class WalletService:
         return True
 
     @staticmethod
+    def verify_topup(topup_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+        """Confirm a top-up directly with Paystack and credit it if it landed.
+
+        The webhook is the primary path, but it is asynchronous and can be
+        delayed or lost. This gives the client (and the browser callback) a
+        synchronous server-side confirmation instead of trusting whatever the
+        redirect claims -- the client is never the authority on payment.
+        """
+        import requests
+        from app.payments.services import PaymentService
+
+        with session_scope() as session:
+            topup = session.query(WalletTopUp).get(topup_id)
+            if not topup:
+                raise NotFoundError("Top-up not found")
+            if user_id and topup.user_id != user_id:
+                raise NotFoundError("Top-up not found")
+
+            if topup.status == TopUpStatus.COMPLETED:
+                return {
+                    "topup_id": topup.id,
+                    "status": TopUpStatus.COMPLETED.value,
+                    "verified": True,
+                    "amount": topup.amount,
+                    "currency": topup.currency,
+                }
+
+            reference = topup.paystack_reference
+            amount = topup.amount
+            currency = topup.currency
+
+        if not reference:
+            raise ValidationError("No Paystack reference to verify")
+
+        try:
+            response = requests.get(
+                f"{PaymentService.PAYSTACK_BASE_URL}/transaction/verify/{reference}",
+                headers={
+                    "Authorization": f"Bearer {PaymentService.PAYSTACK_SECRET_KEY}"
+                },
+                timeout=20,
+            )
+            body = response.json()
+        except Exception:
+            logger.exception("Paystack verification call failed for top-up %s", topup_id)
+            raise APIError("Could not verify top-up with Paystack", 502)
+
+        # `status` is whether the API call worked; `data.status` is whether the
+        # money actually moved. Both have to be right.
+        gateway_data = (body or {}).get("data") or {}
+        if response.status_code != 200 or not body.get("status"):
+            raise APIError("Could not verify top-up with Paystack", 502)
+
+        if gateway_data.get("status") == "success":
+            credited = WalletService.complete_topup(reference, gateway_data)
+            return {
+                "topup_id": topup_id,
+                "status": (
+                    TopUpStatus.COMPLETED.value if credited else TopUpStatus.PENDING.value
+                ),
+                "verified": credited,
+                "amount": amount,
+                "currency": currency,
+            }
+
+        # Paystack reports "failed" or "abandoned" as terminal; anything else
+        # (e.g. "ongoing") stays pending so the webhook can still settle it.
+        if gateway_data.get("status") in ("failed", "abandoned", "reversed"):
+            with session_scope() as session:
+                topup = session.query(WalletTopUp).get(topup_id)
+                if topup and topup.status == TopUpStatus.PENDING:
+                    topup.status = TopUpStatus.FAILED
+
+        return {
+            "topup_id": topup_id,
+            "status": (gateway_data.get("status") or TopUpStatus.PENDING.value),
+            "verified": False,
+            "amount": amount,
+            "currency": currency,
+        }
+
+    @staticmethod
     def register_seller_payout_account(
         seller_id: int,
         *,
