@@ -37,21 +37,34 @@ def main():
     from main.config import settings
 
     section("Safety preconditions")
-    if not check("DB is a *_smoke database", settings.DB_NAME.endswith("_smoke"), settings.DB_NAME):
+    if not check(
+        "DB is a *_smoke database",
+        settings.DB_NAME.endswith("_smoke"),
+        settings.DB_NAME,
+    ):
         sys.exit(1)
-    if not check("DB host is local", settings.DB_HOST in ("127.0.0.1", "localhost"), settings.DB_HOST):
+    if not check(
+        "DB host is local",
+        settings.DB_HOST in ("127.0.0.1", "localhost"),
+        settings.DB_HOST,
+    ):
         sys.exit(1)
-    check("threading is not gevent-patched",
-          not getattr(threading, "_gevent_patched", False)
-          and "gevent" not in str(type(threading.current_thread())).lower(),
-          "real OS threads")
+    check(
+        "threading is not gevent-patched",
+        not getattr(threading, "_gevent_patched", False)
+        and "gevent" not in str(type(threading.current_thread())).lower(),
+        "real OS threads",
+    )
 
     app, _ = create_app()
 
     from app.libs.session import session_scope
     from app.users.models import User
     from app.wallet.models import (
-        WalletAccount, WalletEntry, WalletReferenceType, WithdrawalRequest,
+        WalletAccount,
+        WalletEntry,
+        WalletReferenceType,
+        WithdrawalRequest,
     )
     from app.wallet.services import WalletService
     from app.libs.errors import APIError
@@ -59,9 +72,7 @@ def main():
     with app.app_context():
         with session_scope() as session:
             user = (
-                session.query(User)
-                .filter(User.email.like("smoke.seller.a@%"))
-                .first()
+                session.query(User).filter(User.email.like("smoke.seller.a@%")).first()
             )
             if not user:
                 print("  seed data missing — run tests/smoke/seed_smoke_data.py")
@@ -103,14 +114,19 @@ def main():
     def do_credit(i):
         with app.app_context():
             WalletService.credit(
-                user_id, amount, WalletReferenceType.ADJUSTMENT, f"conc-{run}-{i}",
+                user_id,
+                amount,
+                WalletReferenceType.ADJUSTMENT,
+                f"conc-{run}-{i}",
                 description="smoke-fixture: concurrent credit",
                 idempotency_key=f"smoke:conc:{run}:{i}",
             )
 
     errors = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        for f in concurrent.futures.as_completed([ex.submit(do_credit, i) for i in range(WORKERS)]):
+        for f in concurrent.futures.as_completed(
+            [ex.submit(do_credit, i) for i in range(WORKERS)]
+        ):
             try:
                 f.result()
             except Exception as e:
@@ -119,11 +135,16 @@ def main():
     end = balance()
     expected = round(start + WORKERS * amount, 2)
     check("no errors raised under concurrent credit", not errors, "; ".join(errors[:2]))
-    check(f"balance moved by exactly {WORKERS} x {amount} (no lost updates)",
-          end == expected, f"{start} -> {end}, expected {expected}")
-    check(f"exactly {WORKERS} ledger rows written",
-          ledger_rows(f"smoke:conc:{run}:") == WORKERS,
-          f"{ledger_rows(f'smoke:conc:{run}:')} rows")
+    check(
+        f"balance moved by exactly {WORKERS} x {amount} (no lost updates)",
+        end == expected,
+        f"{start} -> {end}, expected {expected}",
+    )
+    check(
+        f"exactly {WORKERS} ledger rows written",
+        ledger_rows(f"smoke:conc:{run}:") == WORKERS,
+        f"{ledger_rows(f'smoke:conc:{run}:')} rows",
+    )
 
     # ---------------------------------------------------------------------
     # 2. N concurrent credits sharing ONE idempotency key — the webhook-replay
@@ -137,25 +158,38 @@ def main():
     def do_replay(_):
         with app.app_context():
             WalletService.credit(
-                user_id, 250.0, WalletReferenceType.WALLET_TOPUP, f"replay-{run2}",
+                user_id,
+                250.0,
+                WalletReferenceType.WALLET_TOPUP,
+                f"replay-{run2}",
                 description="smoke-fixture: replayed webhook",
                 idempotency_key=key,
             )
 
     errors2 = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        for f in concurrent.futures.as_completed([ex.submit(do_replay, i) for i in range(WORKERS)]):
+        for f in concurrent.futures.as_completed(
+            [ex.submit(do_replay, i) for i in range(WORKERS)]
+        ):
             try:
                 f.result()
             except Exception as e:
                 errors2.append(repr(e))
 
     end2 = balance()
-    check("no errors raised under concurrent replay", not errors2, "; ".join(errors2[:2]))
-    check("balance moved exactly once despite N simultaneous deliveries",
-          end2 == round(start2 + 250.0, 2), f"{start2} -> {end2}, expected {round(start2 + 250.0, 2)}")
-    check("exactly one ledger row for the replayed key",
-          ledger_rows(key) == 1, f"{ledger_rows(key)} rows")
+    check(
+        "no errors raised under concurrent replay", not errors2, "; ".join(errors2[:2])
+    )
+    check(
+        "balance moved exactly once despite N simultaneous deliveries",
+        end2 == round(start2 + 250.0, 2),
+        f"{start2} -> {end2}, expected {round(start2 + 250.0, 2)}",
+    )
+    check(
+        "exactly one ledger row for the replayed key",
+        ledger_rows(key) == 1,
+        f"{ledger_rows(key)} rows",
+    )
 
     # ---------------------------------------------------------------------
     # 3. N concurrent withdrawals that together exceed the balance — the
@@ -171,13 +205,16 @@ def main():
     def do_withdraw(i):
         with app.app_context():
             try:
-                WalletService.request_withdrawal(user_id, {
-                    "amount": per,
-                    "currency": "NGN",
-                    "bank_code": "058",
-                    "account_number": "0000000000",
-                    "account_name": "Smoke Fixture",
-                })
+                WalletService.request_withdrawal(
+                    user_id,
+                    {
+                        "amount": per,
+                        "currency": "NGN",
+                        "bank_code": "058",
+                        "account_number": "0000000000",
+                        "account_name": "Smoke Fixture",
+                    },
+                )
                 return True
             except APIError:
                 return False
@@ -187,24 +224,37 @@ def main():
                 return True
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        outcomes = [f.result() for f in concurrent.futures.as_completed(
-            [ex.submit(do_withdraw, i) for i in range(attempts)]
-        )]
+        outcomes = [
+            f.result()
+            for f in concurrent.futures.as_completed(
+                [ex.submit(do_withdraw, i) for i in range(attempts)]
+            )
+        ]
 
     end3 = balance()
     granted = sum(1 for o in outcomes if o)
-    print(f"    attempted {attempts} x {per} against a balance of {bal3}; {granted} granted")
+    print(
+        f"    attempted {attempts} x {per} against a balance of {bal3}; {granted} granted"
+    )
     check("wallet never went negative", end3 >= 0, f"final balance {end3}")
-    check("granted withdrawals did not exceed what the balance could fund",
-          granted <= affordable, f"granted={granted} affordable={affordable}")
-    check("balance decreased by exactly the granted amount",
-          end3 == round(bal3 - granted * per, 2),
-          f"{bal3} -> {end3}, expected {round(bal3 - granted * per, 2)}")
+    check(
+        "granted withdrawals did not exceed what the balance could fund",
+        granted <= affordable,
+        f"granted={granted} affordable={affordable}",
+    )
+    check(
+        "balance decreased by exactly the granted amount",
+        end3 == round(bal3 - granted * per, 2),
+        f"{bal3} -> {end3}, expected {round(bal3 - granted * per, 2)}",
+    )
 
     with app.app_context():
         with session_scope() as session:
-            acct = session.query(WalletAccount).filter_by(
-                user_id=user_id, currency="NGN").first()
+            acct = (
+                session.query(WalletAccount)
+                .filter_by(user_id=user_id, currency="NGN")
+                .first()
+            )
             rows = (
                 session.query(WalletEntry)
                 .filter_by(wallet_account_id=acct.id)
@@ -219,8 +269,11 @@ def main():
                     consistent = False
                     break
             negative = any(r.balance_after < 0 for r in rows)
-    check("every ledger row's balance_after matches the running total",
-          consistent, f"{len(rows)} rows replayed")
+    check(
+        "every ledger row's balance_after matches the running total",
+        consistent,
+        f"{len(rows)} rows replayed",
+    )
     check("no ledger row ever recorded a negative balance", not negative)
 
     section("Summary")

@@ -742,7 +742,9 @@ class WalletService:
             )
             body = response.json()
         except Exception:
-            logger.exception("Paystack verification call failed for top-up %s", topup_id)
+            logger.exception(
+                "Paystack verification call failed for top-up %s", topup_id
+            )
             raise APIError("Could not verify top-up with Paystack", 502)
 
         # `status` is whether the API call worked; `data.status` is whether the
@@ -756,7 +758,9 @@ class WalletService:
             return {
                 "topup_id": topup_id,
                 "status": (
-                    TopUpStatus.COMPLETED.value if credited else TopUpStatus.PENDING.value
+                    TopUpStatus.COMPLETED.value
+                    if credited
+                    else TopUpStatus.PENDING.value
                 ),
                 "verified": credited,
                 "amount": amount,

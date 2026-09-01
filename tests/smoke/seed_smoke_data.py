@@ -99,7 +99,9 @@ def _guard(settings):
         for p in problems:
             print("  -", p)
         sys.exit(1)
-    print(f"Target: {settings.DB_USER}@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}")
+    print(
+        f"Target: {settings.DB_USER}@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
+    )
     print(f"Paystack key mode: {secret[:8] or '(unset)'}")
 
 
