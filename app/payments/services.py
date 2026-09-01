@@ -782,8 +782,14 @@ class PaymentService:
                 return PaymentService._handle_successful_charge(data)
             elif event == "transfer.success":
                 return PaymentService._handle_successful_transfer(data)
-            elif event == "transfer.failed":
-                return PaymentService._handle_failed_transfer(data)
+            elif event in ("transfer.failed", "transfer.reversed"):
+                # A reversal means the payout bounced back to our Paystack
+                # balance after we had already debited the user's wallet, so it
+                # settles exactly like a failure: mark the withdrawal failed and
+                # return the money to the wallet. Leaving it unhandled (as it
+                # was) meant the user stayed debited for a payout they never
+                # received.
+                return PaymentService._handle_failed_transfer(data, event=event)
             elif event == "charge.failed":
                 return PaymentService._handle_failed_charge(data)
             else:
@@ -1179,14 +1185,21 @@ class PaymentService:
         return WalletService.complete_withdrawal_transfer(reference)
 
     @staticmethod
-    def _handle_failed_transfer(data: Dict[str, Any]) -> bool:
-        """Handle failed transfer webhook and refund wallet."""
+    def _handle_failed_transfer(
+        data: Dict[str, Any], event: str = "transfer.failed"
+    ) -> bool:
+        """Handle a failed or reversed transfer webhook and refund the wallet."""
         from app.wallet.services import WalletService
 
         reference = data.get("reference") or data.get("transfer_code")
         if not reference:
             return False
-        reason = data.get("reason") or "Paystack transfer failed"
+        default_reason = (
+            "Paystack transfer reversed"
+            if event == "transfer.reversed"
+            else "Paystack transfer failed"
+        )
+        reason = data.get("reason") or default_reason
         return WalletService.fail_withdrawal_transfer(reference, reason)
 
     @staticmethod
