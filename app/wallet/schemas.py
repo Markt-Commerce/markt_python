@@ -1,5 +1,7 @@
 from marshmallow import Schema, fields, validate
 
+from .models import WithdrawalStatus
+
 
 class WalletBalanceSchema(Schema):
     currency = fields.Str()
@@ -39,7 +41,11 @@ class WithdrawalResponseSchema(Schema):
     id = fields.Str()
     amount = fields.Float()
     currency = fields.Str()
-    status = fields.Str()
+    # This dumps the ORM object directly, so fields.Str() stringified the enum
+    # member and the endpoint returned "WithdrawalStatus.PENDING" instead of
+    # "pending" -- disagreeing with GET /wallet/withdrawals, which builds its
+    # dicts from status.value.
+    status = fields.Enum(WithdrawalStatus, by_value=True)
     created_at = fields.DateTime()
 
 
