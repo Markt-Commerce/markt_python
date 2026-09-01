@@ -1,6 +1,6 @@
 """feat(users): add deleted_at for account deletion
 
-Revision ID: a1b2c3d4e5f6
+Revision ID: e143139d1aef
 Revises: 72bf175405d5
 Create Date: 2026-09-01
 
@@ -12,7 +12,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "a1b2c3d4e5f6"
+revision = "e143139d1aef"
 down_revision = "72bf175405d5"
 branch_labels = None
 depends_on = None
