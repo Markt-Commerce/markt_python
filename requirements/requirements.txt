@@ -47,5 +47,5 @@ ffmpeg-python==0.2.0
 # cryptography
 python-engineio==4.5.1
 python-socketio==5.8.0
-gevent==22.10.2
+gevent==24.11.1
 gevent-websocket==0.10.1
