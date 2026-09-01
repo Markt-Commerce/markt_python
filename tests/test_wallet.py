@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.libs.errors import ValidationError
-from app.wallet.models import WalletReferenceType
+from app.wallet.models import TopUpStatus, WalletReferenceType
 from app.wallet.services import DEFAULT_COMMISSION_RATE, WalletService
 
 
@@ -84,6 +84,91 @@ def test_settle_order_item_rejects_invalid_commission_rate():
         mock_scope.return_value.__enter__.return_value = session
         with pytest.raises(ValidationError):
             WalletService.settle_order_item(item, commission_rate=1.5)
+
+
+# --- Paystack top-up verification -----------------------------------------
+#
+# complete_topup used to credit purely on being called with a reference, so a
+# signed-but-mismatched charge.success event would move the exact amount the
+# top-up row happened to claim. Paystack's guidance is to confirm data.status,
+# data.amount and data.currency before giving value.
+
+
+def _pending_topup(amount=5000.0, currency="NGN"):
+    return SimpleNamespace(
+        id="TOP_1",
+        user_id="USR_1",
+        amount=amount,
+        currency=currency,
+        status=TopUpStatus.PENDING,
+        paystack_reference="TOP_TOP_1",
+    )
+
+
+def _topup_session(topup):
+    session = MagicMock()
+    session.query.return_value.get.return_value = topup
+    session.query.return_value.filter_by.return_value.first.return_value = topup
+    return session
+
+
+@pytest.mark.parametrize(
+    "gateway_response, reason",
+    [
+        ({"status": "failed", "amount": 500000, "currency": "NGN"}, "status"),
+        ({"status": "success", "amount": 100, "currency": "NGN"}, "amount"),
+        ({"status": "success", "amount": 500000, "currency": "USD"}, "currency"),
+    ],
+)
+def test_complete_topup_refuses_mismatched_gateway_payload(gateway_response, reason):
+    topup = _pending_topup()
+    session = _topup_session(topup)
+
+    with patch("app.wallet.services.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        with patch.object(WalletService, "credit") as mock_credit:
+            credited = WalletService.complete_topup("TOP_TOP_1", gateway_response)
+
+    assert credited is False, f"should not credit on {reason} mismatch"
+    mock_credit.assert_not_called()
+    assert topup.status is TopUpStatus.PENDING
+
+
+def test_complete_topup_credits_when_gateway_payload_matches():
+    topup = _pending_topup()
+    session = _topup_session(topup)
+
+    with patch("app.wallet.services.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        with patch.object(WalletService, "credit") as mock_credit:
+            credited = WalletService.complete_topup(
+                "TOP_TOP_1",
+                {"status": "success", "amount": 500000, "currency": "NGN"},
+            )
+
+    assert credited is True
+    mock_credit.assert_called_once()
+    # Credited from the local record, keyed so webhook retries can't double-pay.
+    assert mock_credit.call_args[0][1] == 5000.0
+    assert mock_credit.call_args[1]["idempotency_key"] == "topup:TOP_1"
+    assert topup.status is TopUpStatus.COMPLETED
+
+
+def test_complete_topup_is_idempotent_once_completed():
+    topup = _pending_topup()
+    topup.status = TopUpStatus.COMPLETED
+    session = _topup_session(topup)
+
+    with patch("app.wallet.services.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        with patch.object(WalletService, "credit") as mock_credit:
+            credited = WalletService.complete_topup(
+                "TOP_TOP_1",
+                {"status": "success", "amount": 500000, "currency": "NGN"},
+            )
+
+    assert credited is True
+    mock_credit.assert_not_called()
 
 
 def test_balance_mutations_lock_the_wallet_row():

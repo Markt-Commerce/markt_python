@@ -641,6 +641,44 @@ class WalletService:
             if topup.status == TopUpStatus.COMPLETED:
                 return True
 
+            # Never credit on the strength of the event name alone. Paystack's
+            # own guidance is to confirm data.status, data.amount and
+            # data.currency against what was expected before giving value --
+            # the webhook body is attacker-shaped input right up until the
+            # signature check, and a signed-but-stale event can still carry an
+            # amount that doesn't match this top-up.
+            if gateway_response is not None:
+                expected_kobo = int(round(topup.amount * 100))
+                paid_status = gateway_response.get("status")
+                paid_kobo = gateway_response.get("amount")
+                paid_currency = gateway_response.get("currency")
+
+                if paid_status is not None and paid_status != "success":
+                    logger.warning(
+                        "Top-up %s not credited: gateway status is %s",
+                        topup.id,
+                        paid_status,
+                    )
+                    return False
+                if paid_kobo is not None and int(paid_kobo) != expected_kobo:
+                    logger.error(
+                        "Top-up %s amount mismatch: expected %s kobo, gateway "
+                        "reported %s kobo -- refusing to credit",
+                        topup.id,
+                        expected_kobo,
+                        paid_kobo,
+                    )
+                    return False
+                if paid_currency is not None and paid_currency != topup.currency:
+                    logger.error(
+                        "Top-up %s currency mismatch: expected %s, gateway "
+                        "reported %s -- refusing to credit",
+                        topup.id,
+                        topup.currency,
+                        paid_currency,
+                    )
+                    return False
+
             user_id = topup.user_id
             amount = topup.amount
             currency = topup.currency
