@@ -917,9 +917,7 @@ class AccountDeletionService:
                         ),
                         "detail": {
                             "currency": account.currency,
-                            "available_balance": round(
-                                account.available_balance, 2
-                            ),
+                            "available_balance": round(account.available_balance, 2),
                         },
                     }
                 )
@@ -1092,9 +1090,7 @@ class AccountDeletionService:
                 session.query(Product).filter(
                     Product.seller_id == seller.id,
                     Product.status != Product.Status.DELETED,
-                ).update(
-                    {"status": Product.Status.ARCHIVED}, synchronize_session=False
-                )
+                ).update({"status": Product.Status.ARCHIVED}, synchronize_session=False)
 
             session.flush()
 

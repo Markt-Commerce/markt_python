@@ -79,9 +79,7 @@ def test_delete_account_anonymizes_personal_fields():
     with patch.object(AccountDeletionService, "check_blockers", return_value=[]):
         with patch("app.users.services.session_scope") as scope:
             scope.return_value.__enter__.return_value = session
-            with patch(
-                "app.users.services.UserService._clear_cached_current_role"
-            ):
+            with patch("app.users.services.UserService._clear_cached_current_role"):
                 result = AccountDeletionService.delete_account(
                     "USR_ABC123", "correct-horse"
                 )
@@ -123,9 +121,7 @@ def test_delete_account_scrubs_seller_payout_details():
     with patch.object(AccountDeletionService, "check_blockers", return_value=[]):
         with patch("app.users.services.session_scope") as scope:
             scope.return_value.__enter__.return_value = session
-            with patch(
-                "app.users.services.UserService._clear_cached_current_role"
-            ):
+            with patch("app.users.services.UserService._clear_cached_current_role"):
                 AccountDeletionService.delete_account("USR_ABC123", "correct-horse")
 
     assert seller.payout_bank_code is None
