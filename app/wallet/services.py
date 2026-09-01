@@ -318,15 +318,29 @@ class WalletService:
             withdrawal_id = withdrawal.id
             currency = withdrawal.currency
 
-        WalletService.debit(
-            user_id,
-            amount,
-            WalletReferenceType.WITHDRAWAL,
-            withdrawal_id,
-            description="Withdrawal request",
-            idempotency_key=f"withdraw:{withdrawal_id}",
-            currency=currency,
-        )
+        # The balance check above ran in its own committed transaction, so a
+        # concurrent withdrawal can still take the money before this debit
+        # lands (the debit re-checks under a row lock and raises). Without this
+        # cleanup the request row stayed PENDING forever: shown to the user as
+        # an in-flight withdrawal, and a candidate for any future sweeper to
+        # pay out money that was never debited.
+        try:
+            WalletService.debit(
+                user_id,
+                amount,
+                WalletReferenceType.WITHDRAWAL,
+                withdrawal_id,
+                description="Withdrawal request",
+                idempotency_key=f"withdraw:{withdrawal_id}",
+                currency=currency,
+            )
+        except APIError:
+            with session_scope() as session:
+                orphan = session.query(WithdrawalRequest).get(withdrawal_id)
+                if orphan and orphan.status == WithdrawalStatus.PENDING:
+                    orphan.status = WithdrawalStatus.FAILED
+                    orphan.failure_reason = "Insufficient balance at debit time"
+            raise
 
         try:
             from app.wallet.tasks import process_withdrawal
