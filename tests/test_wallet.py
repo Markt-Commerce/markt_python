@@ -84,3 +84,29 @@ def test_settle_order_item_rejects_invalid_commission_rate():
         mock_scope.return_value.__enter__.return_value = session
         with pytest.raises(ValidationError):
             WalletService.settle_order_item(item, commission_rate=1.5)
+
+
+def test_balance_mutations_lock_the_wallet_row():
+    """credit/debit must hold a row lock across the read-modify-write.
+
+    Paystack retries a webhook every 3 minutes, so concurrent deliveries of the
+    same event are routine; an unlocked balance update loses one of them.
+    """
+    session = MagicMock()
+    # No existing entry for the idempotency key, so the write path is reached.
+    session.query.return_value.filter_by.return_value.with_for_update.return_value.first.return_value = SimpleNamespace(  # noqa: E501
+        id=1, currency="NGN", available_balance=1000.0
+    )
+    session.query.return_value.filter_by.return_value.first.return_value = None
+
+    with patch("app.wallet.services.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        WalletService.credit(
+            "USR_1",
+            250.0,
+            WalletReferenceType.WALLET_TOPUP,
+            "TOP_1",
+            idempotency_key="topup:TOP_1",
+        )
+
+    session.query.return_value.filter_by.return_value.with_for_update.assert_called()

@@ -2,6 +2,8 @@ import logging
 import uuid
 from typing import Any, Dict, Optional
 
+from sqlalchemy.exc import IntegrityError
+
 from app.libs.errors import APIError, NotFoundError, ValidationError, ConflictError
 from app.libs.session import session_scope
 from app.orders.models import OrderItem
@@ -30,20 +32,39 @@ MIN_WITHDRAWAL_AMOUNT = 1000.0
 class WalletService:
     @staticmethod
     def _get_or_create_account(
-        session, user_id: str, currency: str = "NGN"
+        session, user_id: str, currency: str = "NGN", *, for_update: bool = False
     ) -> WalletAccount:
-        account = (
-            session.query(WalletAccount)
-            .filter_by(user_id=user_id, currency=currency)
-            .first()
-        )
-        if not account:
+        """Fetch (or open) a user's wallet.
+
+        `for_update` takes a row lock, which every balance mutation must hold --
+        see the note in `credit`.
+        """
+
+        def _query():
+            q = session.query(WalletAccount).filter_by(
+                user_id=user_id, currency=currency
+            )
+            return q.with_for_update() if for_update else q
+
+        account = _query().first()
+        if account:
+            return account
+
+        # Two requests can open the same wallet at the same moment. The
+        # (user_id, currency) unique constraint decides which insert wins; the
+        # loser rolls back to the savepoint and re-reads the winner's row
+        # rather than failing the whole enclosing transaction.
+        savepoint = session.begin_nested()
+        try:
             account = WalletAccount(
                 user_id=user_id, currency=currency, available_balance=0.0
             )
             session.add(account)
-            session.flush()
-        return account
+            savepoint.commit()
+            return account
+        except IntegrityError:
+            savepoint.rollback()
+            return _query().one()
 
     @staticmethod
     def get_balance(user_id: str, currency: str = "NGN") -> Dict[str, Any]:
@@ -106,6 +127,19 @@ class WalletService:
             raise ValidationError("Credit amount must be positive")
 
         with session_scope() as session:
+            # Lock the wallet row BEFORE the idempotency check. Two things
+            # depend on that ordering:
+            #  1. The balance read-modify-write below is not atomic on its own.
+            #     Paystack retries a webhook every 3 minutes (4 times, then
+            #     hourly for 72h), so concurrent deliveries of the same event
+            #     were genuinely able to interleave and lose a credit.
+            #  2. It makes the check-then-insert on idempotency_key atomic per
+            #     wallet, so a retry can't slip past the SELECT and then fail
+            #     on the unique constraint.
+            account = WalletService._get_or_create_account(
+                session, user_id, currency, for_update=True
+            )
+
             if idempotency_key:
                 existing = (
                     session.query(WalletEntry)
@@ -115,7 +149,6 @@ class WalletService:
                 if existing:
                     return existing
 
-            account = WalletService._get_or_create_account(session, user_id, currency)
             account.available_balance = round(account.available_balance + amount, 2)
             entry = WalletEntry(
                 wallet_account_id=account.id,
@@ -146,6 +179,13 @@ class WalletService:
             raise ValidationError("Debit amount must be positive")
 
         with session_scope() as session:
+            # Lock first -- see `credit`. This is what stops two concurrent
+            # withdrawals from each passing the balance check below and
+            # together overdrawing the wallet.
+            account = WalletService._get_or_create_account(
+                session, user_id, currency, for_update=True
+            )
+
             if idempotency_key:
                 existing = (
                     session.query(WalletEntry)
@@ -155,7 +195,6 @@ class WalletService:
                 if existing:
                     return existing
 
-            account = WalletService._get_or_create_account(session, user_id, currency)
             if account.available_balance < amount:
                 raise ValidationError("Insufficient wallet balance")
 
