@@ -69,3 +69,11 @@ def downgrade():
 
     op.drop_table('content_reports')
     # ### end Alembic commands ###
+
+    # Autogenerate creates these ENUM types implicitly via sa.Enum but never
+    # drops them, so a downgrade left them behind and the next upgrade died on
+    # `type "reportedcontenttype" already exists`. Only surfaces on a
+    # downgrade-then-upgrade cycle, which is exactly what a rollback-and-retry
+    # is.
+    for enum_name in ("reportstatus", "reportreason", "reportedcontenttype"):
+        op.execute(f"DROP TYPE IF EXISTS {enum_name}")
