@@ -16,6 +16,18 @@ import concurrent.futures
 import sys
 import threading
 import uuid
+from decimal import Decimal
+
+
+def money(value):
+    """Compare balances without caring whether they're float or Decimal.
+
+    Balances are Decimal once the NUMERIC(12,2) migration lands and float
+    before it, and this script has to run either side of that. Going through
+    str() keeps the value exact in both cases.
+    """
+    return Decimal(str(value)).quantize(Decimal("0.01"))
+
 
 WORKERS = 12
 
@@ -109,7 +121,7 @@ def main():
     section(f"Concurrent distinct credits ({WORKERS} threads)")
     run = uuid.uuid4().hex[:8]
     amount = 100.0
-    start = balance()
+    start = money(balance())
 
     def do_credit(i):
         with app.app_context():
@@ -132,8 +144,8 @@ def main():
             except Exception as e:
                 errors.append(repr(e))
 
-    end = balance()
-    expected = round(start + WORKERS * amount, 2)
+    end = money(balance())
+    expected = money(money(start) + money(WORKERS * amount))
     check("no errors raised under concurrent credit", not errors, "; ".join(errors[:2]))
     check(
         f"balance moved by exactly {WORKERS} x {amount} (no lost updates)",
@@ -152,7 +164,7 @@ def main():
     # ---------------------------------------------------------------------
     section(f"Concurrent replay of one event ({WORKERS} threads, same key)")
     run2 = uuid.uuid4().hex[:8]
-    start2 = balance()
+    start2 = money(balance())
     key = f"smoke:replay:{run2}"
 
     def do_replay(_):
@@ -182,8 +194,8 @@ def main():
     )
     check(
         "balance moved exactly once despite N simultaneous deliveries",
-        end2 == round(start2 + 250.0, 2),
-        f"{start2} -> {end2}, expected {round(start2 + 250.0, 2)}",
+        money(end2) == money(money(start2) + money(250.0)),
+        f"{start2} -> {end2}, expected {money(money(start2) + money(250.0))}",
     )
     check(
         "exactly one ledger row for the replayed key",
@@ -197,9 +209,9 @@ def main():
     #    must be exactly what the balance could fund.
     # ---------------------------------------------------------------------
     section(f"Concurrent over-withdrawal ({WORKERS} threads)")
-    bal3 = balance()
+    bal3 = money(balance())
     per = 1000.0  # MIN_WITHDRAWAL_AMOUNT
-    affordable = int(bal3 // per)
+    affordable = int(bal3 // money(per))
     attempts = affordable + WORKERS  # deliberately more than can be funded
 
     def do_withdraw(i):
@@ -231,7 +243,7 @@ def main():
             )
         ]
 
-    end3 = balance()
+    end3 = money(balance())
     granted = sum(1 for o in outcomes if o)
     print(
         f"    attempted {attempts} x {per} against a balance of {bal3}; {granted} granted"
@@ -244,8 +256,8 @@ def main():
     )
     check(
         "balance decreased by exactly the granted amount",
-        end3 == round(bal3 - granted * per, 2),
-        f"{bal3} -> {end3}, expected {round(bal3 - granted * per, 2)}",
+        money(end3) == money(money(bal3) - money(granted * per)),
+        f"{bal3} -> {end3}, expected {money(money(bal3) - money(granted * per))}",
     )
 
     with app.app_context():
@@ -261,11 +273,12 @@ def main():
                 .order_by(WalletEntry.id)
                 .all()
             )
-            running = 0.0
+            running = Decimal("0.00")
             consistent = True
             for r in rows:
-                running += r.amount if r.entry_type.value == "credit" else -r.amount
-                if round(running, 2) != round(r.balance_after, 2):
+                delta = money(r.amount)
+                running += delta if r.entry_type.value == "credit" else -delta
+                if money(running) != money(r.balance_after):
                     consistent = False
                     break
             negative = any(r.balance_after < 0 for r in rows)
