@@ -40,3 +40,8 @@ def downgrade():
 
     op.drop_table('saved_items')
     # ### end Alembic commands ###
+
+    # sa.Enum creates this type implicitly and drop_table doesn't remove it,
+    # so without this a downgrade leaves it behind and the next upgrade fails
+    # on `type "saveditemtype" already exists`.
+    op.execute("DROP TYPE IF EXISTS saveditemtype")
