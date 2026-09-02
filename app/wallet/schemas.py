@@ -1,5 +1,7 @@
 from marshmallow import Schema, fields, validate
 
+from .models import WithdrawalStatus
+
 
 class WalletBalanceSchema(Schema):
     currency = fields.Str()
@@ -39,7 +41,11 @@ class WithdrawalResponseSchema(Schema):
     id = fields.Str()
     amount = fields.Float()
     currency = fields.Str()
-    status = fields.Str()
+    # This dumps the ORM object directly, so fields.Str() stringified the enum
+    # member and the endpoint returned "WithdrawalStatus.PENDING" instead of
+    # "pending" -- disagreeing with GET /wallet/withdrawals, which builds its
+    # dicts from status.value.
+    status = fields.Enum(WithdrawalStatus, by_value=True)
     created_at = fields.DateTime()
 
 
@@ -57,6 +63,14 @@ class TopUpInitializeResponseSchema(Schema):
     reference = fields.Str()
 
 
+class TopUpVerifyResponseSchema(Schema):
+    topup_id = fields.Str()
+    status = fields.Str()
+    verified = fields.Bool()
+    amount = fields.Float()
+    currency = fields.Str()
+
+
 class SellerPayoutAccountSchema(Schema):
     bank_code = fields.Str(required=True)
     account_number = fields.Str(required=True)
@@ -68,3 +82,26 @@ class SellerPayoutAccountResponseSchema(Schema):
     subaccount_code = fields.Str()
     account_name = fields.Str()
     account_number_masked = fields.Str()
+
+
+class BankSchema(Schema):
+    name = fields.Str()
+    code = fields.Str()
+    slug = fields.Str(allow_none=True)
+    type = fields.Str(allow_none=True)
+
+
+class BankListSchema(Schema):
+    banks = fields.List(fields.Nested(BankSchema))
+
+
+class ResolveAccountQuerySchema(Schema):
+    account_number = fields.Str(required=True, validate=validate.Length(min=10, max=20))
+    bank_code = fields.Str(required=True, validate=validate.Length(min=3, max=10))
+
+
+class ResolvedAccountSchema(Schema):
+    account_number = fields.Str()
+    account_name = fields.Str(allow_none=True)
+    bank_code = fields.Str()
+    resolved = fields.Bool()

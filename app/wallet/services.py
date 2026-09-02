@@ -1,7 +1,10 @@
 import logging
 import uuid
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Dict, Optional
+
+from sqlalchemy.exc import IntegrityError
 
 from app.libs.errors import APIError, NotFoundError, ValidationError, ConflictError
 from app.libs.session import session_scope
@@ -32,20 +35,39 @@ MIN_WITHDRAWAL_AMOUNT = Decimal("1000.00")
 class WalletService:
     @staticmethod
     def _get_or_create_account(
-        session, user_id: str, currency: str = "NGN"
+        session, user_id: str, currency: str = "NGN", *, for_update: bool = False
     ) -> WalletAccount:
-        account = (
-            session.query(WalletAccount)
-            .filter_by(user_id=user_id, currency=currency)
-            .first()
-        )
-        if not account:
+        """Fetch (or open) a user's wallet.
+
+        `for_update` takes a row lock, which every balance mutation must hold --
+        see the note in `credit`.
+        """
+
+        def _query():
+            q = session.query(WalletAccount).filter_by(
+                user_id=user_id, currency=currency
+            )
+            return q.with_for_update() if for_update else q
+
+        account = _query().first()
+        if account:
+            return account
+
+        # Two requests can open the same wallet at the same moment. The
+        # (user_id, currency) unique constraint decides which insert wins; the
+        # loser rolls back to the savepoint and re-reads the winner's row
+        # rather than failing the whole enclosing transaction.
+        savepoint = session.begin_nested()
+        try:
             account = WalletAccount(
                 user_id=user_id, currency=currency, available_balance=to_money(0)
             )
             session.add(account)
-            session.flush()
-        return account
+            savepoint.commit()
+            return account
+        except IntegrityError:
+            savepoint.rollback()
+            return _query().one()
 
     @staticmethod
     def get_balance(user_id: str, currency: str = "NGN") -> Dict[str, Any]:
@@ -112,6 +134,19 @@ class WalletService:
             raise ValidationError("Credit amount must be positive")
 
         with session_scope() as session:
+            # Lock the wallet row BEFORE the idempotency check. Two things
+            # depend on that ordering:
+            #  1. The balance read-modify-write below is not atomic on its own.
+            #     Paystack retries a webhook every 3 minutes (4 times, then
+            #     hourly for 72h), so concurrent deliveries of the same event
+            #     were genuinely able to interleave and lose a credit.
+            #  2. It makes the check-then-insert on idempotency_key atomic per
+            #     wallet, so a retry can't slip past the SELECT and then fail
+            #     on the unique constraint.
+            account = WalletService._get_or_create_account(
+                session, user_id, currency, for_update=True
+            )
+
             if idempotency_key:
                 existing = (
                     session.query(WalletEntry)
@@ -121,7 +156,6 @@ class WalletService:
                 if existing:
                     return existing
 
-            account = WalletService._get_or_create_account(session, user_id, currency)
             account.available_balance = to_money(account.available_balance + amount)
             entry = WalletEntry(
                 wallet_account_id=account.id,
@@ -154,6 +188,13 @@ class WalletService:
             raise ValidationError("Debit amount must be positive")
 
         with session_scope() as session:
+            # Lock first -- see `credit`. This is what stops two concurrent
+            # withdrawals from each passing the balance check below and
+            # together overdrawing the wallet.
+            account = WalletService._get_or_create_account(
+                session, user_id, currency, for_update=True
+            )
+
             if idempotency_key:
                 existing = (
                     session.query(WalletEntry)
@@ -163,7 +204,6 @@ class WalletService:
                 if existing:
                     return existing
 
-            account = WalletService._get_or_create_account(session, user_id, currency)
             if account.available_balance < amount:
                 raise ValidationError("Insufficient wallet balance")
 
@@ -217,6 +257,63 @@ class WalletService:
             description=f"Settlement for order item {order_item.id}",
             idempotency_key=f"settle:item:{order_item.id}",
         )
+
+    @staticmethod
+    def settle_order_item_by_id(
+        order_item_id: int, commission_rate=DEFAULT_COMMISSION_RATE
+    ) -> Optional[WalletEntry]:
+        """Settle one item, each step in its own transaction.
+
+        The batch task used to hold a session open across the whole eligible
+        set and call settle_order_item() inside it. Because session_scope()
+        hands out the same scoped session, the credit's commit also committed
+        every settled_at written so far in that loop -- so a crash halfway
+        through left a partially-committed batch that no longer looked like a
+        batch. Splitting it into three sequential transactions per item
+        (read -> credit -> mark) keeps each item independently atomic.
+
+        Safe to re-run: the credit is keyed on settle:item:<id>, and
+        settled_at is only bookkeeping on top of that.
+        """
+        from app.orders.models import Order, OrderItem as OrderItemModel
+
+        with session_scope() as session:
+            item = session.query(OrderItemModel).get(order_item_id)
+            if item is None or item.settled_at is not None:
+                return None
+
+            order = session.query(Order).get(item.order_id)
+            if order and order.paystack_split_used:
+                return None
+
+            seller_user_id = item.seller.user_id if item.seller else None
+            gross = (item.price or 0) * (item.quantity or 0)
+
+        if not seller_user_id or gross <= 0:
+            return None
+
+        if not 0 <= commission_rate <= 1:
+            raise ValidationError(f"Invalid commission rate: {commission_rate}")
+
+        net = round(gross * (1 - commission_rate), 2)
+        if net <= 0:
+            return None
+
+        entry = WalletService.credit(
+            seller_user_id,
+            net,
+            WalletReferenceType.ORDER_SETTLEMENT,
+            str(order_item_id),
+            description=f"Settlement for order item {order_item_id}",
+            idempotency_key=f"settle:item:{order_item_id}",
+        )
+
+        with session_scope() as session:
+            item = session.query(OrderItemModel).get(order_item_id)
+            if item is not None and item.settled_at is None:
+                item.settled_at = datetime.utcnow()
+
+        return entry
 
     @staticmethod
     def refund_order_to_wallet(
@@ -288,15 +385,29 @@ class WalletService:
             withdrawal_id = withdrawal.id
             currency = withdrawal.currency
 
-        WalletService.debit(
-            user_id,
-            amount,
-            WalletReferenceType.WITHDRAWAL,
-            withdrawal_id,
-            description="Withdrawal request",
-            idempotency_key=f"withdraw:{withdrawal_id}",
-            currency=currency,
-        )
+        # The balance check above ran in its own committed transaction, so a
+        # concurrent withdrawal can still take the money before this debit
+        # lands (the debit re-checks under a row lock and raises). Without this
+        # cleanup the request row stayed PENDING forever: shown to the user as
+        # an in-flight withdrawal, and a candidate for any future sweeper to
+        # pay out money that was never debited.
+        try:
+            WalletService.debit(
+                user_id,
+                amount,
+                WalletReferenceType.WITHDRAWAL,
+                withdrawal_id,
+                description="Withdrawal request",
+                idempotency_key=f"withdraw:{withdrawal_id}",
+                currency=currency,
+            )
+        except APIError:
+            with session_scope() as session:
+                orphan = session.query(WithdrawalRequest).get(withdrawal_id)
+                if orphan and orphan.status == WithdrawalStatus.PENDING:
+                    orphan.status = WithdrawalStatus.FAILED
+                    orphan.failure_reason = "Insufficient balance at debit time"
+            raise
 
         try:
             from app.wallet.tasks import process_withdrawal
@@ -598,6 +709,44 @@ class WalletService:
             if topup.status == TopUpStatus.COMPLETED:
                 return True
 
+            # Never credit on the strength of the event name alone. Paystack's
+            # own guidance is to confirm data.status, data.amount and
+            # data.currency against what was expected before giving value --
+            # the webhook body is attacker-shaped input right up until the
+            # signature check, and a signed-but-stale event can still carry an
+            # amount that doesn't match this top-up.
+            if gateway_response is not None:
+                expected_kobo = int(round(topup.amount * 100))
+                paid_status = gateway_response.get("status")
+                paid_kobo = gateway_response.get("amount")
+                paid_currency = gateway_response.get("currency")
+
+                if paid_status is not None and paid_status != "success":
+                    logger.warning(
+                        "Top-up %s not credited: gateway status is %s",
+                        topup.id,
+                        paid_status,
+                    )
+                    return False
+                if paid_kobo is not None and int(paid_kobo) != expected_kobo:
+                    logger.error(
+                        "Top-up %s amount mismatch: expected %s kobo, gateway "
+                        "reported %s kobo -- refusing to credit",
+                        topup.id,
+                        expected_kobo,
+                        paid_kobo,
+                    )
+                    return False
+                if paid_currency is not None and paid_currency != topup.currency:
+                    logger.error(
+                        "Top-up %s currency mismatch: expected %s, gateway "
+                        "reported %s -- refusing to credit",
+                        topup.id,
+                        topup.currency,
+                        paid_currency,
+                    )
+                    return False
+
             user_id = topup.user_id
             amount = topup.amount
             currency = topup.currency
@@ -615,6 +764,92 @@ class WalletService:
             currency=currency,
         )
         return True
+
+    @staticmethod
+    def verify_topup(topup_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+        """Confirm a top-up directly with Paystack and credit it if it landed.
+
+        The webhook is the primary path, but it is asynchronous and can be
+        delayed or lost. This gives the client (and the browser callback) a
+        synchronous server-side confirmation instead of trusting whatever the
+        redirect claims -- the client is never the authority on payment.
+        """
+        import requests
+        from app.payments.services import PaymentService
+
+        with session_scope() as session:
+            topup = session.query(WalletTopUp).get(topup_id)
+            if not topup:
+                raise NotFoundError("Top-up not found")
+            if user_id and topup.user_id != user_id:
+                raise NotFoundError("Top-up not found")
+
+            if topup.status == TopUpStatus.COMPLETED:
+                return {
+                    "topup_id": topup.id,
+                    "status": TopUpStatus.COMPLETED.value,
+                    "verified": True,
+                    "amount": topup.amount,
+                    "currency": topup.currency,
+                }
+
+            reference = topup.paystack_reference
+            amount = topup.amount
+            currency = topup.currency
+
+        if not reference:
+            raise ValidationError("No Paystack reference to verify")
+
+        try:
+            response = requests.get(
+                f"{PaymentService.PAYSTACK_BASE_URL}/transaction/verify/{reference}",
+                headers={
+                    "Authorization": f"Bearer {PaymentService.PAYSTACK_SECRET_KEY}"
+                },
+                timeout=20,
+            )
+            body = response.json()
+        except Exception:
+            logger.exception(
+                "Paystack verification call failed for top-up %s", topup_id
+            )
+            raise APIError("Could not verify top-up with Paystack", 502)
+
+        # `status` is whether the API call worked; `data.status` is whether the
+        # money actually moved. Both have to be right.
+        gateway_data = (body or {}).get("data") or {}
+        if response.status_code != 200 or not body.get("status"):
+            raise APIError("Could not verify top-up with Paystack", 502)
+
+        if gateway_data.get("status") == "success":
+            credited = WalletService.complete_topup(reference, gateway_data)
+            return {
+                "topup_id": topup_id,
+                "status": (
+                    TopUpStatus.COMPLETED.value
+                    if credited
+                    else TopUpStatus.PENDING.value
+                ),
+                "verified": credited,
+                "amount": amount,
+                "currency": currency,
+            }
+
+        # Paystack reports "failed" or "abandoned" as terminal; anything else
+        # (e.g. "ongoing") stays pending so the webhook can still settle it.
+        if gateway_data.get("status") in ("failed", "abandoned", "reversed"):
+            with session_scope() as session:
+                topup = session.query(WalletTopUp).get(topup_id)
+                if topup and topup.status == TopUpStatus.PENDING:
+                    topup.status = TopUpStatus.FAILED
+
+        return {
+            "topup_id": topup_id,
+            "status": (gateway_data.get("status") or TopUpStatus.PENDING.value),
+            "verified": False,
+            "amount": amount,
+            "currency": currency,
+        }
 
     @staticmethod
     def register_seller_payout_account(
