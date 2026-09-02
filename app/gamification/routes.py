@@ -17,7 +17,7 @@ from . import services
 from . import events  # noqa: F401 - importing registers signal handlers
 from .schemas import (
     GamMeSchema,
-    PublicProfileSchema,
+    GamificationProfileSchema,
     PointsHistoryResponseSchema,
     HistoryQueryArgs,
     LeaderboardResponseSchema,
@@ -62,7 +62,7 @@ class MyPreferences(MethodView):
 
 @bp.route("/users/<user_id>/profile")
 class PublicProfile(MethodView):
-    @bp.response(200, PublicProfileSchema)
+    @bp.response(200, GamificationProfileSchema)
     def get(self, user_id):
         """Public gamification profile: badges, tier, lifetime points."""
         return services.get_public_profile(user_id)
