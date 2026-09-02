@@ -8,11 +8,14 @@ from flask_login import login_user, logout_user, login_required, current_user
 from sqlalchemy import or_
 
 # project imports
+from flask import jsonify, make_response
+
 from app.libs.errors import (
     AuthError,
     NotFoundError,
     UnverifiedEmailError,
     APIError,
+    ConflictError,
 )
 from app.libs.auth_tokens import generate_auth_token
 from app.libs.pagination import Paginator
@@ -159,8 +162,26 @@ class AccountDeletion(MethodView):
         user_id = current_user.id
         try:
             result = AccountDeletionService.delete_account(user_id, data["password"])
+        except ConflictError as e:
+            # Built by hand rather than via abort(): flask-smorest's error
+            # handler renders only message/status/code and silently drops extra
+            # kwargs, so the blocker list never reached the client. The client
+            # needs the structured list to say *which* order or balance is in
+            # the way, not just a sentence.
+            blockers = (e.payload or {}).get("blockers") or []
+            return make_response(
+                jsonify(
+                    {
+                        "code": 409,
+                        "status": "Conflict",
+                        "message": e.message,
+                        "blockers": blockers,
+                    }
+                ),
+                409,
+            )
         except APIError as e:
-            abort(e.status_code, message=e.message, **(e.payload or {}))
+            abort(e.status_code, message=e.message)
 
         # Drop the session cookie too. Bearer tokens are stateless, so they
         # are refused by the loaders in main.setup on the strength of
