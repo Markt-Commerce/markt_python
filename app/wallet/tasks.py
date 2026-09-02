@@ -34,7 +34,16 @@ def settle_eligible_order_items():
     0: 12h after POD) has elapsed. POD itself only records delivered_at
     (see DeliveryService.confirm_order_qr_code / OrderService.
     update_order_item_status) -- this task is the only thing that actually
-    credits the seller's wallet."""
+    credits the seller's wallet.
+
+    Selects ids in one short transaction, then settles each item in its own.
+    Previously the whole loop ran inside a single session_scope and called
+    into WalletService, which opens its own -- and since session_scope hands
+    out the same scoped session, that inner commit also committed every
+    settled_at written so far. A crash mid-batch left a partial commit that
+    no longer looked like a batch. Selecting first also means a long payout
+    run no longer holds a read transaction open across every credit.
+    """
     from main.config import settings
     from app.orders.models import OrderItem
     from app.wallet.services import WalletService
@@ -44,8 +53,9 @@ def settle_eligible_order_items():
     failed_count = 0
 
     with session_scope() as session:
-        eligible_items = (
-            session.query(OrderItem)
+        eligible_ids = [
+            row[0]
+            for row in session.query(OrderItem.id)
             .filter(
                 OrderItem.status == OrderItem.Status.DELIVERED,
                 OrderItem.delivered_at.isnot(None),
@@ -53,18 +63,18 @@ def settle_eligible_order_items():
                 OrderItem.settled_at.is_(None),
             )
             .all()
-        )
+        ]
 
-        for item in eligible_items:
-            try:
-                WalletService.settle_order_item(item)
-                item.settled_at = datetime.utcnow()
+    for item_id in eligible_ids:
+        try:
+            # Re-checks eligibility under its own transaction, so an item
+            # settled by a concurrent run between the select and here is a
+            # no-op rather than a double payout.
+            if WalletService.settle_order_item_by_id(item_id) is not None:
                 settled_count += 1
-            except Exception:
-                failed_count += 1
-                logger.exception(
-                    "Failed to settle order item %s past its hold", item.id
-                )
+        except Exception:
+            failed_count += 1
+            logger.exception("Failed to settle order item %s past its hold", item_id)
 
     logger.info(
         "Settled %s order item(s) past the %sh hold (%s failed)",

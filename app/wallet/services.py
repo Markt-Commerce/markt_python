@@ -1,5 +1,6 @@
 import logging
 import uuid
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 from sqlalchemy.exc import IntegrityError
@@ -247,6 +248,63 @@ class WalletService:
             description=f"Settlement for order item {order_item.id}",
             idempotency_key=f"settle:item:{order_item.id}",
         )
+
+    @staticmethod
+    def settle_order_item_by_id(
+        order_item_id: int, commission_rate=DEFAULT_COMMISSION_RATE
+    ) -> Optional[WalletEntry]:
+        """Settle one item, each step in its own transaction.
+
+        The batch task used to hold a session open across the whole eligible
+        set and call settle_order_item() inside it. Because session_scope()
+        hands out the same scoped session, the credit's commit also committed
+        every settled_at written so far in that loop -- so a crash halfway
+        through left a partially-committed batch that no longer looked like a
+        batch. Splitting it into three sequential transactions per item
+        (read -> credit -> mark) keeps each item independently atomic.
+
+        Safe to re-run: the credit is keyed on settle:item:<id>, and
+        settled_at is only bookkeeping on top of that.
+        """
+        from app.orders.models import Order, OrderItem as OrderItemModel
+
+        with session_scope() as session:
+            item = session.query(OrderItemModel).get(order_item_id)
+            if item is None or item.settled_at is not None:
+                return None
+
+            order = session.query(Order).get(item.order_id)
+            if order and order.paystack_split_used:
+                return None
+
+            seller_user_id = item.seller.user_id if item.seller else None
+            gross = (item.price or 0) * (item.quantity or 0)
+
+        if not seller_user_id or gross <= 0:
+            return None
+
+        if not 0 <= commission_rate <= 1:
+            raise ValidationError(f"Invalid commission rate: {commission_rate}")
+
+        net = round(gross * (1 - commission_rate), 2)
+        if net <= 0:
+            return None
+
+        entry = WalletService.credit(
+            seller_user_id,
+            net,
+            WalletReferenceType.ORDER_SETTLEMENT,
+            str(order_item_id),
+            description=f"Settlement for order item {order_item_id}",
+            idempotency_key=f"settle:item:{order_item_id}",
+        )
+
+        with session_scope() as session:
+            item = session.query(OrderItemModel).get(order_item_id)
+            if item is not None and item.settled_at is None:
+                item.settled_at = datetime.utcnow()
+
+        return entry
 
     @staticmethod
     def refund_order_to_wallet(
