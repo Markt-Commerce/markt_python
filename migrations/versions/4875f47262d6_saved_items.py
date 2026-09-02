@@ -1,7 +1,7 @@
 """saved items
 
 Revision ID: 4875f47262d6
-Revises: 72bf175405d5
+Revises: 60c8535881c4
 Create Date: 2026-09-02 08:41:20.561025
 
 """
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = '4875f47262d6'
-down_revision = '72bf175405d5'
+down_revision = '60c8535881c4'
 branch_labels = None
 depends_on = None
 
