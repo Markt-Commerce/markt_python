@@ -15,7 +15,7 @@ from redis.exceptions import RedisError, ConnectionError as RedisConnectionError
 from external.database import db
 from external.redis import redis_client
 
-from app.libs.session import session_scope
+from app.libs.session import session_scope, read_scope
 from app.libs.pagination import Paginator
 from app.libs.errors import (
     NotFoundError,
@@ -2310,7 +2310,7 @@ class FeedService:
             avg_ratings = {}
 
             if post_ids:
-                with session_scope() as session:
+                with read_scope() as session:
                     posts = (
                         session.query(Post)
                         .options(
@@ -2331,7 +2331,7 @@ class FeedService:
                     ) = FeedService._batch_post_engagement_counts(session, post_ids)
 
             if product_ids:
-                with session_scope() as session:
+                with read_scope() as session:
                     products = (
                         session.query(Product)
                         .options(
@@ -2357,7 +2357,7 @@ class FeedService:
             # Batch: which posts has current user liked? (for liked_by_me)
             liked_post_ids = set()
             if user_id and post_ids:
-                with session_scope() as session:
+                with read_scope() as session:
                     rows = (
                         session.query(PostLike.post_id)
                         .filter(
@@ -2379,7 +2379,7 @@ class FeedService:
             follower_counts = {}  # followee_id -> count
             followed_by_me = set()  # followee_ids current user follows
             if seller_user_ids:
-                with session_scope() as session:
+                with read_scope() as session:
                     counts = (
                         session.query(
                             Follow.followee_id, func.count(Follow.follower_id)
