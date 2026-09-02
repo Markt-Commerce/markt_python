@@ -1,7 +1,7 @@
 """content reports and user blocks
 
 Revision ID: 60c8535881c4
-Revises: 72bf175405d5
+Revises: e143139d1aef
 Create Date: 2026-09-02 08:19:54.233813
 
 """
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = '60c8535881c4'
-down_revision = '72bf175405d5'
+down_revision = 'e143139d1aef'
 branch_labels = None
 depends_on = None
 
