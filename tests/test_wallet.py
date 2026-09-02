@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.libs.errors import ValidationError
+from app.libs.money import to_money
 from app.wallet.models import TopUpStatus, WalletReferenceType
 from app.wallet.services import DEFAULT_COMMISSION_RATE, WalletService
 
@@ -14,12 +15,14 @@ def test_settle_order_item_calculates_net_after_commission():
     item = SimpleNamespace(
         id=42,
         order_id="ORD_1",
-        price=10000.0,
+        # Money is Decimal end to end now (NUMERIC(12,2) columns), so the
+        # fixture uses the same type the ORM would hand back.
+        price=to_money("10000.00"),
         quantity=2,
         seller=SimpleNamespace(user_id="USR_SELLER1"),
     )
     gross = item.price * item.quantity
-    expected_net = round(gross * (1 - DEFAULT_COMMISSION_RATE), 2)
+    expected_net = to_money(gross * (1 - DEFAULT_COMMISSION_RATE))
 
     order = SimpleNamespace(paystack_split_used=False)
     session = MagicMock()
@@ -180,7 +183,12 @@ def test_balance_mutations_lock_the_wallet_row():
     session = MagicMock()
     # No existing entry for the idempotency key, so the write path is reached.
     session.query.return_value.filter_by.return_value.with_for_update.return_value.first.return_value = SimpleNamespace(  # noqa: E501
-        id=1, currency="NGN", available_balance=1000.0
+        # Decimal, matching what a NUMERIC(12,2) column hands back. A float
+        # here raises on contact with the Decimal amount -- which is the money
+        # refactor working as intended, not a regression.
+        id=1,
+        currency="NGN",
+        available_balance=to_money("1000.00"),
     )
     session.query.return_value.filter_by.return_value.first.return_value = None
 

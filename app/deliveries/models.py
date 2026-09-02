@@ -1,5 +1,6 @@
 from enum import Enum
 from external.database import db
+from app.libs.money import MONEY
 from flask_login import UserMixin
 from sqlalchemy.dialects.postgresql import JSONB
 from app.libs.models import BaseModel
@@ -277,8 +278,8 @@ class DeliveryRun(BaseModel, UniqueIdMixin):
     # 10.3 pricing -- null until the cutoff worker computes them (final
     # order count, and therefore the per-order shared price, isn't known
     # until the run stops accepting new orders).
-    base_price = db.Column(db.Float, nullable=True)
-    price_per_order = db.Column(db.Float, nullable=True)
+    base_price = db.Column(MONEY, nullable=True)
+    price_per_order = db.Column(MONEY, nullable=True)
     # 10.3 "surge-aware": the multiplier actually applied to the
     # placeholder base rate for this run, kept for transparency/audit --
     # see app.deliveries.runs' SURGE_* constants for how it's computed

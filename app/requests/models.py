@@ -1,5 +1,6 @@
 from enum import Enum
 from external.database import db
+from app.libs.money import MONEY
 from app.libs.models import BaseModel
 from app.libs.helpers import UniqueIdMixin
 from sqlalchemy.dialects.postgresql import JSONB
@@ -51,7 +52,7 @@ class BuyerRequest(BaseModel, UniqueIdMixin):
     user_id = db.Column(db.String(12), db.ForeignKey("users.id"))
     title = db.Column(db.String(100), nullable=False)
     description = db.Column(db.Text, nullable=False)
-    budget = db.Column(db.Float)
+    budget = db.Column(MONEY)
     status = db.Column(db.Enum(RequestStatus), default=RequestStatus.OPEN)
     request_metadata = db.Column(JSONB)  # For attributes, images etc
     expires_at = db.Column(db.DateTime)
@@ -92,7 +93,7 @@ class SellerOffer(BaseModel):
     request_id = db.Column(db.String(12), db.ForeignKey("buyer_requests.id"))
     seller_id = db.Column(db.Integer, db.ForeignKey("sellers.id"))
     product_id = db.Column(db.String(12), db.ForeignKey("products.id"), nullable=True)
-    price = db.Column(db.Float)
+    price = db.Column(MONEY)
     message = db.Column(db.Text)
     # Found and fixed a real bug while wiring 7.3's escalation flow (which
     # depends on offer-accept actually working): this was `db.String(20)`

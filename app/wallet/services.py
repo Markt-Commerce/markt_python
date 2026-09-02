@@ -1,12 +1,14 @@
 import logging
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Dict, Optional
 
 from sqlalchemy.exc import IntegrityError
 
 from app.libs.errors import APIError, NotFoundError, ValidationError, ConflictError
 from app.libs.session import session_scope
+from app.libs.money import to_money, to_subunit
 from app.orders.models import OrderItem
 
 from .models import (
@@ -26,8 +28,8 @@ logger = logging.getLogger(__name__)
 
 # Sellers keep 100% of item price for now — Markt earns only via the buyer-facing
 # service fee, not a seller-side commission.
-DEFAULT_COMMISSION_RATE = 0.0
-MIN_WITHDRAWAL_AMOUNT = 1000.0
+DEFAULT_COMMISSION_RATE = Decimal("0")
+MIN_WITHDRAWAL_AMOUNT = Decimal("1000.00")
 
 
 class WalletService:
@@ -58,7 +60,7 @@ class WalletService:
         savepoint = session.begin_nested()
         try:
             account = WalletAccount(
-                user_id=user_id, currency=currency, available_balance=0.0
+                user_id=user_id, currency=currency, available_balance=to_money(0)
             )
             session.add(account)
             savepoint.commit()
@@ -73,7 +75,7 @@ class WalletService:
             account = WalletService._get_or_create_account(session, user_id, currency)
             return {
                 "currency": account.currency,
-                "available_balance": round(account.available_balance, 2),
+                "available_balance": to_money(account.available_balance),
             }
 
     @staticmethod
@@ -116,7 +118,7 @@ class WalletService:
     @staticmethod
     def credit(
         user_id: str,
-        amount: float,
+        amount,
         reference_type: WalletReferenceType,
         reference_id: str,
         *,
@@ -124,7 +126,11 @@ class WalletService:
         idempotency_key: Optional[str] = None,
         currency: str = "NGN",
     ) -> WalletEntry:
-        if amount <= 0:
+        # The ledger boundary: callers pass ints, floats or Decimals from
+        # request bodies and gateway payloads. Everything becomes an exact 2dp
+        # Decimal here, so nothing downstream can mix a float into the balance.
+        amount = to_money(amount)
+        if amount is None or amount <= 0:
             raise ValidationError("Credit amount must be positive")
 
         with session_scope() as session:
@@ -150,11 +156,11 @@ class WalletService:
                 if existing:
                     return existing
 
-            account.available_balance = round(account.available_balance + amount, 2)
+            account.available_balance = to_money(account.available_balance + amount)
             entry = WalletEntry(
                 wallet_account_id=account.id,
                 entry_type=WalletEntryType.CREDIT,
-                amount=round(amount, 2),
+                amount=amount,
                 balance_after=account.available_balance,
                 reference_type=reference_type,
                 reference_id=reference_id,
@@ -168,7 +174,7 @@ class WalletService:
     @staticmethod
     def debit(
         user_id: str,
-        amount: float,
+        amount,
         reference_type: WalletReferenceType,
         reference_id: str,
         *,
@@ -176,7 +182,9 @@ class WalletService:
         idempotency_key: Optional[str] = None,
         currency: str = "NGN",
     ) -> WalletEntry:
-        if amount <= 0:
+        # See credit(): coerce at the boundary, stay Decimal from here on.
+        amount = to_money(amount)
+        if amount is None or amount <= 0:
             raise ValidationError("Debit amount must be positive")
 
         with session_scope() as session:
@@ -199,11 +207,11 @@ class WalletService:
             if account.available_balance < amount:
                 raise ValidationError("Insufficient wallet balance")
 
-            account.available_balance = round(account.available_balance - amount, 2)
+            account.available_balance = to_money(account.available_balance - amount)
             entry = WalletEntry(
                 wallet_account_id=account.id,
                 entry_type=WalletEntryType.DEBIT,
-                amount=round(amount, 2),
+                amount=amount,
                 balance_after=account.available_balance,
                 reference_type=reference_type,
                 reference_id=reference_id,
@@ -216,7 +224,7 @@ class WalletService:
 
     @staticmethod
     def settle_order_item(
-        order_item: OrderItem, commission_rate: float = DEFAULT_COMMISSION_RATE
+        order_item: OrderItem, commission_rate=DEFAULT_COMMISSION_RATE
     ) -> Optional[WalletEntry]:
         """Credit seller wallet when an order item is delivered."""
         from app.orders.models import Order
@@ -229,14 +237,15 @@ class WalletService:
         if not order_item.seller or not order_item.seller.user_id:
             return None
 
-        gross = (order_item.price or 0) * (order_item.quantity or 0)
+        commission_rate = Decimal(str(commission_rate))
+        gross = to_money(order_item.price or 0) * (order_item.quantity or 0)
         if gross <= 0:
             return None
 
         if not 0 <= commission_rate <= 1:
             raise ValidationError(f"Invalid commission rate: {commission_rate}")
 
-        net = round(gross * (1 - commission_rate), 2)
+        net = to_money(gross * (Decimal(1) - commission_rate))
         if net <= 0:
             return None
 
@@ -348,7 +357,7 @@ class WalletService:
 
     @staticmethod
     def request_withdrawal(user_id: str, data: Dict[str, Any]) -> WithdrawalRequest:
-        amount = float(data["amount"])
+        amount = to_money(data["amount"])
         if amount < MIN_WITHDRAWAL_AMOUNT:
             raise ValidationError(
                 f"Minimum withdrawal amount is {MIN_WITHDRAWAL_AMOUNT}"
@@ -483,7 +492,7 @@ class WalletService:
                 currency=currency,
             )
             transfer_data = PaystackTransferClient.initiate_transfer(
-                amount_kobo=int(round(amount * 100)),
+                amount_kobo=to_subunit(amount),
                 recipient_code=recipient_code,
                 reference=withdrawal_id,
             )
@@ -603,7 +612,8 @@ class WalletService:
         from app.users.models import User
         from main.config import settings
 
-        if amount < 100:
+        amount = to_money(amount)
+        if amount is None or amount < 100:
             raise ValidationError("Minimum top-up amount is 100")
 
         topup_id = None
@@ -614,7 +624,7 @@ class WalletService:
 
             topup = WalletTopUp(
                 user_id=user_id,
-                amount=round(amount, 2),
+                amount=amount,
                 currency=currency,
                 status=TopUpStatus.PENDING,
             )
@@ -631,7 +641,7 @@ class WalletService:
         )
 
         payload = {
-            "amount": int(round(amount * 100)),
+            "amount": to_subunit(amount),
             "email": user_email,
             "currency": currency,
             "reference": reference,
