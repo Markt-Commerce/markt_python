@@ -8,7 +8,12 @@ from flask_login import login_user, logout_user, login_required, current_user
 from sqlalchemy import or_
 
 # project imports
-from app.libs.errors import AuthError, NotFoundError, UnverifiedEmailError
+from app.libs.errors import (
+    AuthError,
+    NotFoundError,
+    UnverifiedEmailError,
+    APIError,
+)
 from app.libs.auth_tokens import generate_auth_token
 from app.libs.pagination import Paginator
 from app.libs.schemas import PaginationQueryArgs
@@ -50,6 +55,7 @@ from .services import (
     AuthService,
     UserService,
     AccountService,
+    PublicProfileService,
     SellerStartCardsService,
     SellerAnalyticsService,
 )
@@ -382,10 +388,22 @@ class ProfilePictureUpload(MethodView):
 class PublicProfile(MethodView):
     @bp.response(200, PublicProfileSchema)
     def get(self, user_id):
-        """View public profile"""
-        # TODO: Show public profile info
-        # TODO: Include social stats (followers, products)
-        # TODO: Privacy controls
+        """Public view of another user.
+
+        Was a stub -- three TODOs, no return, and an empty schema -- so it
+        500'd for anyone who called it. Nothing did, which is why the feed's
+        post-author header still links nowhere.
+
+        Deliberately open to anonymous callers (a shared product link should
+        render its seller), which is exactly why the schema is narrow.
+        """
+        try:
+            return PublicProfileService.get_public_profile(
+                user_id,
+                viewer_id=current_user.id if current_user.is_authenticated else None,
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
 
 
 @bp.route("/shops")
