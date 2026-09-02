@@ -1115,7 +1115,19 @@ class ShopService:
         try:
             with session_scope() as session:
                 # Build base query
-                query = session.query(Seller).join(User)
+                # joinedload: the loop below reads shop.user and
+                # shop.categories on every row, which lazy-loaded one query
+                # each per shop.
+                query = (
+                    session.query(Seller)
+                    .join(User)
+                    .options(
+                        joinedload(Seller.user),
+                        joinedload(Seller.categories).joinedload(
+                            SellerCategory.category
+                        ),
+                    )
+                )
 
                 # Market browsing (markets feature): server-determined from
                 # the URL path, not a client-supplied filter -- see
@@ -1167,6 +1179,14 @@ class ShopService:
 
                 shops = query.offset(offset).limit(per_page).all()
 
+                # Batched before the loop: _get_shop_stats was 4 queries per
+                # shop and _is_followed_by_user 1 more, so a 20-shop page cost
+                # ~100 round trips on top of the page query itself.
+                stats_by_shop = ShopService._batch_shop_stats(session, shops)
+                followed = ShopService._batch_is_followed(
+                    session, user_id, [s.user_id for s in shops if s.user_id]
+                )
+
                 # Enhance with additional data
                 enhanced_shops = []
                 for shop in shops:
@@ -1197,14 +1217,19 @@ class ShopService:
                             "username": shop.user.username,
                             "profile_picture": shop.user.profile_picture,
                         },
-                        "stats": ShopService._get_shop_stats(shop.id),
+                        "stats": stats_by_shop.get(
+                            shop.id,
+                            {
+                                "product_count": 0,
+                                "post_count": 0,
+                                "follower_count": 0,
+                            },
+                        ),
                     }
 
                     # Add follow status if user is authenticated
                     if user_id:
-                        shop_data["is_followed"] = ShopService._is_followed_by_user(
-                            shop.user_id, user_id
-                        )
+                        shop_data["is_followed"] = shop.user_id in followed
 
                     enhanced_shops.append(shop_data)
 
@@ -1487,6 +1512,71 @@ class ShopService:
                     return url
 
         return None
+
+    @staticmethod
+    def _batch_shop_stats(session, sellers):
+        """Product/post/follower counts for a page of shops, in 3 queries total.
+
+        _get_shop_stats issues four queries per shop, so a 20-shop directory
+        page cost ~80 on its own. These are GROUP BY aggregates keyed by id,
+        which is the same information in a fixed number of round trips.
+        """
+        if not sellers:
+            return {}
+
+        seller_ids = [s.id for s in sellers]
+        user_ids = [s.user_id for s in sellers if s.user_id]
+
+        product_counts = dict(
+            session.query(Product.seller_id, func.count(Product.id))
+            .filter(
+                Product.seller_id.in_(seller_ids),
+                Product.status == Product.Status.ACTIVE,
+            )
+            .group_by(Product.seller_id)
+            .all()
+        )
+
+        post_counts = {}
+        follower_counts = {}
+        if user_ids:
+            post_counts = dict(
+                session.query(Post.user_id, func.count(Post.id))
+                .filter(Post.user_id.in_(user_ids), Post.status == PostStatus.ACTIVE)
+                .group_by(Post.user_id)
+                .all()
+            )
+            follower_counts = dict(
+                session.query(Follow.followee_id, func.count(Follow.follower_id))
+                .filter(Follow.followee_id.in_(user_ids))
+                .group_by(Follow.followee_id)
+                .all()
+            )
+
+        return {
+            seller.id: {
+                "product_count": product_counts.get(seller.id, 0),
+                "post_count": post_counts.get(seller.user_id, 0),
+                "follower_count": follower_counts.get(seller.user_id, 0),
+            }
+            for seller in sellers
+        }
+
+    @staticmethod
+    def _batch_is_followed(session, user_id, shop_user_ids):
+        """Which of these shop owners the viewer follows -- one query, not one
+        per shop."""
+        if not user_id or not shop_user_ids:
+            return set()
+        rows = (
+            session.query(Follow.followee_id)
+            .filter(
+                Follow.follower_id == user_id,
+                Follow.followee_id.in_(list(shop_user_ids)),
+            )
+            .all()
+        )
+        return {r[0] for r in rows}
 
     @staticmethod
     def _get_shop_stats(shop_id):
