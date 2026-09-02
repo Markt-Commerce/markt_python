@@ -333,8 +333,39 @@ class SettingsUpdateSchema(Schema):
     pass
 
 
+class PublicShopSchema(Schema):
+    id = fields.Int()
+    shop_name = fields.Str(allow_none=True)
+    shop_slug = fields.Str(allow_none=True)
+    description = fields.Str(allow_none=True)
+    products_count = fields.Int()
+    average_rating = fields.Float(allow_none=True)
+    total_raters = fields.Int()
+    verification_status = fields.Str(allow_none=True)
+
+
 class PublicProfileSchema(Schema):
-    pass
+    """What anyone may see about another user.
+
+    Deliberately narrow: no email, no phone, no address, no order history.
+    Adding a field here makes it public to every caller, authenticated or not.
+    """
+
+    id = fields.Str()
+    username = fields.Str()
+    profile_picture = fields.Str(allow_none=True)
+    is_seller = fields.Bool()
+    joined_at = fields.Str(allow_none=True)
+
+    followers_count = fields.Int()
+    following_count = fields.Int()
+    posts_count = fields.Int()
+
+    # Viewer-relative; False for anonymous callers.
+    is_followed = fields.Bool()
+    is_self = fields.Bool()
+
+    shop = fields.Nested(PublicShopSchema, allow_none=True)
 
 
 # Legacy schema for backward compatibility

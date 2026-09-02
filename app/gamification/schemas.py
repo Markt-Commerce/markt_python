@@ -49,7 +49,11 @@ class GamMeSchema(Schema):
 
 
 # --- GET /users/{id}/profile --------------------------------------------------
-class PublicProfileSchema(Schema):
+# Not "PublicProfileSchema": app.users.schemas defines one of those too, and
+# apispec resolves both to the component name "PublicProfile" -- so one of them
+# was being silently renamed in the OpenAPI spec. This one is badges, tier and
+# points, which "gamification profile" describes better anyway.
+class GamificationProfileSchema(Schema):
     user_id = fields.Str()
     lifetime_points = fields.Int()
     tier = fields.Nested(TierSchema)

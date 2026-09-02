@@ -666,6 +666,119 @@ class UserService:
             return address
 
 
+class PublicProfileService:
+    """Read-only public view of another user.
+
+    Kept apart from UserService.get_user_profile, which returns the *owner's*
+    view including email, phone and address. Two audiences, two shapes -- the
+    thing that leaks PII is a single schema quietly serving both.
+    """
+
+    @staticmethod
+    def get_public_profile(
+        user_id: str, viewer_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        from app.socials.models import Follow, Post, PostStatus
+
+        with session_scope() as session:
+            user = session.query(User).get(user_id)
+            # getattr: deleted_at ships on the account-deletion branch. A
+            # deleted account must not be browsable once that lands.
+            if not user or getattr(user, "deleted_at", None) is not None:
+                raise NotFoundError("User not found")
+
+            is_self = bool(viewer_id and viewer_id == user_id)
+
+            if not user.is_active and not is_self:
+                raise NotFoundError("User not found")
+
+            # Counts are public here because they are already public in the
+            # feed -- product cards carry the seller's follower_count today.
+            # Hiding them on the profile would be inconsistent rather than
+            # private.
+            #
+            # UserSettings.privacy_public_profile exists and defaults to False,
+            # but nothing reads it. Gating on it as-written would hide every
+            # profile by default, including sellers', which would break the
+            # shop links this endpoint exists to serve. What it should actually
+            # gate is a product decision, so it is left alone rather than given
+            # invented semantics here.
+
+            followers_count = (
+                session.query(func.count(Follow.follower_id))
+                .filter(Follow.followee_id == user_id)
+                .scalar()
+                or 0
+            )
+            following_count = (
+                session.query(func.count(Follow.followee_id))
+                .filter(Follow.follower_id == user_id)
+                .scalar()
+                or 0
+            )
+            posts_count = (
+                session.query(func.count(Post.id))
+                .filter(Post.user_id == user_id, Post.status == PostStatus.ACTIVE)
+                .scalar()
+                or 0
+            )
+
+            is_followed = False
+            if viewer_id and not is_self:
+                is_followed = (
+                    session.query(Follow)
+                    .filter_by(follower_id=viewer_id, followee_id=user_id)
+                    .first()
+                    is not None
+                )
+
+            shop = None
+            seller = user.seller_account
+            if seller and seller.is_active:
+                products_count = (
+                    session.query(func.count(Product.id))
+                    .filter(
+                        Product.seller_id == seller.id,
+                        Product.status == Product.Status.ACTIVE,
+                    )
+                    .scalar()
+                    or 0
+                )
+                avg_rating = None
+                if seller.total_raters:
+                    avg_rating = round(
+                        (seller.total_rating or 0) / seller.total_raters, 2
+                    )
+                shop = {
+                    "id": seller.id,
+                    "shop_name": seller.shop_name,
+                    "shop_slug": seller.shop_slug,
+                    "description": seller.description,
+                    "products_count": products_count,
+                    "average_rating": avg_rating,
+                    "total_raters": seller.total_raters or 0,
+                    "verification_status": (
+                        seller.verification_status.value
+                        if seller.verification_status
+                        else None
+                    ),
+                }
+
+            return {
+                "id": user.id,
+                "username": user.username,
+                "profile_picture": user.profile_picture,
+                "is_seller": bool(user.is_seller),
+                "joined_at": (user.created_at.isoformat() if user.created_at else None),
+                "followers_count": followers_count,
+                "following_count": following_count,
+                "posts_count": posts_count,
+                "is_followed": is_followed,
+                "is_self": is_self,
+                "shop": shop,
+            }
+
+
 class AccountService:
     @staticmethod
     def create_buyer_account(user_id, data):
