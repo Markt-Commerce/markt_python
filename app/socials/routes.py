@@ -289,7 +289,17 @@ class PostDetail(MethodView):
     @bp.response(200, PostDetailSchema)
     def get(self, post_id):
         """Get post details"""
-        return PostService.get_post(post_id)
+        post = PostService.get_post(post_id)
+        # The feed sends liked_by_me and the detail screen reads it, but this
+        # endpoint never sent it — so opening a post you had already liked
+        # showed an empty heart and the next tap unliked it. Anonymous callers
+        # get False (the route is deliberately public).
+        post.liked_by_me = (
+            PostService.is_liked_by(post_id, current_user.id)
+            if current_user.is_authenticated
+            else False
+        )
+        return post
 
     @login_required
     @bp.arguments(PostUpdateSchema)
