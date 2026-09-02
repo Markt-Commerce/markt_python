@@ -574,3 +574,36 @@ class PostCommentReactionSchema(ReactionSchema):
     """Schema for comment reactions"""
 
     comment_id = fields.Int(dump_only=True)
+
+
+class SavedItemCreateSchema(Schema):
+    content_type = fields.Str(
+        required=True, validate=validate.OneOf(["post", "product"])
+    )
+    content_id = fields.Str(required=True, validate=validate.Length(min=1, max=12))
+
+
+class SavedToggleResponseSchema(Schema):
+    saved = fields.Bool()
+    content_type = fields.Str()
+    content_id = fields.Str()
+
+
+class SavedItemSchema(Schema):
+    content_type = fields.Str()
+    content_id = fields.Str()
+    saved_at = fields.Str(allow_none=True)
+    title = fields.Str(allow_none=True)
+    image_url = fields.Str(allow_none=True)
+    price = fields.Float(allow_none=True)
+
+
+class SavedItemsQuerySchema(PaginationQueryArgs):
+    content_type = fields.Str(
+        required=False, validate=validate.OneOf(["post", "product"])
+    )
+
+
+class SavedItemsListSchema(Schema):
+    items = fields.List(fields.Nested(SavedItemSchema))
+    pagination = fields.Dict()

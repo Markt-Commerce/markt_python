@@ -386,6 +386,33 @@ class PostLike(BaseModel):
     user = db.relationship("User")
 
 
+class SavedItemType(Enum):
+    POST = "post"
+    PRODUCT = "product"
+
+
+class SavedItem(BaseModel):
+    """A user's saved posts and products -- "save" on a post, "wishlist" on a
+    product, one table because the home feed mixes both and the client wants a
+    single saved list back.
+
+    Polymorphic over (content_type, content_id) for the same reason
+    ContentReport is: two nullable FKs plus a check constraint reads worse and
+    extends worse, and nothing needs to JOIN across both types at once.
+    """
+
+    __tablename__ = "saved_items"
+
+    user_id = db.Column(db.String(12), db.ForeignKey("users.id"), primary_key=True)
+    content_type = db.Column(db.Enum(SavedItemType), primary_key=True)
+    content_id = db.Column(db.String(12), primary_key=True)
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+    user = db.relationship("User")
+
+    __table_args__ = (db.Index("ix_saved_items_user_type", "user_id", "content_type"),)
+
+
 class PostComment(BaseModel, ReactionMixin):
     __tablename__ = "post_comments"
     id = db.Column(db.Integer, primary_key=True)
