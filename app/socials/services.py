@@ -2535,11 +2535,44 @@ class FeedService:
                     logger.warning(f"Skipping feed item {item_id}: {str(item_err)}")
                     continue
 
-            return hydrated_items
+            return FeedService._drop_blocked_authors(hydrated_items, user_id)
 
         except Exception as e:
             logger.error(f"Error hydrating cached items: {str(e)}")
             return []
+
+    @staticmethod
+    def _drop_blocked_authors(items, user_id=None):
+        """Remove content authored by anyone in a block relationship with the
+        viewer (App Store 1.2: blocking has to actually block something).
+
+        Applied at hydration rather than in the feed query because the ranked
+        feed is served from cache: filtering here means a block takes effect on
+        the very next request instead of whenever the cache next regenerates.
+
+        Deliberately fail-open -- if the block lookup errors, the user sees an
+        unfiltered feed rather than an empty one.
+        """
+        if not user_id or not items:
+            return items
+
+        try:
+            from app.moderation.services import ModerationService
+
+            blocked = ModerationService.blocked_user_ids(user_id)
+        except Exception as exc:
+            logger.warning("Block filter unavailable, serving unfiltered feed: %s", exc)
+            return items
+
+        if not blocked:
+            return items
+
+        def author_of(item):
+            if item.get("type") == "post":
+                return (item.get("user") or {}).get("id")
+            return ((item.get("seller") or {}).get("user") or {}).get("id")
+
+        return [item for item in items if author_of(item) not in blocked]
 
     # ------------------------------------------------------------------
     # Batch-loading helpers. Feed generation scores dozens/hundreds of
