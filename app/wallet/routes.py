@@ -15,10 +15,14 @@ from .schemas import (
     TopUpInitializeSchema,
     TopUpInitializeResponseSchema,
     TopUpVerifyResponseSchema,
+    BankListSchema,
+    ResolveAccountQuerySchema,
+    ResolvedAccountSchema,
     SellerPayoutAccountSchema,
     SellerPayoutAccountResponseSchema,
 )
 from .services import WalletService
+from .paystack_banks import PaystackBankClient
 
 bp = Blueprint(
     "wallet", __name__, description="User wallet operations", url_prefix="/wallet"
@@ -169,6 +173,38 @@ class WalletTopUpCallback(MethodView):
             except Exception:
                 pass
             return client_redirect("failed", topup_id=topup_id, error="server_error")
+
+
+@bp.route("/banks")
+class BankList(MethodView):
+    @login_required
+    @bp.response(200, BankListSchema)
+    def get(self):
+        """Banks a withdrawal can be sent to.
+
+        Exists so the withdrawal form can be a picker. It previously asked the
+        user to type a bank code, and a typo only surfaced as a failed transfer
+        after the wallet had already been debited.
+        """
+        try:
+            return {"banks": PaystackBankClient.list_banks()}
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/banks/resolve")
+class ResolveBankAccount(MethodView):
+    @login_required
+    @bp.arguments(ResolveAccountQuerySchema, location="query")
+    @bp.response(200, ResolvedAccountSchema)
+    def get(self, args):
+        """Whose account this is, so the user can confirm before withdrawing."""
+        try:
+            return PaystackBankClient.resolve_account(
+                args["account_number"], args["bank_code"]
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
 
 
 @bp.route("/seller/payout-account")

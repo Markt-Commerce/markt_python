@@ -82,3 +82,26 @@ class SellerPayoutAccountResponseSchema(Schema):
     subaccount_code = fields.Str()
     account_name = fields.Str()
     account_number_masked = fields.Str()
+
+
+class BankSchema(Schema):
+    name = fields.Str()
+    code = fields.Str()
+    slug = fields.Str(allow_none=True)
+    type = fields.Str(allow_none=True)
+
+
+class BankListSchema(Schema):
+    banks = fields.List(fields.Nested(BankSchema))
+
+
+class ResolveAccountQuerySchema(Schema):
+    account_number = fields.Str(required=True, validate=validate.Length(min=10, max=20))
+    bank_code = fields.Str(required=True, validate=validate.Length(min=3, max=10))
+
+
+class ResolvedAccountSchema(Schema):
+    account_number = fields.Str()
+    account_name = fields.Str(allow_none=True)
+    bank_code = fields.Str()
+    resolved = fields.Bool()
