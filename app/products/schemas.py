@@ -118,3 +118,18 @@ class ProductSimpleSchema(Schema):
 class BulkProductResultSchema(Schema):
     success = fields.List(fields.Dict(), required=True)
     errors = fields.List(fields.Dict(), required=True)
+
+
+class ProductShareLinkSchema(Schema):
+    """Canonical links for sharing a product.
+
+    Both are returned because a share sheet has no idea whether the recipient
+    has the app: `deep_link` opens it directly, `web_url` is the fallback that
+    works for anyone and can itself bounce into the app.
+    """
+
+    product_id = fields.Str()
+    product_name = fields.Str()
+    deep_link = fields.Str()
+    web_url = fields.Str()
+    message = fields.Str()
