@@ -1,6 +1,7 @@
 # python imports
 import logging
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Optional, Dict, Any, List
 import json
 
@@ -11,6 +12,7 @@ from sqlalchemy.orm import joinedload
 from external.redis import redis_client
 from external.database import db
 from app.libs.session import session_scope
+from app.libs.money import to_money
 from app.products.models import Product
 from app.libs.errors import (
     NotFoundError,
@@ -565,12 +567,12 @@ class CartService:
         solved.
         """
         if not shipping_address or not cart.items:
-            return 0.0
+            return to_money(0)
 
         from app.deliveries.runs import DEFAULT_BASE_PRICE
 
         distinct_deliveries = CartService.count_distinct_deliveries(cart)
-        return round(DEFAULT_BASE_PRICE * distinct_deliveries, 2)
+        return to_money(to_money(DEFAULT_BASE_PRICE) * distinct_deliveries)
 
     @staticmethod
     def count_distinct_deliveries(cart: Cart) -> int:
@@ -606,11 +608,11 @@ class CartService:
         # TODO: Implement actual tax calculation logic
         # For now, return a simple percentage (e.g., 5% VAT for Nigeria)
         if not shipping_address:
-            return 0.0
+            return to_money(0)
 
         # Basic tax calculation: 5% VAT (can be enhanced with location-based tax)
-        tax_rate = 0.05  # 5%
-        return subtotal * tax_rate
+        tax_rate = Decimal("0.05")  # 5%
+        return to_money(to_money(subtotal) * tax_rate)
 
     @staticmethod
     def _calculate_discount(subtotal: float, coupon_code: Optional[str]) -> float:
@@ -618,11 +620,11 @@ class CartService:
         # TODO: Implement actual coupon validation and discount calculation
         # For now, return 0 if no coupon or coupon is invalid
         if not coupon_code:
-            return 0.0
+            return to_money(0)
 
         # Placeholder: Return 0 for now until coupon system is implemented
         # This should validate coupon, check expiry, calculate discount amount/percentage
-        return 0.0
+        return to_money(0)
 
     @staticmethod
     def _notify_seller_cart_addition(seller_id: int, product_id: str, quantity: int):

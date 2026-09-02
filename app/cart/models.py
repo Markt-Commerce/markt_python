@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from external.database import db
+from app.libs.money import MONEY
 from app.libs.models import BaseModel
 
 
@@ -47,7 +48,7 @@ class CartItem(BaseModel):
         db.Integer, db.ForeignKey("product_variants.id"), nullable=True
     )
     quantity = db.Column(db.Integer, default=1)
-    product_price = db.Column(db.Float)  # Snapshot of price at time of adding
+    product_price = db.Column(MONEY)  # Snapshot of price at time of adding
 
     cart = db.relationship("Cart", back_populates="items")
     product = db.relationship("Product")

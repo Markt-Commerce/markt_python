@@ -1,6 +1,7 @@
 from enum import Enum
 
 from external.database import db
+from app.libs.money import MONEY
 from app.libs.models import BaseModel
 from app.libs.helpers import UniqueIdMixin
 
@@ -38,7 +39,7 @@ class WalletAccount(BaseModel):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.String(12), db.ForeignKey("users.id"), nullable=False)
     currency = db.Column(db.String(3), default="NGN", nullable=False)
-    available_balance = db.Column(db.Float, default=0.0, nullable=False)
+    available_balance = db.Column(MONEY, default=0.0, nullable=False)
 
     user = db.relationship("User", back_populates="wallet_accounts")
     entries = db.relationship(
@@ -58,8 +59,8 @@ class WalletEntry(BaseModel):
         db.Integer, db.ForeignKey("wallet_accounts.id"), nullable=False
     )
     entry_type = db.Column(db.Enum(WalletEntryType), nullable=False)
-    amount = db.Column(db.Float, nullable=False)
-    balance_after = db.Column(db.Float, nullable=False)
+    amount = db.Column(MONEY, nullable=False)
+    balance_after = db.Column(MONEY, nullable=False)
     reference_type = db.Column(db.Enum(WalletReferenceType), nullable=False)
     reference_id = db.Column(db.String(50), nullable=False)
     description = db.Column(db.String(255))
@@ -74,7 +75,7 @@ class WithdrawalRequest(BaseModel, UniqueIdMixin):
 
     id = db.Column(db.String(12), primary_key=True, default=None)
     user_id = db.Column(db.String(12), db.ForeignKey("users.id"), nullable=False)
-    amount = db.Column(db.Float, nullable=False)
+    amount = db.Column(MONEY, nullable=False)
     currency = db.Column(db.String(3), default="NGN", nullable=False)
     bank_code = db.Column(db.String(10), nullable=False)
     account_number = db.Column(db.String(20), nullable=False)
@@ -94,7 +95,7 @@ class WalletTopUp(BaseModel, UniqueIdMixin):
 
     id = db.Column(db.String(12), primary_key=True, default=None)
     user_id = db.Column(db.String(12), db.ForeignKey("users.id"), nullable=False)
-    amount = db.Column(db.Float, nullable=False)
+    amount = db.Column(MONEY, nullable=False)
     currency = db.Column(db.String(3), default="NGN", nullable=False)
     status = db.Column(
         db.Enum(TopUpStatus), default=TopUpStatus.PENDING, nullable=False

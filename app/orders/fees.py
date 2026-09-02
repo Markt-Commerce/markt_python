@@ -9,47 +9,59 @@ placeholder shipping/tax math -- fixing that is a separate decision, not
 bundled into this module.
 """
 
+from decimal import Decimal
 from typing import Any, Dict
 
+from app.libs.money import to_money
+
+# Rates and money literals are Decimal so they compose with the Decimal
+# amounts coming off NUMERIC(12,2) columns. A float here would raise
+# TypeError on contact -- which is the point: it makes an accidental
+# float-in-money-math impossible to merge rather than silently lossy.
+
 # 11.3 / Phase 0 decision.
-SERVICE_FEE_RATE = 0.025
-SERVICE_FEE_FLOOR = 25.0
-SERVICE_FEE_CEILING = 1000.0
+SERVICE_FEE_RATE = Decimal("0.025")
+SERVICE_FEE_FLOOR = Decimal("25.00")
+SERVICE_FEE_CEILING = Decimal("1000.00")
 
 # 11.2 / Phase 0 decision.
-RELIABILITY_FEE_RATE = 0.10
-RELIABILITY_FEE_CEILING = 1500.0
+RELIABILITY_FEE_RATE = Decimal("0.10")
+RELIABILITY_FEE_CEILING = Decimal("1500.00")
 
 # 11.4: permitted AUTO price variation before requiring ASK approval
 # (Phase 0 decision).
-SUBSTITUTION_HEADROOM_RATE = 0.05
+SUBSTITUTION_HEADROOM_RATE = Decimal("0.05")
+
+ZERO = Decimal("0.00")
 
 
-def calculate_service_fee(subtotal: float) -> float:
+def calculate_service_fee(subtotal) -> Decimal:
     """11.3: a capped percentage -- floor so tiny orders still cover
     cost, ceiling so large baskets don't feel gouged."""
+    subtotal = to_money(subtotal) or ZERO
     if subtotal <= 0:
-        return 0.0
+        return ZERO
     fee = subtotal * SERVICE_FEE_RATE
-    return round(min(max(fee, SERVICE_FEE_FLOOR), SERVICE_FEE_CEILING), 2)
+    return to_money(min(max(fee, SERVICE_FEE_FLOOR), SERVICE_FEE_CEILING))
 
 
-def calculate_reliability_fee_estimate(subtotal: float) -> float:
+def calculate_reliability_fee_estimate(subtotal) -> Decimal:
     """11.2: 10% of order value, capped flat. This is an ESTIMATE shown
     to the buyer at checkout for transparency -- it must never be added
     into the captured total. It's only actually charged if a reroute
     fires, and rerouting doesn't exist yet (Phase 6)."""
+    subtotal = to_money(subtotal) or ZERO
     if subtotal <= 0:
-        return 0.0
-    return round(min(subtotal * RELIABILITY_FEE_RATE, RELIABILITY_FEE_CEILING), 2)
+        return ZERO
+    return to_money(min(subtotal * RELIABILITY_FEE_RATE, RELIABILITY_FEE_CEILING))
 
 
 def calculate_capture_ceiling(
-    subtotal: float,
-    shipping_fee: float,
-    service_fee: float,
+    subtotal,
+    shipping_fee,
+    service_fee,
     reliability_fee_opted_in: bool,
-) -> float:
+) -> Decimal:
     """11.4: the max the buyer could ever be charged today, covering the
     permitted substitution headroom plus the reliability fee if toggled.
 
@@ -57,16 +69,19 @@ def calculate_capture_ceiling(
     checkout), so this figure is informational -- shown to the buyer for
     transparency about worst case -- rather than a PSP-level authorization
     hold."""
-    item_headroom = round(subtotal * SUBSTITUTION_HEADROOM_RATE, 2)
+    subtotal = to_money(subtotal) or ZERO
+    shipping_fee = to_money(shipping_fee) or ZERO
+    service_fee = to_money(service_fee) or ZERO
+    item_headroom = to_money(subtotal * SUBSTITUTION_HEADROOM_RATE)
     ceiling = subtotal + item_headroom + shipping_fee + service_fee
     if reliability_fee_opted_in:
         ceiling += calculate_reliability_fee_estimate(subtotal)
-    return round(ceiling, 2)
+    return to_money(ceiling)
 
 
 def build_fee_breakdown(
-    subtotal: float,
-    shipping_fee: float,
+    subtotal,
+    shipping_fee,
     reliability_fee_opted_in: bool = False,
     delivery_count: int = 1,
 ) -> Dict[str, Any]:
@@ -85,17 +100,19 @@ def build_fee_breakdown(
     client infer it from the shipping_fee number, so a multi-market
     basket can show a real, specific warning instead of guessing.
     """
+    subtotal = to_money(subtotal) or ZERO
+    shipping_fee = to_money(shipping_fee) or ZERO
     service_fee = calculate_service_fee(subtotal)
     reliability_fee_estimate = (
         calculate_reliability_fee_estimate(subtotal)
         if reliability_fee_opted_in
-        else 0.0
+        else ZERO
     )
-    total = round(subtotal + shipping_fee + service_fee, 2)
+    total = to_money(subtotal + shipping_fee + service_fee)
 
     return {
-        "subtotal": round(subtotal, 2),
-        "shipping_fee": round(shipping_fee, 2),
+        "subtotal": subtotal,
+        "shipping_fee": shipping_fee,
         "delivery_count": delivery_count,
         "service_fee": service_fee,
         "reliability_fee_opted_in": reliability_fee_opted_in,

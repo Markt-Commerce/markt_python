@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.libs.errors import ValidationError
+from app.libs.money import to_money
 from app.wallet.models import WalletReferenceType
 from app.wallet.services import DEFAULT_COMMISSION_RATE, WalletService
 
@@ -14,12 +15,14 @@ def test_settle_order_item_calculates_net_after_commission():
     item = SimpleNamespace(
         id=42,
         order_id="ORD_1",
-        price=10000.0,
+        # Money is Decimal end to end now (NUMERIC(12,2) columns), so the
+        # fixture uses the same type the ORM would hand back.
+        price=to_money("10000.00"),
         quantity=2,
         seller=SimpleNamespace(user_id="USR_SELLER1"),
     )
     gross = item.price * item.quantity
-    expected_net = round(gross * (1 - DEFAULT_COMMISSION_RATE), 2)
+    expected_net = to_money(gross * (1 - DEFAULT_COMMISSION_RATE))
 
     order = SimpleNamespace(paystack_split_used=False)
     session = MagicMock()

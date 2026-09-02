@@ -1,6 +1,7 @@
 from enum import Enum
 from datetime import datetime
 from external.database import db
+from app.libs.money import MONEY
 from app.libs.models import BaseModel, StatusMixin
 from app.libs.helpers import UniqueIdMixin
 from sqlalchemy.dialects.postgresql import JSONB
@@ -25,21 +26,21 @@ class Order(BaseModel, UniqueIdMixin):
     id = db.Column(db.String(12), primary_key=True, default=None)
     buyer_id = db.Column(db.Integer, db.ForeignKey("buyers.id"))
     order_number = db.Column(db.String(21), unique=True)
-    subtotal = db.Column(db.Float)
-    shipping_fee = db.Column(db.Float)
-    tax = db.Column(db.Float)
-    discount = db.Column(db.Float)
+    subtotal = db.Column(MONEY)
+    shipping_fee = db.Column(MONEY)
+    tax = db.Column(MONEY)
+    discount = db.Column(MONEY)
     # Buyer-facing Service Fee (11.3, Phase 0: 2.5%, floor ₦25, ceiling
     # ₦1,000). Nullable: orders from the pre-existing order-first checkout
     # flow predate this fee and never set it.
-    service_fee = db.Column(db.Float, nullable=True)
+    service_fee = db.Column(MONEY, nullable=True)
     # Reliability Fee (11.2, Phase 0: 10% of order value, capped ₦1,500) --
     # opt-in, and only ever actually charged if a reroute fires. Rerouting
     # doesn't exist yet (Phase 6), so today this is toggle + estimate only;
     # reliability_fee_estimate is NEVER added to `total`/captured amount.
     reliability_fee_opted_in = db.Column(db.Boolean, default=False, nullable=False)
-    reliability_fee_estimate = db.Column(db.Float, nullable=True)
-    total = db.Column(db.Float)
+    reliability_fee_estimate = db.Column(MONEY, nullable=True)
+    total = db.Column(MONEY)
     status = db.Column(db.Enum(OrderStatus), default=OrderStatus.PENDING_PAYMENT)
     billing_address = db.Column(JSONB)
     customer_note = db.Column(db.Text)
@@ -138,7 +139,7 @@ class OrderItem(BaseModel, StatusMixin):
     )
     seller_id = db.Column(db.Integer, db.ForeignKey("sellers.id"))
     quantity = db.Column(db.Integer)
-    price = db.Column(db.Float)
+    price = db.Column(MONEY)
     # When this item was marked DELIVERED -- starts the settlement hold
     # (Phase 0: 12h). Set by whichever path transitions the item, never by
     # WalletService itself.
@@ -253,7 +254,7 @@ class OrderReturn(BaseModel, UniqueIdMixin):
     status = db.Column(
         db.Enum(OrderReturnStatus), default=OrderReturnStatus.REQUESTED, nullable=False
     )
-    refund_amount = db.Column(db.Float, nullable=True)
+    refund_amount = db.Column(MONEY, nullable=True)
     seller_notes = db.Column(db.Text, nullable=True)
 
     order = db.relationship("Order", back_populates="returns")
