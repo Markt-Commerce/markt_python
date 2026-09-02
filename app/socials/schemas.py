@@ -409,6 +409,18 @@ class PostDetailSchema(PostSchema):
     # Matches the feed's field of the same name. False for anonymous callers.
     liked_by_me = fields.Bool(dump_only=True, dump_default=False)
 
+    # The feed serializes these counts as likes_count/comments_count while this
+    # schema has always called them like_count/comment_count. Clients then have
+    # to know which endpoint they're talking to for the same two numbers --
+    # which is exactly how the missing liked_by_me went unnoticed.
+    #
+    # Emitted under both names rather than renamed: renaming would break every
+    # existing consumer of this endpoint for no functional gain. New code should
+    # read the plural (feed) spelling; the singular pair stays for compatibility
+    # and can be dropped once nothing reads it.
+    likes_count = fields.Int(attribute="like_count", dump_only=True)
+    comments_count = fields.Int(attribute="comment_count", dump_only=True)
+
 
 class PostDetailSearchResultSchema(Schema):
     items = fields.List(fields.Nested(PostDetailSchema))
