@@ -32,6 +32,13 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
     is_admin = db.Column(db.Boolean, default=False, nullable=False)
     is_active = db.Column(db.Boolean, default=True)
     deactivated_at = db.Column(db.DateTime)
+    # Set when the user deletes their account (Apple App Store 5.1.1(v)).
+    # Distinct from deactivated_at, which is reversible: once this is set the
+    # row has already been stripped of personal data and can never be signed
+    # into again. The row itself survives only so that posts, reviews, chat
+    # threads and order history belonging to other people stay coherent --
+    # see AccountDeletionService.
+    deleted_at = db.Column(db.DateTime, nullable=True, index=True)
 
     # Email verification
     email_verified = db.Column(db.Boolean, default=False)
@@ -114,6 +121,11 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
     def check_password(self, password):
         from passlib.hash import pbkdf2_sha256
 
+        # Account deletion destroys the hash outright, and passlib raises on a
+        # null hash rather than returning False -- which would surface as a 500
+        # instead of "invalid credentials".
+        if not self.password_hash:
+            return False
         return pbkdf2_sha256.verify(password, self.password_hash)
 
     @property
