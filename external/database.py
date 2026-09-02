@@ -75,6 +75,7 @@ class Database:
                 ChatDiscount,
             )
             from app.cart.models import Cart, CartItem
+            from app.moderation.models import ContentReport, UserBlock
             from app.deliveries.models import (
                 DeliveryUser,
                 DeliveryLastLocation,
