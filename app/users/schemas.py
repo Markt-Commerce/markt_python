@@ -443,3 +443,35 @@ class AnalyticsTimeseriesQuerySchema(Schema):
 
 class AnalyticsOverviewQuerySchema(Schema):
     window_days = fields.Int(missing=30, validate=validate.Range(min=1, max=365))
+
+
+# Account deletion (Apple App Store 5.1.1(v))
+class AccountDeletionBlockerSchema(Schema):
+    code = fields.Str()
+    message = fields.Str()
+    detail = fields.Dict()
+
+
+class AccountDeletionPreviewSchema(Schema):
+    can_delete = fields.Bool()
+    blockers = fields.List(fields.Nested(AccountDeletionBlockerSchema))
+
+
+class AccountDeletionRequestSchema(Schema):
+    """Deletion is irreversible, so it takes the password rather than relying
+    on the 30-day bearer token alone, plus a typed confirmation the UI makes
+    the user enter."""
+
+    password = fields.Str(required=True, load_only=True)
+    confirmation = fields.Str(
+        required=True,
+        validate=validate.Equal(
+            "DELETE", error="Type DELETE to confirm account deletion"
+        ),
+    )
+
+
+class AccountDeletionResponseSchema(Schema):
+    deleted = fields.Bool()
+    user_id = fields.Str()
+    message = fields.Str()

@@ -1,6 +1,7 @@
 from enum import Enum
 
 from external.database import db
+from app.libs.money import MONEY
 from app.libs.models import BaseModel, StatusMixin
 from app.libs.helpers import UniqueIdMixin
 
@@ -33,9 +34,9 @@ class Product(BaseModel, StatusMixin, UniqueIdMixin):
     )  # Will be auto-generated
     name = db.Column(db.String(100), nullable=False)
     description = db.Column(db.Text)
-    price = db.Column(db.Float, nullable=False)
-    compare_at_price = db.Column(db.Float)
-    cost_per_item = db.Column(db.Float)
+    price = db.Column(MONEY, nullable=False)
+    compare_at_price = db.Column(MONEY)
+    cost_per_item = db.Column(MONEY)
     stock = db.Column(db.Integer, default=0)
     sku = db.Column(db.String(50), unique=True)
     barcode = db.Column(db.String(50))

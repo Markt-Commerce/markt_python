@@ -100,7 +100,10 @@ def create_app():
         def load_user(user_id):
             user = User.query.get(user_id)
             if user:
-                return user
+                # A deleted account keeps its row so other people's posts,
+                # reviews and order history stay coherent, but it must never
+                # authenticate again (see AccountDeletionService).
+                return None if user.deleted_at else user
 
             delivery_user = DeliveryUser.query.get(user_id)
             if delivery_user:
@@ -131,7 +134,10 @@ def create_app():
 
             user = User.query.get(user_id)
             if user:
-                return user
+                # Bearer tokens are stateless signed user ids with a 30-day
+                # life, so this is the only thing that stops a token issued
+                # before deletion from continuing to work.
+                return None if user.deleted_at else user
             return DeliveryUser.query.get(user_id)
 
         # Register routes

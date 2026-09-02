@@ -50,8 +50,13 @@ from .schemas import (
     ReactionCreateSchema,
     ReactionSummarySchema,
     PostCommentReactionSchema,
+    SavedItemCreateSchema,
+    SavedToggleResponseSchema,
+    SavedItemsQuerySchema,
+    SavedItemsListSchema,
 )
 from .services import (
+    SavedItemService,
     PostService,
     FollowService,
     FeedService,
@@ -284,7 +289,17 @@ class PostDetail(MethodView):
     @bp.response(200, PostDetailSchema)
     def get(self, post_id):
         """Get post details"""
-        return PostService.get_post(post_id)
+        post = PostService.get_post(post_id)
+        # The feed sends liked_by_me and the detail screen reads it, but this
+        # endpoint never sent it — so opening a post you had already liked
+        # showed an empty heart and the next tap unliked it. Anonymous callers
+        # get False (the route is deliberately public).
+        post.liked_by_me = (
+            PostService.is_liked_by(post_id, current_user.id)
+            if current_user.is_authenticated
+            else False
+        )
+        return post
 
     @login_required
     @bp.arguments(PostUpdateSchema)
@@ -611,5 +626,47 @@ class CommentReactionDetail(MethodView):
                 current_user.id, comment_id, reaction_type
             )
             return "", 204
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/saved")
+class SavedItems(MethodView):
+    @login_required
+    @bp.arguments(SavedItemsQuerySchema, location="query")
+    @bp.response(200, SavedItemsListSchema)
+    def get(self, args):
+        """The signed-in user's saved posts and wishlisted products."""
+        try:
+            return SavedItemService.list_saved(
+                current_user.id,
+                content_type=args.get("content_type"),
+                page=args.get("page", 1),
+                per_page=args.get("per_page", 20),
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+    @login_required
+    @bp.arguments(SavedItemCreateSchema)
+    @bp.response(201, SavedToggleResponseSchema)
+    def post(self, data):
+        """Save a post or wishlist a product. Saving twice is a no-op."""
+        try:
+            return SavedItemService.save(
+                current_user.id, data["content_type"], data["content_id"]
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/saved/<content_type>/<content_id>")
+class SavedItemDetail(MethodView):
+    @login_required
+    @bp.response(200, SavedToggleResponseSchema)
+    def delete(self, content_type, content_id):
+        """Unsave. Idempotent -- unsaving something not saved is fine."""
+        try:
+            return SavedItemService.unsave(current_user.id, content_type, content_id)
         except APIError as e:
             abort(e.status_code, message=e.message)

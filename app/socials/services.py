@@ -15,7 +15,7 @@ from redis.exceptions import RedisError, ConnectionError as RedisConnectionError
 from external.database import db
 from external.redis import redis_client
 
-from app.libs.session import session_scope
+from app.libs.session import session_scope, read_scope
 from app.libs.pagination import Paginator
 from app.libs.errors import (
     NotFoundError,
@@ -1067,6 +1067,24 @@ class PostService:
         except SQLAlchemyError as e:
             logger.error(f"Error fetching post {post_id}: {str(e)}")
             raise NotFoundError("Failed to fetch post")
+
+    @staticmethod
+    def is_liked_by(post_id: str, user_id: str) -> bool:
+        """Whether this user has already liked the post.
+
+        The feed computes this in batch during hydration; the detail endpoint
+        needs the single-post answer so an already-liked post doesn't open with
+        an empty heart.
+        """
+        if not post_id or not user_id:
+            return False
+        with session_scope() as session:
+            return (
+                session.query(PostLike.post_id)
+                .filter_by(post_id=post_id, user_id=user_id)
+                .first()
+                is not None
+            )
 
     @staticmethod
     def get_post_with_niche_context(post_id):
@@ -2310,7 +2328,7 @@ class FeedService:
             avg_ratings = {}
 
             if post_ids:
-                with session_scope() as session:
+                with read_scope() as session:
                     posts = (
                         session.query(Post)
                         .options(
@@ -2331,7 +2349,7 @@ class FeedService:
                     ) = FeedService._batch_post_engagement_counts(session, post_ids)
 
             if product_ids:
-                with session_scope() as session:
+                with read_scope() as session:
                     products = (
                         session.query(Product)
                         .options(
@@ -2357,7 +2375,7 @@ class FeedService:
             # Batch: which posts has current user liked? (for liked_by_me)
             liked_post_ids = set()
             if user_id and post_ids:
-                with session_scope() as session:
+                with read_scope() as session:
                     rows = (
                         session.query(PostLike.post_id)
                         .filter(
@@ -2379,7 +2397,7 @@ class FeedService:
             follower_counts = {}  # followee_id -> count
             followed_by_me = set()  # followee_ids current user follows
             if seller_user_ids:
-                with session_scope() as session:
+                with read_scope() as session:
                     counts = (
                         session.query(
                             Follow.followee_id, func.count(Follow.follower_id)
@@ -2535,11 +2553,44 @@ class FeedService:
                     logger.warning(f"Skipping feed item {item_id}: {str(item_err)}")
                     continue
 
-            return hydrated_items
+            return FeedService._drop_blocked_authors(hydrated_items, user_id)
 
         except Exception as e:
             logger.error(f"Error hydrating cached items: {str(e)}")
             return []
+
+    @staticmethod
+    def _drop_blocked_authors(items, user_id=None):
+        """Remove content authored by anyone in a block relationship with the
+        viewer (App Store 1.2: blocking has to actually block something).
+
+        Applied at hydration rather than in the feed query because the ranked
+        feed is served from cache: filtering here means a block takes effect on
+        the very next request instead of whenever the cache next regenerates.
+
+        Deliberately fail-open -- if the block lookup errors, the user sees an
+        unfiltered feed rather than an empty one.
+        """
+        if not user_id or not items:
+            return items
+
+        try:
+            from app.moderation.services import ModerationService
+
+            blocked = ModerationService.blocked_user_ids(user_id)
+        except Exception as exc:
+            logger.warning("Block filter unavailable, serving unfiltered feed: %s", exc)
+            return items
+
+        if not blocked:
+            return items
+
+        def author_of(item):
+            if item.get("type") == "post":
+                return (item.get("user") or {}).get("id")
+            return ((item.get("seller") or {}).get("user") or {}).get("id")
+
+        return [item for item in items if author_of(item) not in blocked]
 
     # ------------------------------------------------------------------
     # Batch-loading helpers. Feed generation scores dozens/hundreds of
@@ -4167,3 +4218,183 @@ class TrendingService:
                     "total_pages": 0,
                 },
             }
+
+
+class SavedItemService:
+    """Saved posts and wishlisted products.
+
+    One service because the home feed mixes both and the client wants a single
+    saved list back -- see SavedItem.
+    """
+
+    @staticmethod
+    def _resolve_type(content_type: str):
+        from .models import SavedItemType
+
+        try:
+            return SavedItemType(content_type)
+        except ValueError:
+            raise ValidationError("Unknown content type")
+
+    @staticmethod
+    def save(user_id: str, content_type: str, content_id: str):
+        from .models import SavedItem, SavedItemType
+        from app.products.models import Product
+
+        ctype = SavedItemService._resolve_type(content_type)
+
+        with session_scope() as session:
+            if ctype == SavedItemType.POST:
+                exists = session.query(Post.id).filter_by(id=content_id).first()
+            else:
+                exists = session.query(Product.id).filter_by(id=content_id).first()
+            if not exists:
+                raise NotFoundError("That item no longer exists")
+
+            existing = (
+                session.query(SavedItem)
+                .filter_by(user_id=user_id, content_type=ctype, content_id=content_id)
+                .first()
+            )
+            # Saving twice is the same intent as saving once, so report success
+            # rather than a conflict.
+            if not existing:
+                session.add(
+                    SavedItem(
+                        user_id=user_id, content_type=ctype, content_id=content_id
+                    )
+                )
+                session.flush()
+
+        return {"saved": True, "content_type": content_type, "content_id": content_id}
+
+    @staticmethod
+    def unsave(user_id: str, content_type: str, content_id: str):
+        from .models import SavedItem
+
+        ctype = SavedItemService._resolve_type(content_type)
+        with session_scope() as session:
+            session.query(SavedItem).filter_by(
+                user_id=user_id, content_type=ctype, content_id=content_id
+            ).delete(synchronize_session=False)
+        return {"saved": False, "content_type": content_type, "content_id": content_id}
+
+    @staticmethod
+    def list_saved(user_id: str, content_type=None, page: int = 1, per_page: int = 20):
+        """Saved items, newest first, with enough of each item to render a row
+        without a second round trip per entry."""
+        from .models import SavedItem, SavedItemType
+        from app.products.models import Product
+        from app.media.models import ProductImage
+
+        with session_scope() as session:
+            query = session.query(SavedItem).filter_by(user_id=user_id)
+            if content_type:
+                query = query.filter_by(
+                    content_type=SavedItemService._resolve_type(content_type)
+                )
+            query = query.order_by(SavedItem.created_at.desc())
+
+            total = query.count()
+            rows = query.offset((page - 1) * per_page).limit(per_page).all()
+
+            post_ids = [
+                r.content_id for r in rows if r.content_type == SavedItemType.POST
+            ]
+            product_ids = [
+                r.content_id for r in rows if r.content_type == SavedItemType.PRODUCT
+            ]
+
+            posts = {
+                p.id: p
+                for p in (
+                    session.query(Post).filter(Post.id.in_(post_ids)).all()
+                    if post_ids
+                    else []
+                )
+            }
+            products = {
+                p.id: p
+                for p in (
+                    session.query(Product)
+                    .options(
+                        joinedload(Product.images).joinedload(ProductImage.media),
+                        joinedload(Product.seller),
+                    )
+                    .filter(Product.id.in_(product_ids))
+                    .all()
+                    if product_ids
+                    else []
+                )
+            }
+
+            items = []
+            for row in rows:
+                saved_at = row.created_at.isoformat() if row.created_at else None
+                if row.content_type == SavedItemType.POST:
+                    post = posts.get(row.content_id)
+                    # Saved content can be deleted after the fact. Skip rather
+                    # than returning a half-empty row the client must special-case.
+                    if not post:
+                        continue
+                    items.append(
+                        {
+                            "content_type": "post",
+                            "content_id": post.id,
+                            "saved_at": saved_at,
+                            "title": (post.caption or "")[:140],
+                            "image_url": None,
+                            "price": None,
+                        }
+                    )
+                else:
+                    product = products.get(row.content_id)
+                    if not product:
+                        continue
+                    image_url = None
+                    if product.images:
+                        try:
+                            image_url = product.images[0].media.get_url()
+                        except Exception:
+                            image_url = None
+                    items.append(
+                        {
+                            "content_type": "product",
+                            "content_id": product.id,
+                            "saved_at": saved_at,
+                            "title": product.name,
+                            "image_url": image_url,
+                            "price": float(product.price) if product.price else None,
+                        }
+                    )
+
+            return {
+                "items": items,
+                "pagination": {
+                    "page": page,
+                    "per_page": per_page,
+                    "total_items": total,
+                    "total_pages": (total + per_page - 1) // per_page,
+                },
+            }
+
+    @staticmethod
+    def saved_ids(user_id, content_type: str, content_ids):
+        """Which of these the user has already saved -- for rendering filled vs
+        empty save icons in a list without one query per row."""
+        from .models import SavedItem
+
+        if not user_id or not content_ids:
+            return set()
+        ctype = SavedItemService._resolve_type(content_type)
+        with session_scope() as session:
+            rows = (
+                session.query(SavedItem.content_id)
+                .filter(
+                    SavedItem.user_id == user_id,
+                    SavedItem.content_type == ctype,
+                    SavedItem.content_id.in_(list(content_ids)),
+                )
+                .all()
+            )
+        return {r[0] for r in rows}

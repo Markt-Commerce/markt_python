@@ -13,6 +13,7 @@ from sqlalchemy.orm import joinedload
 # project imports
 from external.redis import redis_client
 from app.libs.session import session_scope
+from app.libs.money import to_money, to_subunit
 from app.libs.errors import (
     NotFoundError,
     ValidationError,
@@ -31,6 +32,17 @@ from app.notifications.services import NotificationService
 from app.notifications.models import NotificationType
 
 logger = logging.getLogger(__name__)
+
+
+def to_subunit(amount: float) -> int:
+    """Naira -> kobo, the subunit Paystack expects for every amount field.
+
+    Rounds rather than truncates: amounts are carried as floats, and
+    int(1234.56 * 100) is 123455, not 123456, because 1234.56 has no exact
+    binary representation. That silently undercharged by a kobo on a large
+    share of real prices.
+    """
+    return int(round(amount * 100))
 
 
 class PaymentService:
@@ -771,8 +783,14 @@ class PaymentService:
                 return PaymentService._handle_successful_charge(data)
             elif event == "transfer.success":
                 return PaymentService._handle_successful_transfer(data)
-            elif event == "transfer.failed":
-                return PaymentService._handle_failed_transfer(data)
+            elif event in ("transfer.failed", "transfer.reversed"):
+                # A reversal means the payout bounced back to our Paystack
+                # balance after we had already debited the user's wallet, so it
+                # settles exactly like a failure: mark the withdrawal failed and
+                # return the money to the wallet. Leaving it unhandled (as it
+                # was) meant the user stayed debited for a payout they never
+                # received.
+                return PaymentService._handle_failed_transfer(data, event=event)
             elif event == "charge.failed":
                 return PaymentService._handle_failed_charge(data)
             else:
@@ -839,7 +857,7 @@ class PaymentService:
             )
 
             payload = {
-                "amount": int(payment.amount * 100),  # Convert to kobo
+                "amount": to_subunit(payment.amount),
                 "email": buyer.email,
                 "currency": payment.currency,
                 "reference": f"PAY_{payment.id}",
@@ -902,7 +920,7 @@ class PaymentService:
             )
 
             payload = {
-                "amount": int(payment.amount * 100),
+                "amount": to_subunit(payment.amount),
                 "email": buyer_email,
                 "currency": payment.currency,
                 "reference": f"PAY_{payment.id}",
@@ -942,7 +960,7 @@ class PaymentService:
         try:
             # For card payments, we need to charge the card
             payload = {
-                "amount": int(payment.amount * 100),
+                "amount": to_subunit(payment.amount),
                 "email": payment.order.buyer.user.email,
                 "currency": payment.currency,
                 "reference": payment.transaction_id,
@@ -1001,7 +1019,7 @@ class PaymentService:
                 raise ValidationError("Associated order/buyer information is missing")
 
             payload: Dict[str, Any] = {
-                "amount": int(payment.amount * 100),  # Convert to kobo
+                "amount": to_subunit(payment.amount),
                 "email": order.buyer.user.email,
                 "currency": payment.currency,
                 "bank": bank_details,
@@ -1168,14 +1186,21 @@ class PaymentService:
         return WalletService.complete_withdrawal_transfer(reference)
 
     @staticmethod
-    def _handle_failed_transfer(data: Dict[str, Any]) -> bool:
-        """Handle failed transfer webhook and refund wallet."""
+    def _handle_failed_transfer(
+        data: Dict[str, Any], event: str = "transfer.failed"
+    ) -> bool:
+        """Handle a failed or reversed transfer webhook and refund the wallet."""
         from app.wallet.services import WalletService
 
         reference = data.get("reference") or data.get("transfer_code")
         if not reference:
             return False
-        reason = data.get("reason") or "Paystack transfer failed"
+        default_reason = (
+            "Paystack transfer reversed"
+            if event == "transfer.reversed"
+            else "Paystack transfer failed"
+        )
+        reason = data.get("reason") or default_reason
         return WalletService.fail_withdrawal_transfer(reference, reason)
 
     @staticmethod

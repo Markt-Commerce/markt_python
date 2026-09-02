@@ -78,14 +78,25 @@ jobs:
             HEALTHCHECK_URL="http://127.0.0.1/health/"
           fi
 
-          # Retry health check to tolerate normal app warm-up.
-          for i in 1 2 3 4 5 6; do
+          # Retry health check to tolerate normal app warm-up. The app needs
+          # ~7s just to register blueprints under the Flask CLI, and gunicorn
+          # additionally runs gevent's patch_all() over the full import graph,
+          # so give it two minutes rather than thirty seconds.
+          ATTEMPTS=24
+          for i in $(seq 1 "$ATTEMPTS"); do
             if curl -fsS --max-time 10 "$HEALTHCHECK_URL" > /dev/null; then
-              echo "Health check passed on attempt $i"
+              echo "Health check passed on attempt $i ($(( (i - 1) * 5 ))s after restart)"
               break
             fi
-            if [ "$i" -eq 6 ]; then
-              echo "Health check failed after retries"
+            if [ "$i" -eq "$ATTEMPTS" ]; then
+              echo "Health check failed after $ATTEMPTS attempts. Service state follows."
+              sudo systemctl status markt --no-pager -l | tail -40 || true
+              echo "--- journal: markt ---"
+              sudo journalctl -u markt -n 120 --no-pager || true
+              echo "--- journal: markt-celery ---"
+              sudo journalctl -u markt-celery -n 40 --no-pager || true
+              echo "--- listening sockets ---"
+              sudo ss -lntp 2>/dev/null | grep -Ei 'gunicorn|python' || true
               exit 1
             fi
             sleep 5
