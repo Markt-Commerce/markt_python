@@ -1,5 +1,6 @@
 from enum import Enum
 from external.database import db
+from app.libs.money import MONEY
 from app.libs.models import BaseModel
 from app.libs.helpers import UniqueIdMixin
 
@@ -61,7 +62,7 @@ class Payment(BaseModel, UniqueIdMixin):
     # Cart/shipping/fee snapshot needed to build the Order once payment
     # succeeds. Only set for payment-first checkouts; NULL otherwise.
     pending_checkout_data = db.Column(db.JSON, nullable=True)
-    amount = db.Column(db.Float, nullable=False)
+    amount = db.Column(MONEY, nullable=False)
     currency = db.Column(db.String(3), default="USD")
     method = db.Column(db.Enum(PaymentMethod))
     status = db.Column(db.Enum(PaymentStatus), default=PaymentStatus.PENDING)
@@ -89,7 +90,7 @@ class Transaction(BaseModel):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.String(12), db.ForeignKey("users.id"))
     seller_id = db.Column(db.Integer, db.ForeignKey("sellers.id"), nullable=True)
-    amount = db.Column(db.Float)
+    amount = db.Column(MONEY)
     type = db.Column(db.String(20))  # 'credit', 'debit'
     reference = db.Column(db.String(100))
     status = db.Column(db.String(20))

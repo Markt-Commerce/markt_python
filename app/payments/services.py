@@ -13,6 +13,7 @@ from sqlalchemy.orm import joinedload
 # project imports
 from external.redis import redis_client
 from app.libs.session import session_scope
+from app.libs.money import to_money, to_subunit
 from app.libs.errors import (
     NotFoundError,
     ValidationError,
@@ -839,7 +840,7 @@ class PaymentService:
             )
 
             payload = {
-                "amount": int(payment.amount * 100),  # Convert to kobo
+                "amount": to_subunit(payment.amount),
                 "email": buyer.email,
                 "currency": payment.currency,
                 "reference": f"PAY_{payment.id}",
@@ -902,7 +903,7 @@ class PaymentService:
             )
 
             payload = {
-                "amount": int(payment.amount * 100),
+                "amount": to_subunit(payment.amount),
                 "email": buyer_email,
                 "currency": payment.currency,
                 "reference": f"PAY_{payment.id}",
@@ -942,7 +943,7 @@ class PaymentService:
         try:
             # For card payments, we need to charge the card
             payload = {
-                "amount": int(payment.amount * 100),
+                "amount": to_subunit(payment.amount),
                 "email": payment.order.buyer.user.email,
                 "currency": payment.currency,
                 "reference": payment.transaction_id,
@@ -1001,7 +1002,7 @@ class PaymentService:
                 raise ValidationError("Associated order/buyer information is missing")
 
             payload: Dict[str, Any] = {
-                "amount": int(payment.amount * 100),  # Convert to kobo
+                "amount": to_subunit(payment.amount),
                 "email": order.buyer.user.email,
                 "currency": payment.currency,
                 "bank": bank_details,

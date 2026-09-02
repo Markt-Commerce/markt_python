@@ -13,6 +13,7 @@ half-built here.
 """
 
 import logging
+from decimal import Decimal
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -20,6 +21,7 @@ from app.fulfilment.models import FulfilmentAllocation, FulfilmentAllocationStat
 from app.inventory.models import HandlingClass, ProductHandling
 from app.libs.errors import ForbiddenError, NotFoundError, ValidationError
 from app.libs.session import session_scope
+from app.libs.money import to_money
 from app.notifications.models import NotificationType
 from app.notifications.services import NotificationService
 from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
@@ -534,8 +536,10 @@ class DeliveryRunService:
                     session, run
                 )
                 run.surge_multiplier = surge_multiplier
-                run.base_price = round(DEFAULT_BASE_PRICE * surge_multiplier, 2)
-                run.price_per_order = round(run.base_price / len(surviving_orders), 2)
+                run.base_price = to_money(
+                    to_money(DEFAULT_BASE_PRICE) * Decimal(str(surge_multiplier))
+                )
+                run.price_per_order = to_money(run.base_price / len(surviving_orders))
                 run.transition_to(DeliveryRunStatus.PLANNING)
                 # 10.2/Phase 10: no separate rider-ranking/offer step exists
                 # (matching the existing single-order accept_order's own
