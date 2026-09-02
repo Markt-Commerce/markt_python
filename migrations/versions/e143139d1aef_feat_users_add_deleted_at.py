@@ -1,11 +1,17 @@
 """feat(users): add deleted_at for account deletion
 
 Revision ID: e143139d1aef
-Revises: 72bf175405d5
+Revises: 64666e7872bc
 Create Date: 2026-09-01
 
 Marks accounts the user has deleted in-app (Apple App Store 5.1.1(v)).
 Nullable, so existing rows are untouched and read as "not deleted".
+
+Chained onto the money migration rather than branching from 72bf175405d5
+alongside it: develop deploys to the test server on every merge, and two
+migrations sharing a parent give alembic two heads, which makes
+`flask db upgrade` fail and takes the deploy down. Merge after
+refactor/money-numeric.
 """
 
 from alembic import op
@@ -13,7 +19,7 @@ import sqlalchemy as sa
 
 
 revision = "e143139d1aef"
-down_revision = "72bf175405d5"
+down_revision = "64666e7872bc"
 branch_labels = None
 depends_on = None
 
