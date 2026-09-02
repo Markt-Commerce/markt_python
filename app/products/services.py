@@ -62,6 +62,36 @@ class ProductService:
             raise APIError("Failed to fetch products", 500)
 
     @staticmethod
+    def build_share_links(product_id: str) -> Dict[str, Any]:
+        """Canonical share links for a product.
+
+        Returns both a deep link and a web URL because a share sheet has no
+        idea whether the recipient has the app installed: the deep link opens
+        it directly, the web URL works for anyone.
+        """
+        from main.config import settings
+
+        with session_scope() as session:
+            product = session.query(Product).get(product_id)
+            if not product or product.status in (
+                Product.Status.DELETED,
+                Product.Status.DRAFT,
+            ):
+                raise NotFoundError("Product not found")
+            name = product.name
+
+        scheme = settings.MOBILE_APP_SCHEME or "markt://"
+        web_base = (settings.WEB_APP_BASE_URL or "").rstrip("/")
+
+        return {
+            "product_id": product_id,
+            "product_name": name,
+            "deep_link": f"{scheme}product/{product_id}",
+            "web_url": f"{web_base}/products/{product_id}",
+            "message": f"Check out {name} on Markt",
+        }
+
+    @staticmethod
     def get_product(product_id):
         try:
             with session_scope() as session:

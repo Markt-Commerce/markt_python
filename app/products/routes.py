@@ -7,7 +7,8 @@ from flask_login import login_required, current_user
 from flask import request
 
 # project imports
-from app.socials.schemas import ShareSchema, CommentSchema
+from app.socials.schemas import CommentSchema
+from app.libs.errors import APIError
 from app.libs.decorators import seller_required, buyer_required
 from app.libs.schemas import PaginationQueryArgs
 from app.socials.services import ProductSocialService
@@ -26,6 +27,7 @@ from .schemas import (
     ProductSearchSchema,
     ProductSearchResultSchema,
     BulkProductResultSchema,
+    ProductShareLinkSchema,
 )
 
 logger = logging.getLogger(__name__)
@@ -165,12 +167,21 @@ class ProductView(MethodView):
 @bp.route("/<product_id>/share")
 class ShareProduct(MethodView):
     @login_required
-    @bp.response(200, ShareSchema)
-    def post(self, product_id):
-        """Share product socially"""
-        # TODO: Generate share links
-        # TODO: Track shares
-        # TODO: Reward system for shares
+    @bp.response(200, ProductShareLinkSchema)
+    def get(self, product_id):
+        """Canonical links for sharing a product.
+
+        Was a stub: three TODOs and no return statement, so flask-smorest
+        tried to serialize None and the endpoint 500'd for anyone who called
+        it. Nothing did, which is why it went unnoticed.
+
+        GET rather than POST -- it creates nothing, and a share sheet may well
+        ask for the same link twice.
+        """
+        try:
+            return ProductService.build_share_links(product_id)
+        except APIError as e:
+            abort(e.status_code, message=e.message)
 
 
 @bp.route("/seller/my-products")
