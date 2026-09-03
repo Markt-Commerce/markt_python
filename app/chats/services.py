@@ -9,7 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 # project imports
 from external.database import db
 from external.redis import redis_client
-from app.libs.session import session_scope
+from app.libs.session import session_scope, read_scope
 from app.libs.errors import (
     NotFoundError,
     ValidationError,
@@ -260,42 +260,58 @@ class ChatService:
     ) -> Dict[str, Any]:
         """Get chat rooms for a user with recent messages"""
         try:
-            with session_scope() as session:
-                # Get rooms where user is buyer or seller
+            # read_scope, not session_scope: session_scope commits on exit, and a
+            # commit expires every loaded instance. Anything touched afterwards
+            # then re-SELECTs itself one row at a time.
+            with read_scope() as session:
+                membership = db.or_(
+                    ChatRoom.buyer_id == user_id,
+                    ChatRoom.seller_id == user_id,
+                )
+
+                # joinedload(ChatRoom.messages) used to be here. It pulled the
+                # entire message history of every room on the page into memory
+                # just to render a one-line preview -- the cost grew with how
+                # much people had talked, which is the wrong thing to scale on.
                 rooms = (
                     session.query(ChatRoom)
                     .options(
                         joinedload(ChatRoom.buyer),
                         joinedload(ChatRoom.seller),
-                        joinedload(ChatRoom.product),
+                        joinedload(ChatRoom.product).joinedload(Product.images),
                         joinedload(ChatRoom.request),
-                        joinedload(ChatRoom.messages),
                     )
-                    .filter(
-                        db.or_(
-                            ChatRoom.buyer_id == user_id,
-                            ChatRoom.seller_id == user_id,
-                        )
+                    .filter(membership)
+                    # id.desc() is a tiebreaker, not decoration: last_message_at
+                    # is null for a room nobody has spoken in yet, and ties on
+                    # equal timestamps otherwise. Without a stable second key the
+                    # order varies between calls, so paging can repeat or skip a
+                    # room. _find_room_for_user_pair already orders this way.
+                    .order_by(
+                        ChatRoom.last_message_at.desc().nullslast(),
+                        ChatRoom.id.desc(),
                     )
-                    .order_by(ChatRoom.last_message_at.desc())
                     .offset((page - 1) * per_page)
                     .limit(per_page)
                     .all()
                 )
 
+                room_ids = [room.id for room in rooms]
+                last_messages = ChatService._batch_last_messages(session, room_ids)
+                unread_counts = ChatService._batch_unread_counts(
+                    session, room_ids, user_id
+                )
+
+                # Real total, so the client can page. This used to report
+                # len(enhanced_rooms) -- the size of the current page, which
+                # meant the last page and a full page looked identical.
+                total = session.query(ChatRoom).filter(membership).count()
+
                 # Enhance rooms with additional data
                 enhanced_rooms = []
                 for room in rooms:
-                    # Get last message
-                    last_message = (
-                        session.query(ChatMessage)
-                        .filter(ChatMessage.room_id == room.id)
-                        .order_by(ChatMessage.created_at.desc())
-                        .first()
-                    )
-
-                    # Get unread count
-                    unread_count = ChatService._get_unread_count(room.id, user_id)
+                    last_message = last_messages.get(room.id)
+                    unread_count = unread_counts.get(room.id, 0)
 
                     # Get other user info
                     other_user = room.seller if room.buyer_id == user_id else room.buyer
@@ -306,7 +322,11 @@ class ChatService:
                             "id": other_user.id,
                             "username": other_user.username,
                             "profile_picture": other_user.profile_picture,
-                            "is_seller": hasattr(other_user, "seller_account"),
+                            # hasattr() on a relationship is always True -- the
+                            # attribute exists whether or not it resolves to a
+                            # row -- so this reported every counterparty as a
+                            # seller, buyers included.
+                            "is_seller": other_user.seller_account is not None,
                         },
                         "product": (
                             {
@@ -359,7 +379,7 @@ class ChatService:
                     "pagination": {
                         "page": page,
                         "per_page": per_page,
-                        "total": len(enhanced_rooms),
+                        "total": total,
                     },
                 }
 
@@ -368,13 +388,80 @@ class ChatService:
             raise APIError("Failed to get chat rooms")
 
     @staticmethod
+    def _batch_offers(session, message_ids: List[int]) -> Dict[int, ChatOffer]:
+        """Offers keyed by message id, in one query instead of one per offer."""
+        if not message_ids:
+            return {}
+        rows = (
+            session.query(ChatOffer).filter(ChatOffer.message_id.in_(message_ids)).all()
+        )
+        return {offer.message_id: offer for offer in rows}
+
+    @staticmethod
+    def _batch_last_messages(session, room_ids: List[int]) -> Dict[int, ChatMessage]:
+        """Newest message per room, in one query instead of one query per room."""
+        if not room_ids:
+            return {}
+        newest = (
+            db.select(
+                ChatMessage,
+                db.func.row_number()
+                .over(
+                    partition_by=ChatMessage.room_id,
+                    # id.desc() breaks ties: messages sent in the same instant
+                    # share a created_at, and without it "the last message"
+                    # varies between reads.
+                    order_by=(
+                        ChatMessage.created_at.desc(),
+                        ChatMessage.id.desc(),
+                    ),
+                )
+                .label("rn"),
+            )
+            .filter(ChatMessage.room_id.in_(room_ids))
+            .subquery()
+        )
+        aliased = db.aliased(ChatMessage, newest)
+        rows = session.query(aliased).filter(newest.c.rn == 1).all()
+        return {msg.room_id: msg for msg in rows}
+
+    @staticmethod
+    def _batch_unread_counts(
+        session, room_ids: List[int], user_id: str
+    ) -> Dict[int, int]:
+        """Unread count per room, in one grouped query.
+
+        The old path called _get_unread_count() per room, and that helper opened
+        its own session_scope -- so every room both cost a query and committed,
+        expiring the rooms and users already loaded above.
+        """
+        if not room_ids:
+            return {}
+        rows = (
+            session.query(ChatMessage.room_id, db.func.count(ChatMessage.id))
+            .filter(
+                ChatMessage.room_id.in_(room_ids),
+                ChatMessage.sender_id != user_id,
+                ChatMessage.is_read.is_(False),
+            )
+            .group_by(ChatMessage.room_id)
+            .all()
+        )
+        return {room_id: count for room_id, count in rows}
+
+    @staticmethod
     def get_room_messages(
         room_id: int, user_id: str, page: int = 1, per_page: int = 50
     ) -> Dict[str, Any]:
         """Get messages for a specific chat room"""
         try:
+            # Access check and the read-receipt write happen first, in a scope
+            # that is allowed to commit. Doing the write *during* the read was
+            # the bug: the commit expired every message and sender already
+            # loaded, so the formatting loop re-fetched them one row at a time.
+            # Marking before reading also keeps the response identical to what
+            # it was -- messages come back already flagged read.
             with session_scope() as session:
-                # Verify user has access to this room
                 room = (
                     session.query(ChatRoom)
                     .filter(
@@ -386,23 +473,37 @@ class ChatService:
                     )
                     .first()
                 )
-
                 if not room:
                     raise ForbiddenError("Access denied to this chat room")
 
+            ChatService._mark_messages_as_read(room_id, user_id)
+
+            with read_scope() as session:
                 # Get messages with pagination
                 messages = (
                     session.query(ChatMessage)
                     .options(joinedload(ChatMessage.sender))
                     .filter(ChatMessage.room_id == room_id)
-                    .order_by(ChatMessage.created_at.desc())
+                    .order_by(
+                        ChatMessage.created_at.desc(),
+                        ChatMessage.id.desc(),
+                    )
                     .offset((page - 1) * per_page)
                     .limit(per_page)
                     .all()
                 )
 
-                # Mark messages as read
-                ChatService._mark_messages_as_read(room_id, user_id)
+                # Offers for this page, batched. Previously one SELECT per
+                # message that happened to be an offer.
+                offers_by_message = ChatService._batch_offers(
+                    session, [m.id for m in messages]
+                )
+
+                total = (
+                    session.query(ChatMessage)
+                    .filter(ChatMessage.room_id == room_id)
+                    .count()
+                )
 
                 # Format messages
                 formatted_messages = []
@@ -432,11 +533,7 @@ class ChatService:
 
                     # Add offer data if message contains an offer
                     if message.message_type == "offer":
-                        offer = (
-                            session.query(ChatOffer)
-                            .filter(ChatOffer.message_id == message.id)
-                            .first()
-                        )
+                        offer = offers_by_message.get(message.id)
                         if offer:
                             offer_payload = {
                                 "id": offer.id,
@@ -459,7 +556,7 @@ class ChatService:
                     "pagination": {
                         "page": page,
                         "per_page": per_page,
-                        "total": len(formatted_messages),
+                        "total": total,
                     },
                 }
 
