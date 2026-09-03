@@ -2153,7 +2153,12 @@ class ProductSocialService:
                 except Exception as e:
                     logger.warning(f"Failed to queue review_upvoted event: {e}")
 
-                return review
+                # Return what the route's ReviewUpvoteSchema actually declares.
+                # This used to return the ProductReview model, which has neither
+                # `success` nor `new_count`, so the endpoint serialised to `{}`
+                # -- a 200 that told the caller nothing, and left any client
+                # showing an optimistic count with no way to reconcile it.
+                return {"success": True, "new_count": review.upvotes}
         except SQLAlchemyError as e:
             logger.error(f"Error upvoting review: {str(e)}")
             raise ConflictError("Failed to upvote review")
