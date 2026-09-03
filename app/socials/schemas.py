@@ -483,6 +483,24 @@ class ProductReviewSchema(Schema):
     user = fields.Nested(lambda: UserSimpleSchema(), dump_only=True)
 
 
+class ProductReviewUpdateSchema(Schema):
+    """Editable fields on your own review.
+
+    Deliberately narrower than ProductReviewSchema: order_id and is_verified
+    are decided by the server at creation and must not move afterwards, or a
+    buyer could edit their way to a "verified purchase" badge.
+    """
+
+    rating = fields.Int(validate=validate.Range(min=1, max=5))
+    title = fields.Str(validate=validate.Length(max=100))
+    content = fields.Str()
+
+
+class ReviewDeleteSchema(Schema):
+    deleted = fields.Bool()
+    review_id = fields.Int()
+
+
 class ProductReviewsSchema(Schema):
     items = fields.List(fields.Nested(ProductReviewSchema))
     pagination = fields.Nested(PaginationSchema)

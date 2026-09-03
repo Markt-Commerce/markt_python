@@ -72,6 +72,20 @@ class Config:
             "API_BASE_URL",
             default="http://localhost:8000" if self.ENV == "development" else "",
         )
+        # This URL is handed to Paystack as the callback_url. If it is wrong,
+        # the payment still succeeds -- the webhook credits the wallet
+        # server-to-server -- but Paystack redirects the customer's browser to
+        # an address that doesn't exist, so they see ERR_CONNECTION_REFUSED
+        # after paying and have to navigate back to discover it worked.
+        #
+        # That failure is invisible from the server: nothing errors, nothing
+        # logs, the money arrives. So say something loudly at startup instead of
+        # letting it be found by a confused customer.
+        self.API_BASE_URL_IS_UNREACHABLE = (
+            not self.API_BASE_URL
+            or "localhost" in self.API_BASE_URL
+            or "127.0.0.1" in self.API_BASE_URL
+        )
 
         # Web app base URL for payment redirects
         # For production: https://marktcommerce.com/app

@@ -239,6 +239,29 @@ class ProductReview(BaseModel):
     order = db.relationship("Order")
 
 
+class ReviewUpvote(BaseModel):
+    """One row per (user, review), so a review can only be upvoted once.
+
+    upvote_review() used to do a bare `review.upvotes += 1` with nothing
+    recording who had voted -- tap the button ten times and the count went up
+    ten times. A Redis set was written but never read, and a cache is the wrong
+    place to enforce a uniqueness rule anyway.
+    """
+
+    __tablename__ = "review_upvotes"
+    # The primary key covers (user_id, review_id), which doesn't serve
+    # "count the votes on this review". Index the other direction too.
+    __table_args__ = (db.Index("ix_review_upvotes_review_id", "review_id"),)
+
+    user_id = db.Column(db.String(12), db.ForeignKey("users.id"), primary_key=True)
+    review_id = db.Column(
+        db.Integer, db.ForeignKey("product_reviews.id"), primary_key=True
+    )
+
+    user = db.relationship("User")
+    review = db.relationship("ProductReview")
+
+
 class ProductView(BaseModel):
     __tablename__ = "product_views"
 

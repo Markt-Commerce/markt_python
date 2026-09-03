@@ -160,6 +160,20 @@ def create_app():
                 "Paystack keys not configured - payment features will not work"
             )
 
+    # A wrong API_BASE_URL is silent on the server and ugly for the customer:
+    # the payment succeeds via webhook, but Paystack redirects their browser to
+    # an unreachable address and they see ERR_CONNECTION_REFUSED after paying.
+    # Nothing raises, so the only way to catch it is to look for it.
+    if settings.API_BASE_URL_IS_UNREACHABLE and settings.ENV != "development":
+        logger.error(
+            "API_BASE_URL is %r in a %s environment. Paystack will redirect "
+            "customers here after payment and it is not reachable from a "
+            "phone -- top-ups will appear to fail even though the webhook "
+            "credits them. Set API_BASE_URL to the public API URL.",
+            settings.API_BASE_URL or "(unset)",
+            settings.ENV,
+        )
+
     logger.info("Application initialized")
     return app, socketio
 
