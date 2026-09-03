@@ -84,14 +84,29 @@ class ChatService:
     @staticmethod
     def _format_room_messages(messages_iter, session) -> List[Dict[str, Any]]:
         """Format messages for room_data (socket join), with enriched product/offer."""
+        # Materialise first: the caller may pass a generator (reversed(...)),
+        # and the offers below need the ids up front.
+        msgs = list(messages_iter)
+        # One query for every offer on the page instead of one per offer
+        # message -- the same batching get_room_messages already got in #92.
+        offers_by_message = ChatService._batch_offers(session, [m.id for m in msgs])
+
+        # And one query for every product referenced by the page, rather than a
+        # SELECT per product/offer message.
+        wanted = [o.product_id for o in offers_by_message.values()]
+        for m in msgs:
+            if m.message_type == "product" and isinstance(m.message_data, dict):
+                wanted.append(m.message_data.get("product_id"))
+        snapshots = ChatService._batch_product_snapshots(session, wanted)
+
         formatted = []
-        for msg in messages_iter:
+        for msg in msgs:
             msg_dict = {
                 "id": msg.id,
                 "content": msg.content,
                 "message_type": msg.message_type,
                 "message_data": ChatService._enrich_message_data(
-                    msg.message_type, msg.message_data, msg.id, session
+                    msg.message_type, msg.message_data, msg.id, session, snapshots
                 ),
                 "sender_id": msg.sender_id,
                 "sender_username": msg.sender.username,
@@ -99,11 +114,7 @@ class ChatService:
                 "created_at": msg.created_at.isoformat(),
             }
             if msg.message_type == "offer":
-                offer = (
-                    session.query(ChatOffer)
-                    .filter(ChatOffer.message_id == msg.id)
-                    .first()
-                )
+                offer = offers_by_message.get(msg.id)
                 if offer:
                     offer_payload = {
                         "id": offer.id,
@@ -111,9 +122,7 @@ class ChatService:
                         "price": float(offer.price),
                         "status": offer.status,
                     }
-                    product_snapshot = ChatService._build_product_snapshot(
-                        offer.product_id, session
-                    )
+                    product_snapshot = snapshots.get(offer.product_id)
                     if product_snapshot:
                         offer_payload["product"] = product_snapshot
                     msg_dict["offer"] = offer_payload
@@ -126,6 +135,7 @@ class ChatService:
         message_data: Optional[Dict[str, Any]],
         message_id: int,
         session,
+        snapshots: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Enrich message_data with product snapshot for product messages.
 
@@ -138,7 +148,13 @@ class ChatService:
         if message_type == "product":
             pid = result.get("product_id")
             if pid and "product" not in result:
-                snapshot = ChatService._build_product_snapshot(pid, session)
+                # Prefer the batch the caller already built; fall back to a
+                # single fetch for one-off callers.
+                snapshot = (
+                    snapshots.get(pid)
+                    if snapshots is not None
+                    else ChatService._build_product_snapshot(pid, session)
+                )
                 if snapshot:
                     result["product"] = snapshot
         return result
@@ -388,6 +404,41 @@ class ChatService:
             raise APIError("Failed to get chat rooms")
 
     @staticmethod
+    def _batch_product_snapshots(session, product_ids) -> Dict[str, Dict[str, Any]]:
+        """Snapshots for many products in one query.
+
+        _build_product_snapshot() fetches a single product, so calling it while
+        formatting a page of messages cost one SELECT per product/offer message.
+        """
+        ids = {pid for pid in product_ids if pid}
+        if not ids:
+            return {}
+        products = (
+            session.query(Product)
+            .options(joinedload(Product.images))
+            .filter(Product.id.in_(ids))
+            .all()
+        )
+        snapshots: Dict[str, Dict[str, Any]] = {}
+        for product in products:
+            image_url = None
+            if product.images and len(product.images) > 0:
+                first_image = product.images[0]
+                if first_image.media:
+                    try:
+                        image_url = first_image.media.get_url()
+                    except Exception:
+                        pass
+            snapshots[product.id] = {
+                "id": product.id,
+                "name": product.name,
+                "price": float(product.price),
+                "currency": "NGN",
+                "image_url": image_url,
+            }
+        return snapshots
+
+    @staticmethod
     def _batch_offers(session, message_ids: List[int]) -> Dict[int, ChatOffer]:
         """Offers keyed by message id, in one query instead of one per offer."""
         if not message_ids:
@@ -589,9 +640,17 @@ class ChatService:
 
     @staticmethod
     def get_room_with_messages(room_id: int, user_id: str) -> Dict[str, Any]:
-        """Get room details with recent messages for socket connection"""
+        """Get room details with recent messages for socket connection.
+
+        Runs on every chat open over the socket, so it had the same three
+        problems its siblings did (see #92) and was simply missed.
+        """
         try:
-            with session_scope() as session:
+            # read_scope: session_scope commits on exit, and _get_unread_count
+            # opened a second one mid-read -- a commit expires every loaded
+            # instance, so anything touched afterwards re-SELECTs a row at a
+            # time.
+            with read_scope() as session:
                 # Verify user has access to this room
                 room = (
                     session.query(ChatRoom)
@@ -633,7 +692,10 @@ class ChatService:
                         "id": other_user.id,
                         "username": other_user.username,
                         "profile_picture": other_user.profile_picture,
-                        "is_seller": hasattr(other_user, "seller_account"),
+                        # hasattr() on a relationship is always True -- the
+                        # attribute exists whether or not it resolves to a row --
+                        # so every counterparty was reported as a seller.
+                        "is_seller": other_user.seller_account is not None,
                     },
                     "product": (
                         {
@@ -665,7 +727,18 @@ class ChatService:
                     "messages": ChatService._format_room_messages(
                         reversed(messages), session
                     ),
-                    "unread_count": ChatService._get_unread_count(room.id, user_id),
+                    # Counted in this session rather than through
+                    # _get_unread_count(), which opens its own scope and commits.
+                    "unread_count": (
+                        session.query(db.func.count(ChatMessage.id))
+                        .filter(
+                            ChatMessage.room_id == room.id,
+                            ChatMessage.sender_id != user_id,
+                            ChatMessage.is_read.is_(False),
+                        )
+                        .scalar()
+                        or 0
+                    ),
                 }
 
         except Exception as e:

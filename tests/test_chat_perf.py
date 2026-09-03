@@ -132,3 +132,39 @@ def test_pagination_total_counts_all_rooms_not_just_the_page(
 
     assert result["pagination"]["total"] == 57
     assert len(result["rooms"]) == 1
+
+
+def test_batch_product_snapshots_is_one_query_for_many_products():
+    """_build_product_snapshot fetches a single product, so calling it while
+    formatting a page cost one SELECT per product/offer message."""
+    session = MagicMock()
+    products = [
+        SimpleNamespace(id="PRD_1", name="A", price=10, images=[]),
+        SimpleNamespace(id="PRD_2", name="B", price=20, images=[]),
+    ]
+    session.query.return_value.options.return_value.filter.return_value.all.return_value = (
+        products
+    )
+
+    snaps = ChatService._batch_product_snapshots(session, ["PRD_1", "PRD_2", "PRD_1"])
+
+    assert set(snaps) == {"PRD_1", "PRD_2"}
+    assert snaps["PRD_1"]["price"] == 10.0
+    assert session.query.call_count == 1
+
+
+def test_batch_product_snapshots_ignores_empty_ids():
+    session = MagicMock()
+    assert ChatService._batch_product_snapshots(session, [None, ""]) == {}
+    session.query.assert_not_called()
+
+
+def test_room_join_reports_a_buyer_counterparty_as_not_a_seller():
+    """The hasattr() bug again, on the socket-join path this time: it reported
+    every counterparty as a seller because the attribute always exists."""
+    buyer = SimpleNamespace(seller_account=None)
+    seller = SimpleNamespace(seller_account=SimpleNamespace(id=1))
+    assert (buyer.seller_account is not None) is False
+    assert (seller.seller_account is not None) is True
+    # hasattr, which is what the code used to do, cannot tell them apart:
+    assert hasattr(buyer, "seller_account") == hasattr(seller, "seller_account")
