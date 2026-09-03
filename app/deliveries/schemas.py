@@ -11,6 +11,11 @@ class DeliveryLoginRequestSchema(Schema):
 
 class DeliveryLoginResponseSchema(Schema):
     partner = fields.Nested("PartnerSchema")
+    # Stateless bearer token (same mechanism as users/routes.py's
+    # UserSchema.access_token) -- React Native doesn't persist Flask
+    # session cookies reliably, especially across Expo Go restarts, so the
+    # rider app stores this and sends it back as `Authorization: Bearer`.
+    access_token = fields.Str(dump_only=True)
 
 
 class DeliveryRegisterRequestSchema(Schema):

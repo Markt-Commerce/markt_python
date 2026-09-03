@@ -44,6 +44,7 @@ from .schemas import (
     DeliveryFailureResolveRequestSchema,
     DeliveryFailureCompleteRequestSchema,
 )
+from app.libs.auth_tokens import generate_auth_token
 from .services import DeliveryService
 from .run_assignment import DeliveryRunAssignmentService
 from .pickup import DeliveryRunPickupService, DeliveryRunPodService
@@ -73,7 +74,8 @@ class DeliveryLogin(MethodView):
                 "id": delivery_user.id,
                 "name": delivery_user.name,
                 "status": delivery_user.status.value,
-            }
+            },
+            "access_token": generate_auth_token(delivery_user.id),
         }  # return dict, let flask-smorest build response (same flow as users/login → session cookie set)
 
 
