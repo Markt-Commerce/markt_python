@@ -25,7 +25,8 @@ from app.libs.errors import (
     ForbiddenError,
 )
 
-from app.users.models import User, Seller, SellerVerificationStatus
+from app.users.models import User, Seller, SellerVerificationStatus, Buyer
+from app.products.ratings import refresh_for_product
 from app.products.models import Product, ProductStatus
 from app.products.services import ProductService, ProductStatsService
 from app.orders.models import Order, OrderStatus, OrderItem
@@ -50,6 +51,7 @@ from .models import (
     PostStatus,
     FollowType,
     ProductReview,
+    ReviewUpvote,
     ProductView,
     Niche,
     NicheMembership,
@@ -1881,6 +1883,28 @@ class PostService:
 
 class ProductSocialService:
     @staticmethod
+    def _find_delivered_order(session, user_id, product_id):
+        """The buyer's most recent delivered order containing this product.
+
+        Returns the order id, or None if they have never received it. Resolved
+        from the buyer's own orders so a supplied order_id can't be used to
+        borrow someone else's purchase.
+        """
+        row = (
+            session.query(Order.id)
+            .join(OrderItem, OrderItem.order_id == Order.id)
+            .join(Buyer, Buyer.id == Order.buyer_id)
+            .filter(
+                Buyer.user_id == user_id,
+                OrderItem.product_id == product_id,
+                Order.status == OrderStatus.DELIVERED,
+            )
+            .order_by(Order.created_at.desc())
+            .first()
+        )
+        return row[0] if row else None
+
+    @staticmethod
     def create_review(user_id, product_id, data):
         try:
             with session_scope() as session:
@@ -1888,26 +1912,26 @@ class ProductSocialService:
                 if not product:
                     raise NotFoundError("Product not found")
 
-                # Verify purchase if order_id provided
-                if data.get("order_id"):
-                    order = (
-                        session.query(Order)
-                        .filter_by(
-                            id=data["order_id"],
-                            buyer_id=user_id,
-                            status=OrderStatus.DELIVERED,
-                        )
-                        .join(OrderItem)
-                        .filter_by(product_id=product_id)
-                        .first()
+                # Purchase verification is now unconditional. It used to run
+                # only `if data.get("order_id")` -- so omitting the field
+                # skipped the check entirely and anyone could review anything
+                # they had never bought. On a marketplace that makes fake
+                # reviews free, which is the one thing a rating has to be
+                # expensive to fake.
+                #
+                # The order is also resolved server-side rather than taken from
+                # the request: a client that names someone else's order should
+                # not get to decide whether its own review counts as verified.
+                delivered_order_id = ProductSocialService._find_delivered_order(
+                    session, user_id, product_id
+                )
+                if not delivered_order_id:
+                    raise APIError(
+                        "You can review this after your order has been delivered",
+                        403,
                     )
-
-                    if not order:
-                        raise APIError(
-                            "You must purchase this product before reviewing", 403
-                        )
-
-                    data["is_verified"] = True
+                data["order_id"] = delivered_order_id
+                data["is_verified"] = True
 
                 # Check for existing review
                 existing = (
@@ -1924,19 +1948,12 @@ class ProductSocialService:
                 session.add(review)
                 session.flush()
 
-                # Update Redis
-                redis_key = f"product:{product_id}:stats"
-
-                with redis_client.pipeline() as pipe:
-                    if data.get("rating"):
-                        pipe.hincrby(redis_key, "rating_sum", data["rating"])
-                        pipe.hincrby(redis_key, "rating_count", 1)
-
-                    pipe.hincrby(redis_key, "review_count", 1)
-                    pipe.execute()
-
-                # Update all derived stats
-                ProductStatsService.update_product_stats(product_id)
+                # Recompute from the database rather than incrementing counters
+                # that only Redis holds. The old path meant an evicted key
+                # silently reset a product to 0 stars while its reviews sat
+                # untouched in Postgres. This also writes the seller's
+                # total_rating/total_raters, which nothing wrote before.
+                stats = refresh_for_product(session, product_id)
 
                 # Trigger notification
                 from app.notifications.services import NotificationService
@@ -1967,12 +1984,8 @@ class ProductSocialService:
                             "user_id": user_id,
                             "username": user.username if user else "Unknown",
                             "rating": data.get("rating"),
-                            "review_count": int(
-                                redis_client.hget(redis_key, "review_count")
-                            ),
-                            "avg_rating": float(
-                                redis_client.hget(redis_key, "avg_rating") or 0
-                            ),
+                            "review_count": stats["review_count"],
+                            "avg_rating": stats["avg_rating"],
                             "is_verified": data.get("is_verified", False),
                         },
                     )
@@ -1995,14 +2008,72 @@ class ProductSocialService:
                 logger.warning(f"gamification review_created emit failed: {e}")
 
             return review
+        except APIError:
+            # Deliberate, already-meaningful failures: "you haven't received
+            # this order yet" (403), "no such product" (404), "you've already
+            # reviewed this" (400). The blanket handler below used to swallow
+            # all of them and answer 500, so a buyer who simply hadn't taken
+            # delivery was told the server was broken.
+            raise
+        except SQLAlchemyError as e:
+            # Must precede `except Exception`, which would otherwise catch this
+            # first and make the branch unreachable -- as it was.
+            logger.error(f"Database error adding review: {str(e)}")
+            raise ConflictError("Failed to add review")
         except Exception as e:
             logger.error(f"Error adding review: {str(e)}")
             raise APIError("Failed to add review", 500)
-        except SQLAlchemyError as e:
-            logger.error(f"Error adding review: {str(e)}")
-            raise ConflictError("Failed to add review")
         except (RedisError, RedisConnectionError) as e:
             logger.warning(f"Redis error while adding review: {str(e)}", exc_info=True)
+
+    @staticmethod
+    def update_review(user_id, review_id, data):
+        """Edit your own review.
+
+        There was no way to change a review after posting it -- a mistyped
+        rating was permanent, and a seller who fixed a problem could never have
+        that reflected. Only the author may edit, and only the fields a person
+        would actually want to change; is_verified and order_id stay where the
+        server put them.
+        """
+        with session_scope() as session:
+            review = session.query(ProductReview).get(review_id)
+            if not review:
+                raise NotFoundError("Review not found")
+            if review.user_id != user_id:
+                raise ForbiddenError("You can only edit your own review")
+
+            for field in ("rating", "title", "content"):
+                if field in data:
+                    setattr(review, field, data[field])
+            session.flush()
+
+            product_id = review.product_id
+            refresh_for_product(session, product_id)
+            return session.query(ProductReview).get(review_id)
+
+    @staticmethod
+    def delete_review(user_id, review_id):
+        """Delete your own review, and correct the aggregates it fed."""
+        with session_scope() as session:
+            review = session.query(ProductReview).get(review_id)
+            if not review:
+                raise NotFoundError("Review not found")
+            if review.user_id != user_id:
+                raise ForbiddenError("You can only delete your own review")
+
+            product_id = review.product_id
+            # Upvotes reference the review, so they have to go first.
+            session.query(ReviewUpvote).filter_by(review_id=review_id).delete(
+                synchronize_session=False
+            )
+            session.delete(review)
+            session.flush()
+
+            # Without this the seller keeps the stars from a review that no
+            # longer exists.
+            refresh_for_product(session, product_id)
+            return {"deleted": True, "review_id": review_id}
 
     @staticmethod
     def upvote_review(user_id, review_id):
@@ -2016,13 +2087,38 @@ class ProductSocialService:
                 if review.user_id == user_id:
                     raise APIError("Cannot upvote your own review", 400)
 
-                review.upvotes += 1
-
-                # Update Redis
-                redis_client.zincrby(
-                    f"product:{review.product_id}:helpful_reviews", 1, review_id
+                # One vote per person. This used to be a bare `+= 1` with
+                # nothing recording who had voted, so tapping the button ten
+                # times counted ten times. The Redis set below was written but
+                # never read -- and a cache can't enforce uniqueness anyway.
+                already = (
+                    session.query(ReviewUpvote)
+                    .filter_by(user_id=user_id, review_id=review.id)
+                    .first()
                 )
-                redis_client.zincrby(f"user:{user_id}:upvoted_reviews", 1, review_id)
+                if already:
+                    raise APIError("You've already found this review helpful", 409)
+
+                session.add(ReviewUpvote(user_id=user_id, review_id=review.id))
+                session.flush()
+
+                # Derive the count from the rows rather than trusting a counter
+                # that earlier double-votes may already have inflated.
+                review.upvotes = (
+                    session.query(func.count(ReviewUpvote.user_id))
+                    .filter(ReviewUpvote.review_id == review.id)
+                    .scalar()
+                )
+
+                # Cache for the "most helpful" ordering. Best-effort: the row
+                # above is the record, this is just a leaderboard.
+                try:
+                    redis_client.zadd(
+                        f"product:{review.product_id}:helpful_reviews",
+                        {str(review_id): review.upvotes},
+                    )
+                except Exception as exc:
+                    logger.warning("Could not cache helpful-review score: %s", exc)
 
                 # Notify review author if different from upvoter
                 if review.user_id != user_id:

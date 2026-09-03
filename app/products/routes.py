@@ -14,6 +14,8 @@ from app.libs.schemas import PaginationQueryArgs
 from app.socials.services import ProductSocialService
 from app.socials.schemas import (
     ProductReviewSchema,
+    ProductReviewUpdateSchema,
+    ReviewDeleteSchema,
     ProductReviewsSchema,
     ReviewUpvoteSchema,
 )
@@ -140,6 +142,29 @@ class ProductReviews(MethodView):
     def post(self, data, product_id):
         """Create product review"""
         return ProductSocialService.create_review(current_user.id, product_id, data)
+
+
+@bp.route("/reviews/<int:review_id>")
+class ProductReviewDetail(MethodView):
+    """Edit or remove your own review.
+
+    Neither was possible before: a review was permanent once posted, so a
+    mistyped rating stayed wrong and a buyer whose problem the seller fixed had
+    no way to reflect that.
+    """
+
+    @login_required
+    @bp.arguments(ProductReviewUpdateSchema)
+    @bp.response(200, ProductReviewSchema)
+    def patch(self, data, review_id):
+        """Edit your own review"""
+        return ProductSocialService.update_review(current_user.id, review_id, data)
+
+    @login_required
+    @bp.response(200, ReviewDeleteSchema)
+    def delete(self, review_id):
+        """Delete your own review"""
+        return ProductSocialService.delete_review(current_user.id, review_id)
 
 
 @bp.route("/reviews/<review_id>/upvote")
