@@ -13,6 +13,11 @@ class OrderItemSchema(Schema):
     price = fields.Float(required=True)
     seller_id = fields.Int(dump_only=True)
     status = fields.Enum(OrderItem.Status, by_value=True, dump_only=True)
+    # An order item used to carry only a product_id, so any client rendering a
+    # list of orders had to fetch each product separately just to show a name
+    # and a thumbnail -- one request per line. The relationship already existed;
+    # it was simply never exposed.
+    product = fields.Nested(ProductSimpleSchema, dump_only=True)
 
 
 class OrderCreateSchema(Schema):
