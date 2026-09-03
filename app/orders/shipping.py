@@ -11,12 +11,17 @@ from app.libs.errors import ValidationError
 
 logger = logging.getLogger(__name__)
 
+# postal_code is deliberately NOT here. Nigeria has postcodes but they are
+# rarely known or used, and reverse-geocoding a "current location" pin usually
+# doesn't return one -- so requiring it rejected exactly the addresses the app
+# steers people towards, with a 422 the buyer could do nothing about. The column
+# is nullable and geocode_address() already skips empty parts, so nothing
+# downstream needs it. Still accepted and stored whenever it is supplied.
 REQUIRED_SHIPPING_FIELDS = (
     "recipient_name",
     "street_address",
     "city",
     "state",
-    "postal_code",
     "country",
 )
 
