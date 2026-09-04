@@ -25,6 +25,31 @@ class NicheSchema(Schema):
     name = fields.Str(required=True, validate=validate.Length(min=1, max=100))
     description = fields.Str(required=True, validate=validate.Length(min=10, max=2000))
     slug = fields.Str(dump_only=True)
+    # A community needs a face. Without these every niche rendered as an
+    # initial on a coloured square.
+    image_url = fields.Method("get_image_url", dump_only=True)
+    banner_url = fields.Method("get_banner_url", dump_only=True)
+    # Set by the service for the requesting user, so a list can show Join vs
+    # Joined without a call per row.
+    is_member = fields.Bool(dump_only=True)
+
+    @staticmethod
+    def _media_url(media):
+        """Never raise for a picture. A community with a broken image should
+        still list, so a failed URL is simply no URL."""
+        if media is None:
+            return None
+        try:
+            return media.get_url()
+        except Exception:
+            return None
+
+    def get_image_url(self, obj):
+        return NicheSchema._media_url(getattr(obj, "image", None))
+
+    def get_banner_url(self, obj):
+        return NicheSchema._media_url(getattr(obj, "banner", None))
+
     status = fields.Enum(NicheStatus, by_value=True, dump_only=True)
     visibility = fields.Enum(NicheVisibility, by_value=True, dump_only=True)
 
@@ -177,6 +202,19 @@ class NicheSearchSchema(Schema):
     search = fields.Str(allow_none=True)
     category_ids = fields.List(fields.Int(), allow_none=True)
     visibility = fields.Enum(NicheVisibility, by_value=True, allow_none=True)
+    # Ordering was hardcoded to member_count desc, so the biggest communities
+    # were the only ones anyone ever saw and a new one could never surface.
+    sort = fields.Str(
+        allow_none=True,
+        validate=validate.OneOf(["trending", "newest", "members", "name"]),
+        load_default="trending",
+    )
+    # "joined" / "not_joined" so one endpoint can serve both the Home tab (the
+    # communities you are in) and Explore (the ones you aren't).
+    membership = fields.Str(
+        allow_none=True,
+        validate=validate.OneOf(["joined", "not_joined"]),
+    )
     page = fields.Int(validate=validate.Range(min=1), missing=1)
     per_page = fields.Int(validate=validate.Range(min=1, max=100), missing=20)
 
