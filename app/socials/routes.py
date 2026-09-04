@@ -541,6 +541,26 @@ class FollowingFeed(MethodView):
             abort(500, message="Failed to get following feed")
 
 
+@bp.route("/feed/niches")
+class JoinedNichesFeed(MethodView):
+    @login_required
+    @bp.arguments(FeedQueryArgs, location="query")
+    @bp.response(200, description="Feed from joined niche communities")
+    def get(self, args):
+        """Get one chronological feed containing posts from joined niches."""
+        try:
+            return FeedService.get_hybrid_feed(
+                current_user.id,
+                page=args.get("page", 1),
+                per_page=args.get("per_page", 20),
+                feed_type="joined_niches",
+                force_refresh=args.get("force_refresh", False),
+            )
+        except Exception as e:
+            logger.error(f"Joined niches feed error: {str(e)}")
+            abort(500, message="Failed to get joined niches feed")
+
+
 @bp.route("/feed/discover")
 class DiscoverFeed(MethodView):
     @login_required

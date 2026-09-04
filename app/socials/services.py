@@ -1027,6 +1027,9 @@ class NicheService:
         redis_client.delete(
             NicheService.CACHE_KEYS["user_niches"].format(user_id=user_id)
         )
+        # Membership changes must immediately affect the aggregate community
+        # timeline as well as the memberships list.
+        redis_client.delete(f"feed:user:{user_id}:joined_niches")
 
 
 class PostService:
@@ -3047,6 +3050,13 @@ class FeedService:
                 niche_items = FeedService._get_niche_content(niche_id, user_id)
                 feed_items.extend(niche_items)
 
+            elif feed_type == "joined_niches":
+                # One batched query across all active memberships. This is the
+                # source for the X-style Communities home feed; unlike calling
+                # the single-niche endpoint repeatedly, it paginates the
+                # combined result and keeps ordering consistent across niches.
+                feed_items.extend(FeedService._get_joined_niches_content(user_id))
+
             # Personalized combines several sources that can return the same
             # item — keep the first occurrence (followed > engaged > trending
             # > discover) so pages never repeat an id.
@@ -3060,6 +3070,15 @@ class FeedService:
                     seen_ids.add(item_id)
                 deduped_items.append(item)
             feed_items = deduped_items
+
+            if feed_type == "joined_niches":
+                # Communities use a chronological timeline, not the ranked
+                # and type-diversified marketplace feed.
+                return sorted(
+                    feed_items,
+                    key=lambda item: item.get("created_at") or datetime.min,
+                    reverse=True,
+                )[:100]
 
             # Apply personalization scoring
             scored_items = FeedService._apply_personalization_scoring(
@@ -4001,6 +4020,53 @@ class FeedService:
                         "type": "post",
                         "score": score,
                         "created_at": post.created_at,
+                    }
+                )
+
+            return feed_items
+
+    @staticmethod
+    def _get_joined_niches_content(user_id):
+        """Return recent active posts from every niche the user joined."""
+        with session_scope() as session:
+            niche_posts = (
+                session.query(NichePost)
+                .join(
+                    NicheMembership,
+                    NicheMembership.niche_id == NichePost.niche_id,
+                )
+                .options(
+                    joinedload(NichePost.post),
+                    joinedload(NichePost.niche),
+                )
+                .filter(
+                    NicheMembership.user_id == user_id,
+                    NicheMembership.is_active == True,
+                    NicheMembership.is_banned == False,
+                    NichePost.status == PostStatus.ACTIVE,
+                    NichePost.is_approved == True,
+                    NichePost.post.has(Post.status == PostStatus.ACTIVE),
+                )
+                .order_by(NichePost.created_at.desc())
+                .limit(100)
+                .all()
+            )
+
+            # A post may be attached to more than one niche. Keep one feed
+            # entry per post so the unified timeline never repeats content.
+            seen_post_ids = set()
+            feed_items = []
+            for niche_post in niche_posts:
+                post = niche_post.post
+                if not post or post.id in seen_post_ids:
+                    continue
+                seen_post_ids.add(post.id)
+                feed_items.append(
+                    {
+                        "id": post.id,
+                        "type": "post",
+                        "score": 0,
+                        "created_at": niche_post.created_at,
                     }
                 )
 
