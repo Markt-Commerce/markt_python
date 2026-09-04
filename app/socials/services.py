@@ -418,19 +418,78 @@ class NicheService:
                 if category_filters:
                     base_query = base_query.filter(db.or_(*category_filters))
 
-            # Order by relevance (member count, activity)
-            base_query = base_query.order_by(
-                Niche.member_count.desc(),
-                Niche.post_count.desc(),
-                Niche.created_at.desc(),
+            # Membership filter, so one endpoint serves both the "your
+            # communities" tab and the "discover" tab.
+            membership = args.get("membership")
+            if membership and user_id:
+                joined_ids = session.query(NicheMembership.niche_id).filter(
+                    NicheMembership.user_id == user_id,
+                    NicheMembership.is_active.is_(True),
+                    NicheMembership.is_banned.is_(False),
+                )
+                if membership == "joined":
+                    base_query = base_query.filter(Niche.id.in_(joined_ids))
+                elif membership == "not_joined":
+                    base_query = base_query.filter(~Niche.id.in_(joined_ids))
+
+            # Ordering was hardcoded to member_count desc, so the largest
+            # communities were the only ones anyone ever saw and a new one could
+            # never surface. "trending" keeps that behaviour as the default.
+            sort = args.get("sort") or "trending"
+            if sort == "newest":
+                base_query = base_query.order_by(Niche.created_at.desc())
+            elif sort == "members":
+                base_query = base_query.order_by(
+                    Niche.member_count.desc(), Niche.created_at.desc()
+                )
+            elif sort == "name":
+                base_query = base_query.order_by(Niche.name.asc())
+            else:  # trending: recent activity weighted by size
+                base_query = base_query.order_by(
+                    Niche.post_count.desc(),
+                    Niche.member_count.desc(),
+                    Niche.created_at.desc(),
+                )
+
+            # Eager-load the imagery the cards render, or every row lazy-loads
+            # two media objects.
+            base_query = base_query.options(
+                joinedload(Niche.image), joinedload(Niche.banner)
             )
 
             paginator = Paginator(
                 base_query, page=args.get("page", 1), per_page=args.get("per_page", 20)
             )
-            result = paginator.paginate(args)
+            # Strip the keys we've already applied. Paginator reads "sort" from
+            # the args and applies its own ordering -- and Niche.members is a
+            # relationship, so sort=members made it order by niche_memberships
+            # without a join: "missing FROM-clause entry".
+            paginator_args = {
+                k: v for k, v in args.items() if k not in ("sort", "membership")
+            }
+            result = paginator.paginate(paginator_args)
+
+            # One query for "which of these am I in", rather than a call per
+            # card to decide between Join and Joined.
+            items = result["items"]
+            if user_id and items:
+                member_of = {
+                    nid
+                    for (nid,) in session.query(NicheMembership.niche_id).filter(
+                        NicheMembership.user_id == user_id,
+                        NicheMembership.is_active.is_(True),
+                        NicheMembership.is_banned.is_(False),
+                        NicheMembership.niche_id.in_([n.id for n in items]),
+                    )
+                }
+                for niche in items:
+                    niche.is_member = niche.id in member_of
+            else:
+                for niche in items:
+                    niche.is_member = False
+
             return {
-                "items": result["items"],
+                "items": items,
                 "pagination": {
                     "page": result["page"],
                     "per_page": result["per_page"],

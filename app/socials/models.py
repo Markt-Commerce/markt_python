@@ -75,6 +75,13 @@ class Niche(BaseModel, UniqueIdMixin):
     require_approval = db.Column(db.Boolean, default=False)
     max_members = db.Column(db.Integer, default=10000)
 
+    # Imagery. A community reads as a place because it has a face -- the
+    # X Communities layout is carried almost entirely by the avatar in a card
+    # and the banner on the detail page. Niches had neither, so every one of
+    # them rendered as an initial on a coloured square.
+    image_id = db.Column(db.Integer, db.ForeignKey("media.id"), nullable=True)
+    banner_id = db.Column(db.Integer, db.ForeignKey("media.id"), nullable=True)
+
     # Metadata
     tags = db.Column(db.JSON)  # Array of tags
     rules = db.Column(db.JSON)  # Community rules
@@ -89,6 +96,8 @@ class Niche(BaseModel, UniqueIdMixin):
     updated_at = db.Column(db.DateTime, onupdate=db.func.now())
 
     # Relationships
+    image = db.relationship("Media", foreign_keys=[image_id])
+    banner = db.relationship("Media", foreign_keys=[banner_id])
     categories = db.relationship("NicheCategory", back_populates="niche")
     members = db.relationship(
         "NicheMembership", back_populates="niche", cascade="all, delete-orphan"
