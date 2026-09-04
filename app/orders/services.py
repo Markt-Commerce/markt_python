@@ -8,6 +8,7 @@ from sqlalchemy.exc import SQLAlchemyError
 # project imports
 from external.database import db
 from app.libs.session import session_scope, read_scope
+from app.libs.money import money_to_float
 from app.libs.errors import (
     NotFoundError,
     ValidationError,
@@ -922,7 +923,15 @@ class OrderService:
                 order_item_id=order_item_id,
                 event_type=OrderEventType.ITEM_REFUNDED,
                 actor_type=ActorType.SYSTEM,
-                metadata={"reason": reason, "refund_amount": refund_amount},
+                metadata={
+                    "reason": reason,
+                    # float(), not the Decimal itself: event_metadata is JSONB
+                    # and json.dumps cannot serialise Decimal. Since
+                    # order_item.price became NUMERIC(12,2) this raised
+                    # "Object of type Decimal is not JSON serializable" and
+                    # took down every refund, for every caller.
+                    "refund_amount": money_to_float(refund_amount),
+                },
                 idempotency_key=f"event:item_refunded:{order_item_id}",
             )
 
@@ -1109,13 +1118,25 @@ class OrderService:
 
 
 class SellerOrderService:
+    # An order the buyer hasn't paid for isn't the seller's business yet.
+    # Showing them means asking someone to commit stock against money that may
+    # never arrive, and a seller "accepting" one implies a promise nobody has
+    # paid to hold.
+    UNPAID_ORDER_STATUSES = (
+        OrderStatus.PENDING_PAYMENT,
+        OrderStatus.PENDING,  # deprecated alias, still on older rows
+        OrderStatus.FAILED,
+    )
+
     @staticmethod
     def get_seller_orders(seller_id, status=None, page=1, per_page=20):
-        """For sellers - shows only their order items"""
+        """For sellers - shows only their order items, on paid orders."""
         with session_scope() as session:
             base_query = (
                 session.query(OrderItem)
-                .filter_by(seller_id=seller_id)
+                .join(Order, Order.id == OrderItem.order_id)
+                .filter(OrderItem.seller_id == seller_id)
+                .filter(Order.status.notin_(SellerOrderService.UNPAID_ORDER_STATUSES))
                 .options(
                     db.joinedload(OrderItem.order).joinedload(Order.buyer),
                     db.joinedload(OrderItem.product)
@@ -1145,6 +1166,8 @@ class SellerOrderService:
     def update_order_item_status(order_item_id, status, seller_id):
         order_id = None
         all_delivered = False
+        cancelled_item_id = None
+        cancelled_order_id = None
 
         with session_scope() as session:
             item = (
@@ -1157,17 +1180,46 @@ class SellerOrderService:
             if not item:
                 raise NotFoundError("Order item not found")
 
-            # transition_to raises ValueError on an illegal move. Left bare it
-            # reached the generic handler and came back as a 500 -- a seller
-            # trying to skip a step was told the server had broken. It is a
-            # client error, and the message names both states so the app can
-            # say what actually went wrong.
-            try:
-                item.transition_to(status)
-            except ValueError as exc:
-                raise ValidationError(str(exc))
+            # A seller may not declare their own delivery. DELIVERED sets
+            # delivered_at, which starts the settlement hold that
+            # WalletService.settle_eligible_order_items pays out on -- so this
+            # endpoint let a seller release their own escrow with no proof that
+            # anything arrived. Delivery is confirmed by the buyer or the rider
+            # through the POD/QR flow (DeliveryService.confirm_order_qr_code,
+            # DeliveryRunPodService), which is what sets DELIVERED legitimately.
+            if status == OrderItem.Status.DELIVERED:
+                raise ValidationError(
+                    "Delivery is confirmed by the buyer or the delivery partner, "
+                    "not by the seller. Mark the item shipped and it will move to "
+                    "delivered once delivery is confirmed."
+                )
 
-            order_id = item.order_id
+            # Declining must give the money back. There was no CANCELLED
+            # branch here at all -- no refund, no inventory restore, no
+            # notification -- so a seller could decline an order the buyer had
+            # already paid for and simply keep the money.
+            #
+            # Delegated rather than handled inline, because
+            # refund_unresolved_item already does the whole job (refund, mark
+            # the payment partially refunded, cancel the item) and is
+            # idempotent. It no-ops on an already-CANCELLED item, so the
+            # transition has to happen inside it, not before it.
+            if status == OrderItem.Status.CANCELLED:
+                cancelled_item_id = item.id
+                cancelled_order_id = item.order_id
+                order_id = item.order_id
+
+            if cancelled_item_id is None:
+                # transition_to raises ValueError on an illegal move. Left bare
+                # it reached the generic handler and came back as a 500 -- a
+                # seller trying to skip a step was told the server had broken.
+                # It is a client error, and the message names both states.
+                try:
+                    item.transition_to(status)
+                except ValueError as exc:
+                    raise ValidationError(str(exc))
+
+                order_id = item.order_id
 
             if status == OrderItem.Status.DELIVERED:
                 order = session.query(Order).get(order_id)
@@ -1187,7 +1239,26 @@ class SellerOrderService:
         if status == OrderItem.Status.DELIVERED and all_delivered:
             OrderService.update_order_status(order_id, OrderStatus.DELIVERED)
 
+        if cancelled_item_id is not None:
+            # Opens its own scope, so it runs after this one has committed.
+            OrderService.refund_unresolved_item(
+                cancelled_item_id, reason="Declined by seller"
+            )
+            return SellerOrderService._reload_item(cancelled_item_id)
+
         return item
+
+    @staticmethod
+    def _reload_item(order_item_id):
+        """Re-read after refund_unresolved_item, which committed in its own
+        scope -- the instance we held is stale."""
+        with read_scope() as session:
+            return (
+                session.query(OrderItem)
+                .options(db.joinedload(OrderItem.product))
+                .filter_by(id=order_item_id)
+                .first()
+            )
 
     @staticmethod
     def get_seller_order_stats(seller_id):
