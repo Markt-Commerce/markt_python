@@ -7,7 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 # project imports
 from external.database import db
-from app.libs.session import session_scope
+from app.libs.session import session_scope, read_scope
 from app.libs.errors import (
     NotFoundError,
     ValidationError,
@@ -21,6 +21,7 @@ from app.cart.models import Cart, CartItem
 from app.notifications.models import NotificationType
 from app.notifications.services import NotificationService
 from app.products.models import Product
+from app.media.models import ProductImage
 from app.payments.models import Payment, PaymentStatus
 from app.users.models import Buyer
 from app.products.services import ProductService
@@ -216,13 +217,27 @@ class OrderService:
 
     @staticmethod
     def get_user_orders(user_id):
-        """For buyers - shows complete orders with all items"""
-        with session_scope() as session:
+        """For buyers - shows complete orders with all items.
+
+        read_scope, not session_scope: session_scope commits on exit, and a
+        commit expires every instance it loaded. These Orders are returned to a
+        route that then serialises them, so each one re-SELECTed itself -- seven
+        orders meant seven extra queries, entirely at serialise time and
+        invisible from inside the service.
+        """
+        with read_scope() as session:
             return (
                 session.query(Order)
                 .options(
-                    db.joinedload(Order.items).joinedload(OrderItem.product),
+                    db.joinedload(Order.items)
+                    .joinedload(OrderItem.product)
+                    .joinedload(Product.images)
+                    .joinedload(ProductImage.media),
                     db.joinedload(Order.items).joinedload(OrderItem.seller),
+                    # OrderSchema dumps shipping_address_dict, which walks this
+                    # relationship -- without it that's one SELECT per order at
+                    # serialise time.
+                    db.joinedload(Order.shipping_address),
                 )
                 .filter_by(buyer_id=user_id)
                 .order_by(Order.created_at.desc())
@@ -231,14 +246,20 @@ class OrderService:
 
     @staticmethod
     def get_order(order_id):
-        with session_scope() as session:
+        # read_scope for the same reason as get_user_orders: the caller
+        # serialises what we return, after this scope has exited.
+        with read_scope() as session:
             return (
                 session.query(Order)
                 .options(
-                    db.joinedload(Order.items).joinedload(OrderItem.product),
+                    db.joinedload(Order.items)
+                    .joinedload(OrderItem.product)
+                    .joinedload(Product.images)
+                    .joinedload(ProductImage.media),
                     db.joinedload(Order.items).joinedload(OrderItem.seller),
                     db.joinedload(Order.items).joinedload(OrderItem.variant),
                     db.joinedload(Order.payments),
+                    db.joinedload(Order.shipping_address),
                 )
                 .get(order_id)
             )
@@ -1097,7 +1118,9 @@ class SellerOrderService:
                 .filter_by(seller_id=seller_id)
                 .options(
                     db.joinedload(OrderItem.order).joinedload(Order.buyer),
-                    db.joinedload(OrderItem.product),
+                    db.joinedload(OrderItem.product)
+                    .joinedload(Product.images)
+                    .joinedload(ProductImage.media),
                     db.joinedload(OrderItem.variant),
                 )
             )

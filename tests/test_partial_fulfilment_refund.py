@@ -214,9 +214,13 @@ def test_refund_unresolved_item_accounts_for_prior_refunds(mock_scope, mock_refu
 @patch("app.orders.services.NotificationService.create_notification")
 @patch("app.wallet.services.WalletService.refund_order_to_wallet")
 @patch("app.orders.services.ProductService.restore_inventory_for_order")
+# cancel_order returns via get_order(), which reads in a read_scope -- it must
+# not commit, because committing expires the order the caller is about to
+# serialise.
+@patch("app.orders.services.read_scope")
 @patch("app.orders.services.session_scope")
 def test_cancel_order_refunds_only_remaining_amount_after_prior_item_refund(
-    mock_scope, mock_restore, mock_refund, mock_notify
+    mock_scope, mock_read_scope, mock_restore, mock_refund, mock_notify
 ):
     """cancel_order must not re-refund money already paid out by an
     earlier per-item refund (9.1 ASK timeout, or any future partial
