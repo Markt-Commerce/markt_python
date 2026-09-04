@@ -1,6 +1,7 @@
 # python imports
 import logging
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Optional, Dict, Any, List
 import json
 
@@ -11,6 +12,7 @@ from sqlalchemy.orm import joinedload
 from external.redis import redis_client
 from external.database import db
 from app.libs.session import session_scope
+from app.libs.money import to_money
 from app.products.models import Product
 from app.libs.errors import (
     NotFoundError,
@@ -25,6 +27,10 @@ from .models import Cart, CartItem
 from app.users.models import User, Buyer
 from app.products.models import Product, ProductVariant
 from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
+from app.orders.shipping import (
+    normalize_shipping_address,
+    shipping_address_to_model_kwargs,
+)
 from app.notifications.services import NotificationService
 from app.notifications.models import NotificationType
 
@@ -293,20 +299,25 @@ class CartService:
         import uuid
 
         with session_scope() as session:
-            # Check idempotency if key provided
-            if idempotency_key:
-                existing_order = (
-                    session.query(Order)
-                    .filter_by(idempotency_key=idempotency_key)
-                    .first()
-                )
-                if existing_order:
-                    return existing_order
-
             # Validate user
             user = session.query(User).get(user_id)
             if not user or not user.is_buyer:
                 raise ForbiddenError("Only buyers can checkout")
+
+            # Check idempotency if key provided — scoped to this buyer so a
+            # key reused by (or leaked from) another account can never return
+            # someone else's order.
+            if idempotency_key:
+                existing_order = (
+                    session.query(Order)
+                    .filter_by(
+                        idempotency_key=idempotency_key,
+                        buyer_id=user.buyer_account.id,
+                    )
+                    .first()
+                )
+                if existing_order:
+                    return existing_order
 
             # Get cart
             cart = CartService.get_cart(user_id)
@@ -316,14 +327,18 @@ class CartService:
             # Validate cart items (check availability, prices, etc.)
             CartService._validate_cart_items(cart.items)
 
+            shipping_normalized = normalize_shipping_address(
+                checkout_data.get("shipping_address"),
+                saved_address=user.buyer_account.shipping_address,
+                use_saved_address=checkout_data.get("use_saved_address", False),
+            )
+
             # Calculate order totals
             subtotal = cart.subtotal()
             shipping_fee = CartService._calculate_shipping_fee(
-                cart, checkout_data.get("shipping_address")
+                cart, shipping_normalized
             )
-            tax = CartService._calculate_tax(
-                subtotal, checkout_data.get("shipping_address")
-            )
+            tax = CartService._calculate_tax(subtotal, shipping_normalized)
             discount = CartService._calculate_discount(subtotal, cart.coupon_code)
             total = subtotal + shipping_fee + tax - discount
 
@@ -339,21 +354,9 @@ class CartService:
             order.discount = discount
             order.total = total
 
-            # shipping_address is a relationship; map dict payload to ShippingAddress ORM
-            shipping_data = checkout_data.get("shipping_address") or {}
-            shipping_address = ShippingAddress(
-                recipient_name=shipping_data.get("recipient_name"),
-                street_address=shipping_data.get("street_address")
-                or shipping_data.get("street"),
-                city=shipping_data.get("city"),
-                state=shipping_data.get("state"),
-                postal_code=shipping_data.get("postal_code")
-                or shipping_data.get("zip"),
-                country=shipping_data.get("country"),
-                latitude=shipping_data.get("latitude"),
-                longitude=shipping_data.get("longitude"),
+            order.shipping_address = ShippingAddress(
+                **shipping_address_to_model_kwargs(shipping_normalized)
             )
-            order.shipping_address = shipping_address
 
             # billing_address is JSONB on Order, so we can store the dict directly
             order.billing_address = checkout_data.get("billing_address")
@@ -361,6 +364,7 @@ class CartService:
             order.idempotency_key = idempotency_key or str(uuid.uuid4())
             session.add(order)
             session.flush()
+            order.order_number = order.generate_order_number()
 
             # Create order items from cart items
             for cart_item in cart.items:
@@ -449,12 +453,12 @@ class CartService:
                     "product_id": item.product_id,
                     "variant_id": item.variant_id,
                     "quantity": item.quantity,
-                    "product_price": float(item.product_price)
-                    if item.product_price
-                    else 0.0,
-                    "created_at": item.created_at.isoformat()
-                    if item.created_at
-                    else None,
+                    "product_price": (
+                        float(item.product_price) if item.product_price else 0.0
+                    ),
+                    "created_at": (
+                        item.created_at.isoformat() if item.created_at else None
+                    ),
                 }
                 cart_data["items"].append(item_data)
 
@@ -525,15 +529,78 @@ class CartService:
 
     @staticmethod
     def _calculate_shipping_fee(cart: Cart, shipping_address: Optional[Dict]) -> float:
-        """Calculate shipping fee based on cart and shipping address"""
-        # TODO: Implement actual shipping calculation logic
-        # For now, return a flat rate or calculate based on address/weight
-        # Example: Flat rate of 10.00 for now
-        if not shipping_address:
-            return 0.0
+        """1.1/10.3: flat fee per market the cart's items come from
+        (Phase 0: "flat fee per market->area pair, not zone/distance-
+        based"). Was a hardcoded flat ₦10 regardless of cart contents --
+        shared by both checkout flows (this one and
+        PaymentService.initialize_checkout_payment), so fixing it here
+        fixes both without touching either flow's own code.
 
-        # Basic flat rate shipping (can be enhanced with weight-based, distance-based, etc.)
-        return 10.00
+        Real fix, still approximate: DEFAULT_BASE_PRICE (the same
+        placeholder DeliveryRun pricing itself uses at run cutoff --
+        app.deliveries.runs) once per DISTINCT market among the cart's
+        sellers, so a basket spanning two markets is honestly charged for
+        two separate delivery runs instead of one flat number regardless
+        of size. This is what makes a multi-market basket have a real,
+        non-fabricated second fee to warn the buyer about (Phase 13's
+        multi-market basket UI item) -- previously there was nothing real
+        to show.
+
+        Not yet the true per-(market,area)-pair rate Phase 0 ultimately
+        wants -- that needs real rate data, same TBD status as
+        DeliveryRun's own pricing (Phase 11's "tune zone-based pricing"
+        item, blocked on real numbers). Deliberately doesn't resolve the
+        buyer's Area here (no DB session available at this call site,
+        and the number wouldn't change yet either way since there's only
+        one placeholder rate) -- revisit together once real per-pair
+        rates exist.
+
+        FLAGGED, NOT SOLVED (Unfinished-Tasks.md): this checkout-time
+        captured shipping_fee and the real cost
+        DeliveryRunService.close_runs_past_cutoff computes later
+        (run.price_per_order, once the run's actual roster is known) are
+        two unconnected numbers today -- nothing reconciles a difference
+        between what was captured here and what delivery actually costs
+        once batched with other orders. Needs a real decision (hard
+        estimate Markt absorbs the variance on, vs. reconciling via a
+        wallet credit/debit after the run closes) before that's truly
+        solved.
+        """
+        if not shipping_address or not cart.items:
+            return to_money(0)
+
+        from app.deliveries.runs import DEFAULT_BASE_PRICE
+
+        distinct_deliveries = CartService.count_distinct_deliveries(cart)
+        return to_money(to_money(DEFAULT_BASE_PRICE) * distinct_deliveries)
+
+    @staticmethod
+    def count_distinct_deliveries(cart: Cart) -> int:
+        """How many separate delivery runs this cart's items will need --
+        one per distinct market among its sellers (rerouting/delivery are
+        both within-market only, ADR 18.2). Used by _calculate_shipping_fee
+        above, and surfaced directly to the checkout response
+        (PaymentService.initialize_checkout_payment) so the buyer can see
+        *why* the shipping fee is what it is when it spans more than one
+        market (1.1/7.3's multi-market basket warning) -- not just a
+        bigger number with no explanation."""
+        if not cart.items:
+            return 0
+
+        market_ids = set()
+        unresolved_sellers = False
+        for item in cart.items:
+            seller = getattr(item.product, "seller", None) if item.product else None
+            market_id = getattr(seller, "market_id", None) if seller else None
+            if market_id:
+                market_ids.add(market_id)
+            else:
+                # No market assigned (nullable column; shouldn't happen
+                # post-Phase 6 but isn't enforced) -- still counts as one
+                # more delivery rather than being silently dropped.
+                unresolved_sellers = True
+
+        return max(len(market_ids) + (1 if unresolved_sellers else 0), 1)
 
     @staticmethod
     def _calculate_tax(subtotal: float, shipping_address: Optional[Dict]) -> float:
@@ -541,11 +608,11 @@ class CartService:
         # TODO: Implement actual tax calculation logic
         # For now, return a simple percentage (e.g., 5% VAT for Nigeria)
         if not shipping_address:
-            return 0.0
+            return to_money(0)
 
         # Basic tax calculation: 5% VAT (can be enhanced with location-based tax)
-        tax_rate = 0.05  # 5%
-        return subtotal * tax_rate
+        tax_rate = Decimal("0.05")  # 5%
+        return to_money(to_money(subtotal) * tax_rate)
 
     @staticmethod
     def _calculate_discount(subtotal: float, coupon_code: Optional[str]) -> float:
@@ -553,11 +620,11 @@ class CartService:
         # TODO: Implement actual coupon validation and discount calculation
         # For now, return 0 if no coupon or coupon is invalid
         if not coupon_code:
-            return 0.0
+            return to_money(0)
 
         # Placeholder: Return 0 for now until coupon system is implemented
         # This should validate coupon, check expiry, calculate discount amount/percentage
-        return 0.0
+        return to_money(0)
 
     @staticmethod
     def _notify_seller_cart_addition(seller_id: int, product_id: str, quantity: int):

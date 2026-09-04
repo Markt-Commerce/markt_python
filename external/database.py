@@ -29,6 +29,9 @@ class Database:
         with app.app_context():
             from app.users.models import User, Buyer, Seller, UserAddress
             from app.products.models import Product, ProductVariant, ProductInventory
+            from app.inventory.models import InventoryReservation
+            from app.fulfilment.models import FulfilmentAllocation
+            from app.markets.models import Market, Area
             from app.categories.models import (
                 Category,
                 ProductCategory,
@@ -40,6 +43,7 @@ class Database:
                 NicheCategory,
             )
             from app.orders.models import Order, Shipment
+            from app.orders.events import OrderEvent
             from app.payments.models import Payment, Transaction
             from app.socials.models import (
                 ProductReview,
@@ -71,12 +75,18 @@ class Database:
                 ChatDiscount,
             )
             from app.cart.models import Cart, CartItem
+            from app.moderation.models import ContentReport, UserBlock
             from app.deliveries.models import (
-                DeliveryUser, 
-                DeliveryLastLocation, 
-                DeliveryOrderAssignment, 
-                LocationUpdateRoom, 
-                )
+                DeliveryUser,
+                DeliveryLastLocation,
+                DeliveryOrderAssignment,
+                LocationUpdateRoom,
+                DeliveryRun,
+                DeliveryRunOrder,
+                DeliveryRunAssignment,
+                DeliveryRunStop,
+                DeliveryFailure,
+            )
 
         # Import other models as needed
 

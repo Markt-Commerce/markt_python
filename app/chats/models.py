@@ -1,4 +1,5 @@
 from external.database import db
+from app.libs.money import MONEY
 from app.libs.models import BaseModel, ReactionMixin, BaseReaction
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declared_attr
@@ -62,7 +63,7 @@ class ChatOffer(BaseModel):
     id = db.Column(db.Integer, primary_key=True)
     message_id = db.Column(db.Integer, db.ForeignKey("chat_messages.id"))
     product_id = db.Column(db.String(12), db.ForeignKey("products.id"))
-    price = db.Column(db.Float)
+    price = db.Column(MONEY)
     status = db.Column(db.String(20), default="pending")  # pending/accepted/rejected
 
     message = db.relationship("ChatMessage", foreign_keys=[message_id])

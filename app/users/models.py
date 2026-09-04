@@ -7,7 +7,6 @@ from app.libs.helpers import UniqueIdMixin
 from external.database import db
 from external.redis import redis_client
 
-
 CURRENT_ROLE_CACHE_KEY = "user:current_role:{user_id}"
 CURRENT_ROLE_CACHE_TTL = 60 * 60 * 24  # 24 hours
 
@@ -25,8 +24,21 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
 
     is_buyer = db.Column(db.Boolean, default=False)
     is_seller = db.Column(db.Boolean, default=False)
+    # Admin gate for app.libs.decorators.admin_required/_has_permission --
+    # no self-serve path to set this; an admin sets it directly (DB or a
+    # future internal tool), same "flagged permanently until someone
+    # edits the DB" treatment already used for MarketVerificationStatus.FLAGGED
+    # and SellerReliabilityScore.gaming_flagged.
+    is_admin = db.Column(db.Boolean, default=False, nullable=False)
     is_active = db.Column(db.Boolean, default=True)
     deactivated_at = db.Column(db.DateTime)
+    # Set when the user deletes their account (Apple App Store 5.1.1(v)).
+    # Distinct from deactivated_at, which is reversible: once this is set the
+    # row has already been stripped of personal data and can never be signed
+    # into again. The row itself survives only so that posts, reviews, chat
+    # threads and order history belonging to other people stay coherent --
+    # see AccountDeletionService.
+    deleted_at = db.Column(db.DateTime, nullable=True, index=True)
 
     # Email verification
     email_verified = db.Column(db.Boolean, default=False)
@@ -52,6 +64,15 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
         "Notification", back_populates="user", lazy="dynamic"
     )
     transactions = db.relationship("Transaction", back_populates="user", lazy="dynamic")
+    wallet_accounts = db.relationship(
+        "WalletAccount", back_populates="user", lazy="dynamic"
+    )
+    withdrawal_requests = db.relationship(
+        "WithdrawalRequest", back_populates="user", lazy="dynamic"
+    )
+    wallet_topups = db.relationship(
+        "WalletTopUp", back_populates="user", lazy="dynamic"
+    )
     posts = db.relationship("Post", back_populates="user", lazy="dynamic")
     post_likes = db.relationship("PostLike", back_populates="user", lazy="dynamic")
     post_comments = db.relationship(
@@ -100,6 +121,11 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
     def check_password(self, password):
         from passlib.hash import pbkdf2_sha256
 
+        # Account deletion destroys the hash outright, and passlib raises on a
+        # null hash rather than returning False -- which would surface as a 500
+        # instead of "invalid credentials".
+        if not self.password_hash:
+            return False
         return pbkdf2_sha256.verify(password, self.password_hash)
 
     @property
@@ -197,6 +223,17 @@ class SellerVerificationStatus(Enum):
     SUSPENDED = "suspended"
 
 
+class MarketVerificationStatus(Enum):
+    """Separate from SellerVerificationStatus (business/KYC identity) --
+    this is specifically about whether a seller's claimed Market matches
+    where their shop address actually geocodes to. See
+    app.markets.services.MarketService.assign_seller_market."""
+
+    UNVERIFIED = "unverified"  # no market claimed yet, or nothing to check against
+    VERIFIED = "verified"  # geocoded shop address within tolerance of the market
+    FLAGGED = "flagged"  # outside tolerance -- excluded from rerouting until reviewed
+
+
 class Seller(BaseModel):
     __tablename__ = "sellers"
 
@@ -213,6 +250,24 @@ class Seller(BaseModel):
     )
     is_active = db.Column(db.Boolean, default=True)
     deactivated_at = db.Column(db.DateTime)
+    paystack_subaccount_code = db.Column(db.String(50), nullable=True)
+    payout_bank_code = db.Column(db.String(10), nullable=True)
+    payout_account_number = db.Column(db.String(20), nullable=True)
+    payout_account_name = db.Column(db.String(100), nullable=True)
+    # Market membership (7.2, Phase 6) -- explicit assignment, not
+    # geofenced. shop_address/lat/lng are only used to sanity-check the
+    # claim (see market_verification_status), never to derive it.
+    market_id = db.Column(db.Integer, db.ForeignKey("markets.id"), nullable=True)
+    shop_address = db.Column(db.JSON, nullable=True)
+    shop_latitude = db.Column(db.Float, nullable=True)
+    shop_longitude = db.Column(db.Float, nullable=True)
+    market_verification_status = db.Column(
+        db.Enum(MarketVerificationStatus),
+        default=MarketVerificationStatus.UNVERIFIED,
+        nullable=False,
+    )
+
+    market = db.relationship("Market")
 
     # Relationships
     user = db.relationship("User", back_populates="seller_account")

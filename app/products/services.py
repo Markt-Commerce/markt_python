@@ -43,7 +43,6 @@ from app.orders.models import OrderItem
 from app.media.services import media_service
 from app.media.models import Media, ProductImage, MediaVariantType
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -61,6 +60,36 @@ class ProductService:
         except SQLAlchemyError as e:
             logger.error(f"Database error fetching products: {str(e)}")
             raise APIError("Failed to fetch products", 500)
+
+    @staticmethod
+    def build_share_links(product_id: str) -> Dict[str, Any]:
+        """Canonical share links for a product.
+
+        Returns both a deep link and a web URL because a share sheet has no
+        idea whether the recipient has the app installed: the deep link opens
+        it directly, the web URL works for anyone.
+        """
+        from main.config import settings
+
+        with session_scope() as session:
+            product = session.query(Product).get(product_id)
+            if not product or product.status in (
+                Product.Status.DELETED,
+                Product.Status.DRAFT,
+            ):
+                raise NotFoundError("Product not found")
+            name = product.name
+
+        scheme = settings.MOBILE_APP_SCHEME or "markt://"
+        web_base = (settings.WEB_APP_BASE_URL or "").rstrip("/")
+
+        return {
+            "product_id": product_id,
+            "product_name": name,
+            "deep_link": f"{scheme}product/{product_id}",
+            "web_url": f"{web_base}/products/{product_id}",
+            "message": f"Check out {name} on Markt",
+        }
 
     @staticmethod
     def get_product(product_id):
@@ -88,7 +117,7 @@ class ProductService:
             raise APIError("Failed to fetch product", 500)
 
     @staticmethod
-    def search_products(args):
+    def search_products(args, market_id=None):
         with session_scope() as session:
             base_query = (
                 session.query(Product)
@@ -101,6 +130,14 @@ class ProductService:
                     joinedload(Product.categories).joinedload(ProductCategory.category),
                 )
             )
+
+            # Market browsing (markets feature): server-determined from the
+            # URL path, not a client-supplied filter, so it bypasses
+            # ProductSearchSchema entirely -- see app.markets.services.
+            if market_id is not None:
+                base_query = base_query.join(
+                    Seller, Product.seller_id == Seller.id
+                ).filter(Seller.market_id == market_id)
 
             # Initialize paginator
             paginator = Paginator(
@@ -944,6 +981,44 @@ class ProductService:
         except Exception as e:
             logger.error(f"Failed to reduce inventory: {str(e)}")
             raise APIError(f"Inventory reduction failed: {str(e)}", 500)
+
+    @staticmethod
+    def restore_inventory_for_order(order_items: List[OrderItem]) -> bool:
+        """Restore inventory when a paid order is cancelled."""
+        try:
+            with session_scope() as session:
+                for item in order_items:
+                    if item.variant_id:
+                        inventory = (
+                            session.query(ProductInventory)
+                            .filter_by(
+                                product_id=item.product_id, variant_id=item.variant_id
+                            )
+                            .first()
+                        )
+                        if inventory:
+                            inventory.quantity += item.quantity
+                        else:
+                            inventory = ProductInventory(
+                                product_id=item.product_id,
+                                variant_id=item.variant_id,
+                                quantity=item.quantity,
+                            )
+                            session.add(inventory)
+                    else:
+                        product = session.query(Product).get(item.product_id)
+                        if not product:
+                            continue
+                        product.stock += item.quantity
+                        if product.status == Product.Status.OUT_OF_STOCK:
+                            product.status = Product.Status.ACTIVE
+
+                session.flush()
+                logger.info("Successfully restored inventory for cancelled order")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to restore inventory: {str(e)}")
+            raise APIError(f"Inventory restoration failed: {str(e)}", 500)
 
     @staticmethod
     def check_inventory_availability(order_items: List[OrderItem]) -> bool:

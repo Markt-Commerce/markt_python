@@ -72,14 +72,35 @@ class Config:
             "API_BASE_URL",
             default="http://localhost:8000" if self.ENV == "development" else "",
         )
-
-        # Frontend Base URL for payment redirects
-        # For production: https://yourdomain.com or https://app.yourdomain.com
-        # For development: http://localhost:3000
-        self.FRONTEND_BASE_URL = config(
-            "FRONTEND_BASE_URL",
-            default="http://localhost:3000" if self.ENV == "development" else "",
+        # This URL is handed to Paystack as the callback_url. If it is wrong,
+        # the payment still succeeds -- the webhook credits the wallet
+        # server-to-server -- but Paystack redirects the customer's browser to
+        # an address that doesn't exist, so they see ERR_CONNECTION_REFUSED
+        # after paying and have to navigate back to discover it worked.
+        #
+        # That failure is invisible from the server: nothing errors, nothing
+        # logs, the money arrives. So say something loudly at startup instead of
+        # letting it be found by a confused customer.
+        self.API_BASE_URL_IS_UNREACHABLE = (
+            not self.API_BASE_URL
+            or "localhost" in self.API_BASE_URL
+            or "127.0.0.1" in self.API_BASE_URL
         )
+
+        # Web app base URL for payment redirects
+        # For production: https://marktcommerce.com/app
+        # For development: http://localhost:3000
+        self.WEB_APP_BASE_URL = config(
+            "WEB_APP_BASE_URL",
+            default=(
+                "http://localhost:3000"
+                if self.ENV == "development"
+                else "https://marktcommerce.com/app"
+            ),
+        )
+
+        # Mobile app deep link scheme for payment redirects (e.g. markt://)
+        self.MOBILE_APP_SCHEME = config("MOBILE_APP_SCHEME", default="markt://")
 
         # AWS Configuration
         self.AWS_ACCESS_KEY = config("AWS_ACCESS_KEY", default="")
@@ -112,6 +133,18 @@ class Config:
         self.CELERY_TASK_ACKS_LATE = True  # Acknowledge after completion
         self.CELERY_WORKER_DISABLE_RATE_LIMITS = False
         self.CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+
+        self.UNPAID_ORDER_EXPIRY_HOURS = config(
+            "UNPAID_ORDER_EXPIRY_HOURS", default=48, cast=int
+        )
+        self.PLATFORM_COMMISSION_RATE = config(
+            "PLATFORM_COMMISSION_RATE", default=0.10, cast=float
+        )
+        # 11.1 / Phase 0: seller payout is eligible this long after POD,
+        # not immediately.
+        self.SETTLEMENT_HOLD_HOURS = config(
+            "SETTLEMENT_HOLD_HOURS", default=12, cast=int
+        )
 
     @property
     def SQLALCHEMY_DATABASE_URI(self):

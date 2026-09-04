@@ -1,7 +1,9 @@
 -r requirements.txt
 django-debug-toolbar
 ipdb
-black
+black==22.12.0
 commitizen
 pre-commit
 flake8
+pytest
+pytest-mock

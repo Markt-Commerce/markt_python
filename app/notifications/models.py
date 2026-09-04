@@ -22,11 +22,35 @@ class NotificationType(Enum):
     REQUEST_CLOSED = "request_closed"
     REQUEST_STATUS_CHANGE = "request_status_change"
     REQUEST_EXPIRED = "request_expired"
+    # 7.4: a new request matching a seller's category (and, for a
+    # REROUTE_ENGINE request, their market) has opened -- distinct from
+    # REQUEST_OFFER, which notifies the *buyer* that a seller responded.
+    NEW_REQUEST_MATCH = "new_request_match"
     # Cart and order notifications
     CART_ITEM_ADDED = "cart_item_added"
     ORDER_PLACED = "order_placed"
     PAYMENT_SUCCESS = "payment_success"
     PAYMENT_FAILED = "payment_failed"
+    # Seller fulfilment notifications (12.1-12.2)
+    FULFILMENT_REQUEST = "fulfilment_request"
+    # 6.1 ASK gate: a reroute-created substitution needs buyer approval
+    # before it commits.
+    SUBSTITUTION_APPROVAL_REQUIRED = "substitution_approval_required"
+    # 10.3: this order's delivery run doesn't have enough sharing yet --
+    # wait for a fuller run (default) or pay now for single/near-single
+    # delivery.
+    THIN_VOLUME_DELIVERY_CHOICE = "thin_volume_delivery_choice"
+    # Phase 12 (15): rerouting genuinely exhausted, no replacement found --
+    # see app.fulfilment.rerouting's ITEM_UNFULFILLED event-log emission,
+    # which this is fired alongside.
+    ITEM_UNFULFILLED = "item_unfulfilled"
+    # Buyer-initiated whole-order cancellation (OrderService.cancel_order).
+    ORDER_CANCELLED = "order_cancelled"
+    # 10.7: a rider reported a failed delivery attempt for this order.
+    DELIVERY_FAILED = "delivery_failed"
+    # Any of the three refund paths (cancel_order, refund_unresolved_item,
+    # approve_return) actually credited the buyer's wallet.
+    REFUND_ISSUED = "refund_issued"
     # Social notifications
     NICHE_INVITATION = "niche_invitation"
     NICHE_POST_APPROVED = "niche_post_approved"
@@ -68,3 +92,16 @@ class Notification(BaseModel):
             "created_at": self.created_at,
             "metadata_": self.metadata_ or {},
         }
+
+
+class PushToken(BaseModel):
+    """A device's Expo push token, for remote push notifications."""
+
+    __tablename__ = "push_tokens"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(
+        db.String(12), db.ForeignKey("users.id"), nullable=False, index=True
+    )
+    token = db.Column(db.String(255), nullable=False, unique=True)
+    platform = db.Column(db.String(20), nullable=True)  # ios / android

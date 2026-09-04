@@ -1,13 +1,14 @@
 # python imports
 from datetime import datetime, timedelta
 import logging
-import requests
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.exc import SQLAlchemyError
 
 # project imports
 from external.database import db
-from app.libs.session import session_scope
+from app.libs.session import session_scope, read_scope
+from app.libs.money import money_to_float
 from app.libs.errors import (
     NotFoundError,
     ValidationError,
@@ -18,15 +19,44 @@ from app.libs.errors import (
 from app.libs.pagination import Paginator
 
 from app.cart.models import Cart, CartItem
+from app.notifications.models import NotificationType
+from app.notifications.services import NotificationService
 from app.products.models import Product
+from app.media.models import ProductImage
 from app.payments.models import Payment, PaymentStatus
 from app.users.models import Buyer
+from app.products.services import ProductService
 
 # app imports
-from .models import Order, OrderStatus, OrderItem, ShippingAddress
-
+from .models import (
+    Order,
+    OrderStatus,
+    OrderItem,
+    FulfilmentPreference,
+    ShippingAddress,
+    Shipment,
+    OrderReturn,
+    OrderReturnStatus,
+)
+from app.orders.shipping import (
+    normalize_shipping_address,
+    shipping_address_to_model_kwargs,
+)
+from app.orders.events import ActorType, OrderEventService, OrderEventType
 
 logger = logging.getLogger(__name__)
+
+BUYER_CANCELLABLE_STATUSES = {
+    OrderStatus.PENDING_PAYMENT,
+    OrderStatus.PENDING,
+    OrderStatus.PROCESSING,
+    OrderStatus.READY_FOR_DELIVERY,
+}
+
+RETURNABLE_ORDER_STATUSES = {
+    OrderStatus.SHIPPED,
+    OrderStatus.DELIVERED,
+}
 
 
 class OrderService:
@@ -48,16 +78,7 @@ class OrderService:
                     raise ValidationError("Cannot create order from empty cart")
 
                 # Validate shipping address
-                required_fields = ['recipient_name', 'street_address', 'city', 'state', 'postal_code', 'country']
-                for field in required_fields:
-                    if field not in shipping_address or not shipping_address[field]:
-                        raise ValidationError(f"Missing required shipping address field: {field}")
-
-                # Check for longitude and latitude
-                if 'longitude' not in shipping_address or 'latitude' not in shipping_address:
-                    lat, lon = OrderService._get_geocoordinates(shipping_address)
-                    shipping_address['latitude'] = lat
-                    shipping_address['longitude'] = lon
+                shipping_normalized = normalize_shipping_address(shipping_address)
 
                 # Create single order for buyer
                 # Note: This method is deprecated in favor of CartService.checkout_cart()
@@ -73,7 +94,10 @@ class OrderService:
                 session.flush()
 
                 # Create shipping address
-                shipping_address_obj = ShippingAddress(order_id=order.id, **shipping_address)
+                shipping_address_obj = ShippingAddress(
+                    order_id=order.id,
+                    **shipping_address_to_model_kwargs(shipping_normalized),
+                )
                 session.add(shipping_address_obj)
 
                 # Create order items for each product
@@ -102,60 +126,119 @@ class OrderService:
             raise APIError("Failed to create order", 500)
 
     @staticmethod
-    def _get_geocoordinates(address_dict):
-        """
-        Get geocoordinates from address using Nominatim API.
-        Returns (latitude, longitude) as floats.
-        If fails, returns (0.0, 0.0)
-        """
+    def create_order_from_checkout_snapshot(
+        session, snapshot: Dict[str, Any], buyer_id: int
+    ) -> Order:
+        """Build the Order + OrderItems from a payment-first checkout
+        snapshot, called from within the same transaction that just marked
+        the payment COMPLETED (see PaymentService.complete_checkout_payment).
+        Payment is already captured by the time this runs -- unlike
+        create_order/checkout_cart's PENDING_PAYMENT start, the order and
+        its items start straight at the "paid" state."""
+        order = Order(
+            buyer_id=buyer_id,
+            status=OrderStatus.READY_FOR_DELIVERY,
+            subtotal=snapshot["subtotal"],
+            shipping_fee=snapshot["shipping_fee"],
+            service_fee=snapshot.get("service_fee"),
+            reliability_fee_opted_in=snapshot.get("reliability_fee_opted_in", False),
+            reliability_fee_estimate=snapshot.get("reliability_fee_estimate"),
+            total=snapshot["total"],
+        )
+        session.add(order)
+        session.flush()
+
+        shipping_address_obj = ShippingAddress(
+            order_id=order.id,
+            **shipping_address_to_model_kwargs(snapshot["shipping_address"]),
+        )
+        session.add(shipping_address_obj)
+
+        # 10.1: best-effort Area resolution for DeliveryRun eligibility --
+        # see MarketService.resolve_area_for_coordinates and
+        # ShippingAddress.area_id's own docstring for why this is
+        # best-effort rather than required.
+        from app.markets.services import MarketService
+
+        area = MarketService.resolve_area_for_coordinates(
+            session,
+            shipping_address_obj.latitude,
+            shipping_address_obj.longitude,
+        )
+        if area:
+            shipping_address_obj.area_id = area.id
+
+        # 6: one preference per order, set at checkout, stamped onto every
+        # item -- see FulfilmentPreference's docstring for why it's stored
+        # per-item rather than requiring a join back to Order later. Falls
+        # back to AUTO for a missing/unrecognised value rather than
+        # rejecting the whole checkout over it.
         try:
-            # Construct address string
-            address_parts = [
-                address_dict.get('street_address', ''),
-                address_dict.get('city', ''),
-                address_dict.get('state', ''),
-                address_dict.get('postal_code', ''),
-                address_dict.get('country', '')
-            ]
-            address_str = ', '.join(part for part in address_parts if part)
+            fulfilment_preference = FulfilmentPreference(
+                snapshot.get("fulfilment_preference", FulfilmentPreference.AUTO.value)
+            )
+        except ValueError:
+            fulfilment_preference = FulfilmentPreference.AUTO
 
-            if not address_str:
-                return 0.0, 0.0
+        for item in snapshot["items"]:
+            order_item = OrderItem(
+                order_id=order.id,
+                product_id=item["product_id"],
+                variant_id=item.get("variant_id"),
+                seller_id=item["seller_id"],
+                quantity=item["quantity"],
+                price=item["price"],
+                status=OrderItem.Status.PROCESSING,
+                fulfilment_preference=fulfilment_preference,
+            )
+            session.add(order_item)
+            order.items.append(order_item)
 
-            # Call Nominatim API
-            url = "https://nominatim.openstreetmap.org/search"
-            params = {
-                'q': address_str,
-                'format': 'json',
-                'limit': 1
-            }
-            headers = {
-                'User-Agent': 'Markt-Commerce-OrderService/1.0'
-            }
+        session.flush()
+        order.order_number = order.generate_order_number()
+        session.flush()
 
-            response = requests.get(url, params=params, headers=headers, timeout=10)
-            response.raise_for_status()
+        OrderEventService.emit(
+            session,
+            order_id=order.id,
+            event_type=OrderEventType.ORDER_CREATED,
+            actor_type=ActorType.BUYER,
+            actor_id=str(buyer_id),
+            metadata={"item_count": len(snapshot["items"]), "total": order.total},
+        )
 
-            data = response.json()
-            if data:
-                lat = float(data[0]['lat'])
-                lon = float(data[0]['lon'])
-                return lat, lon
-            else:
-                return 0.0, 0.0
-        except Exception as e:
-            logger.warning(f"Failed to get geocoordinates: {e}")
-            return 0.0, 0.0
+        return order
+
+    @staticmethod
+    def _get_geocoordinates(address_dict):
+        """Backward-compatible wrapper around shared geocoding helper."""
+        from app.orders.shipping import geocode_address
+
+        return geocode_address(address_dict)
 
     @staticmethod
     def get_user_orders(user_id):
-        """For buyers - shows complete orders with all items"""
-        with session_scope() as session:
+        """For buyers - shows complete orders with all items.
+
+        read_scope, not session_scope: session_scope commits on exit, and a
+        commit expires every instance it loaded. These Orders are returned to a
+        route that then serialises them, so each one re-SELECTed itself -- seven
+        orders meant seven extra queries, entirely at serialise time and
+        invisible from inside the service.
+        """
+        with read_scope() as session:
             return (
                 session.query(Order)
                 .options(
-                    db.joinedload(Order.items).joinedload(OrderItem.product),
+                    db.joinedload(Order.items)
+                    .joinedload(OrderItem.product)
+                    .joinedload(Product.images)
+                    .joinedload(ProductImage.media),
                     db.joinedload(Order.items).joinedload(OrderItem.seller),
+                    # OrderSchema dumps shipping_address_dict, which walks this
+                    # relationship -- without it that's one SELECT per order at
+                    # serialise time.
+                    db.joinedload(Order.shipping_address),
                 )
                 .filter_by(buyer_id=user_id)
                 .order_by(Order.created_at.desc())
@@ -164,16 +247,48 @@ class OrderService:
 
     @staticmethod
     def get_order(order_id):
-        with session_scope() as session:
+        # read_scope for the same reason as get_user_orders: the caller
+        # serialises what we return, after this scope has exited.
+        with read_scope() as session:
             return (
                 session.query(Order)
                 .options(
-                    db.joinedload(Order.items).joinedload(OrderItem.product),
+                    db.joinedload(Order.items)
+                    .joinedload(OrderItem.product)
+                    .joinedload(Product.images)
+                    .joinedload(ProductImage.media),
                     db.joinedload(Order.items).joinedload(OrderItem.seller),
                     db.joinedload(Order.items).joinedload(OrderItem.variant),
                     db.joinedload(Order.payments),
+                    db.joinedload(Order.shipping_address),
                 )
                 .get(order_id)
+            )
+
+    @staticmethod
+    def get_order_events(order_id: str, buyer_id: int) -> List["OrderEvent"]:
+        """14.2/15: buyer-facing fulfilment history for one order --
+        "the buyer can inspect fulfilment history (who fulfilled, why a
+        substitution happened), sourced from the event log." Deliberately
+        NOT filtered down to a "customer-friendly" subset -- 15's
+        notify/don't-notify distinction is about proactive notifications,
+        not what's inspectable on request; the full chronological history
+        (including a first seller's decline before a reroute succeeded)
+        is exactly the transparency this is for."""
+        from .events import OrderEvent
+
+        with session_scope() as session:
+            order = session.query(Order).filter_by(id=order_id).first()
+            if not order:
+                raise NotFoundError("Order not found")
+            if order.buyer_id != buyer_id:
+                raise ForbiddenError("You can only view your own order's history")
+
+            return (
+                session.query(OrderEvent)
+                .filter_by(order_id=order_id)
+                .order_by(OrderEvent.created_at.asc())
+                .all()
             )
 
     @staticmethod
@@ -240,23 +355,793 @@ class OrderService:
             except Exception as e:
                 logger.warning(f"Failed to queue order_status_changed event: {e}")
 
-            return order
+        # Post-commit: gamification points (award on delivery, reverse on
+        # cancel/return of a previously-delivered order).
+        if new_status == OrderStatus.DELIVERED and old_status != OrderStatus.DELIVERED:
+            OrderService._emit_gam_order_completed(order_id)
+        elif (
+            new_status
+            in (OrderStatus.CANCELLED, OrderStatus.RETURNED, OrderStatus.FAILED)
+            and old_status == OrderStatus.DELIVERED
+        ):
+            OrderService._emit_gam_order_reversed(order_id)
+
+        return order
+
+    @staticmethod
+    def _emit_gam_order_completed(order_id):
+        try:
+            from app.signals import order_completed
+
+            order_completed.send("orders", order_id=order_id)
+        except Exception as e:  # never let gamification break order flow
+            logger.warning(f"gamification order_completed emit failed: {e}")
+
+    @staticmethod
+    def _emit_gam_order_reversed(order_id):
+        try:
+            from app.signals import order_reversed
+
+            order_reversed.send("orders", order_id=order_id)
+        except Exception as e:
+            logger.warning(f"gamification order_reversed emit failed: {e}")
+
+    @staticmethod
+    def _get_completed_payment_amount(order: Order) -> float:
+        """The amount actually captured for this order. Includes
+        PARTIALLY_REFUNDED, not just COMPLETED -- Payment.amount is never
+        mutated by a refund (only Payment.status changes; see
+        refund_unresolved_item), so a payment that's already had one
+        partial refund applied still represents the same captured amount
+        it always did. Without this, a second refund against the same
+        order (whole-order cancel after a per-item refund, or two
+        per-item refunds) would see captured=0 and skip the invariant
+        entirely."""
+        for payment in order.payments or []:
+            if payment.status in (
+                PaymentStatus.COMPLETED,
+                PaymentStatus.PARTIALLY_REFUNDED,
+            ):
+                return payment.amount
+        return 0.0
+
+    @staticmethod
+    def _get_total_refunded(session, order: Order) -> float:
+        """Sum of every wallet refund already issued against this order or
+        any of its items (see refund_unresolved_item) -- needed so the
+        invariant below is cumulative, not just "does this one refund fit,"
+        now that an order can be refunded more than once (whole-order
+        cancel/return, plus per-item ASK-timeout refunds)."""
+        from app.wallet.models import WalletEntry, WalletEntryType, WalletReferenceType
+
+        reference_ids = [order.id] + [item.id for item in order.items or []]
+        reference_ids = [str(ref_id) for ref_id in reference_ids]
+        total = (
+            session.query(db.func.coalesce(db.func.sum(WalletEntry.amount), 0.0))
+            .filter(
+                WalletEntry.reference_type == WalletReferenceType.ORDER_REFUND,
+                WalletEntry.reference_id.in_(reference_ids),
+                WalletEntry.entry_type == WalletEntryType.CREDIT,
+            )
+            .scalar()
+        )
+        return float(total or 0.0)
+
+    @staticmethod
+    def _assert_refund_within_captured(
+        order: Order, refund_amount: float, session=None
+    ) -> None:
+        """Escrow invariant: cumulative refunds can never exceed what was
+        actually captured. `session` is optional (existing callers that
+        only ever refund an order once didn't need it) -- pass it whenever
+        the order could plausibly already have a prior refund against it,
+        so already-refunded amounts are accounted for rather than silently
+        allowed to stack past the captured total."""
+        captured = OrderService._get_completed_payment_amount(order)
+        if not captured:
+            return
+        already_refunded = (
+            OrderService._get_total_refunded(session, order) if session else 0.0
+        )
+        if already_refunded + refund_amount > captured + 0.01:
+            raise ValidationError(
+                f"Refund amount {refund_amount} (already refunded "
+                f"{already_refunded}) exceeds captured payment amount "
+                f"{captured} for order {order.id}"
+            )
+
+    @staticmethod
+    def cancel_order(order_id: str, buyer_id: int, reason: Optional[str] = None):
+        """Cancel an order on behalf of the buyer."""
+        from app.wallet.services import WalletService
+
+        paid_amount = 0.0
+        buyer_user_id = None
+        order_items = []
+
+        with session_scope() as session:
+            order = (
+                session.query(Order)
+                .options(
+                    db.joinedload(Order.items),
+                    db.joinedload(Order.payments),
+                    db.joinedload(Order.buyer),
+                )
+                .get(order_id)
+            )
+
+            if not order:
+                raise NotFoundError("Order not found")
+            if order.buyer_id != buyer_id:
+                raise ForbiddenError("You can only cancel your own orders")
+            if order.status == OrderStatus.CANCELLED:
+                raise ConflictError("Order is already cancelled")
+            if order.status not in BUYER_CANCELLABLE_STATUSES:
+                raise ValidationError(
+                    f"Order in status '{order.status.value}' cannot be cancelled"
+                )
+
+            captured_amount = OrderService._get_completed_payment_amount(order)
+            # Only refund what hasn't already gone out -- an item may have
+            # been refunded on its own earlier (see refund_unresolved_item,
+            # 11.8/9.1) before the buyer cancels the rest of the order.
+            already_refunded = OrderService._get_total_refunded(session, order)
+            paid_amount = round(max(captured_amount - already_refunded, 0.0), 2)
+            buyer_user_id = order.buyer.user_id if order.buyer else None
+            order_items = list(order.items)
+
+            order.status = OrderStatus.CANCELLED
+            order.cancelled_at = datetime.utcnow()
+            order.cancel_reason = reason
+
+            for item in order.items:
+                if item.status != OrderItem.Status.CANCELLED:
+                    item.status = OrderItem.Status.CANCELLED
+
+            if paid_amount > 0:
+                OrderService._assert_refund_within_captured(
+                    order, paid_amount, session=session
+                )
+            for payment in order.payments:
+                if payment.status in (
+                    PaymentStatus.COMPLETED,
+                    PaymentStatus.PARTIALLY_REFUNDED,
+                ):
+                    payment.transition_to(PaymentStatus.REFUNDED)
+
+            OrderEventService.emit(
+                session,
+                order_id=order_id,
+                event_type=OrderEventType.ORDER_CANCELLED,
+                actor_type=ActorType.BUYER,
+                actor_id=str(buyer_id),
+                metadata={"reason": reason, "refund_amount": paid_amount},
+            )
+
+            session.flush()
+
+        if paid_amount > 0:
+            ProductService.restore_inventory_for_order(order_items)
+            if buyer_user_id:
+                WalletService.refund_order_to_wallet(
+                    buyer_user_id, order_id, paid_amount
+                )
+
+        if buyer_user_id:
+            try:
+                NotificationService.create_notification(
+                    user_id=buyer_user_id,
+                    notification_type=NotificationType.ORDER_CANCELLED,
+                    reference_type="order",
+                    reference_id=order_id,
+                    metadata_={"order_id": order_id},
+                )
+                if paid_amount > 0:
+                    NotificationService.create_notification(
+                        user_id=buyer_user_id,
+                        notification_type=NotificationType.REFUND_ISSUED,
+                        reference_type="order",
+                        reference_id=order_id,
+                        metadata_={
+                            "message": (
+                                f"₦{paid_amount:.2f} was refunded to your "
+                                "wallet for a cancelled order."
+                            )
+                        },
+                    )
+            except Exception:
+                logger.exception(
+                    "Failed to notify buyer of order %s cancellation/refund",
+                    order_id,
+                )
+
+        try:
+            from app.realtime.event_manager import EventManager
+
+            EventManager.emit_to_order(
+                order_id,
+                "order_status_changed",
+                {
+                    "order_id": order_id,
+                    "user_id": buyer_user_id,
+                    "status": OrderStatus.CANCELLED.value,
+                    "metadata": {"cancel_reason": reason},
+                },
+            )
+        except Exception as e:
+            logger.warning(f"Failed to queue order_status_changed event: {e}")
+
+        return OrderService.get_order(order_id)
+
+    @staticmethod
+    def track_order(order_id: str, user_id: str) -> Dict[str, Any]:
+        """Return order tracking timeline for buyer or participating seller."""
+        from app.deliveries.models import DeliveryOrderAssignment, AssignmentStatus
+
+        with session_scope() as session:
+            order = (
+                session.query(Order)
+                .options(
+                    db.joinedload(Order.items).joinedload(OrderItem.seller),
+                    db.joinedload(Order.shipping_address),
+                    db.joinedload(Order.shipments),
+                    db.joinedload(Order.payments),
+                    db.joinedload(Order.buyer),
+                )
+                .get(order_id)
+            )
+
+            if not order:
+                raise NotFoundError("Order not found")
+
+            is_buyer = order.buyer and order.buyer.user_id == user_id
+            is_seller = any(
+                item.seller and item.seller.user_id == user_id for item in order.items
+            )
+            if not is_buyer and not is_seller:
+                raise ForbiddenError("You do not have access to track this order")
+
+            assignment = (
+                session.query(DeliveryOrderAssignment)
+                .filter_by(order_id=order_id)
+                .order_by(DeliveryOrderAssignment.assigned_at.desc())
+                .first()
+            )
+
+            latest_payment = None
+            for payment in sorted(
+                order.payments or [], key=lambda p: p.created_at or datetime.min
+            ):
+                if payment.status == PaymentStatus.COMPLETED:
+                    latest_payment = payment
+
+            timeline = [
+                {
+                    "status": "created",
+                    "label": "Order placed",
+                    "timestamp": (
+                        order.created_at.isoformat() if order.created_at else None
+                    ),
+                }
+            ]
+            if latest_payment and latest_payment.paid_at:
+                timeline.append(
+                    {
+                        "status": "paid",
+                        "label": "Payment confirmed",
+                        "timestamp": latest_payment.paid_at.isoformat(),
+                    }
+                )
+            if order.cancelled_at:
+                timeline.append(
+                    {
+                        "status": "cancelled",
+                        "label": "Order cancelled",
+                        "timestamp": order.cancelled_at.isoformat(),
+                    }
+                )
+            elif order.status == OrderStatus.DELIVERED:
+                timeline.append(
+                    {
+                        "status": "delivered",
+                        "label": "Delivered",
+                        "timestamp": (
+                            order.updated_at.isoformat() if order.updated_at else None
+                        ),
+                    }
+                )
+
+            shipment = order.shipments[0] if order.shipments else None
+            delivery_info = None
+            if assignment and assignment.status == AssignmentStatus.ACCEPTED:
+                delivery_info = {
+                    "assignment_id": assignment.assignment_id,
+                    "status": assignment.status.value,
+                    "logistical_status": (
+                        assignment.logistical_status.value
+                        if assignment.logistical_status
+                        else None
+                    ),
+                    "assigned_at": (
+                        assignment.assigned_at.isoformat()
+                        if assignment.assigned_at
+                        else None
+                    ),
+                }
+
+            return {
+                "order_id": order.id,
+                "order_number": order.order_number,
+                "status": order.status.value,
+                "timeline": timeline,
+                "shipping_address": order.shipping_address_dict,
+                "items": [
+                    {
+                        "id": item.id,
+                        "product_id": item.product_id,
+                        "quantity": item.quantity,
+                        "status": item.status.value,
+                        "seller_id": item.seller_id,
+                    }
+                    for item in order.items
+                ],
+                "shipment": (
+                    {
+                        "carrier": shipment.carrier,
+                        "tracking_number": shipment.tracking_number,
+                        "tracking_url": shipment.tracking_url,
+                        "status": shipment.status,
+                        "shipped_at": (
+                            shipment.shipped_at.isoformat()
+                            if shipment and shipment.shipped_at
+                            else None
+                        ),
+                        "delivered_at": (
+                            shipment.delivered_at.isoformat()
+                            if shipment and shipment.delivered_at
+                            else None
+                        ),
+                    }
+                    if shipment
+                    else None
+                ),
+                "delivery": delivery_info,
+            }
+
+    @staticmethod
+    def request_return(order_id: str, buyer_id: int, reason: str) -> OrderReturn:
+        """Buyer requests a return for a shipped or delivered order."""
+        if not reason or not reason.strip():
+            raise ValidationError("Return reason is required")
+
+        with session_scope() as session:
+            order = (
+                session.query(Order).options(db.joinedload(Order.items)).get(order_id)
+            )
+            if not order:
+                raise NotFoundError("Order not found")
+            if order.buyer_id != buyer_id:
+                raise ForbiddenError("You can only request returns for your own orders")
+            if order.status not in RETURNABLE_ORDER_STATUSES:
+                raise ValidationError(
+                    f"Returns are not available for orders in '{order.status.value}' status"
+                )
+
+            existing = (
+                session.query(OrderReturn)
+                .filter(
+                    OrderReturn.order_id == order_id,
+                    OrderReturn.status.in_(
+                        [OrderReturnStatus.REQUESTED, OrderReturnStatus.APPROVED]
+                    ),
+                )
+                .first()
+            )
+            if existing:
+                raise ConflictError("A return request is already open for this order")
+
+            paid_amount = OrderService._get_completed_payment_amount(order)
+            order_return = OrderReturn(
+                order_id=order_id,
+                buyer_id=buyer_id,
+                reason=reason.strip(),
+                status=OrderReturnStatus.REQUESTED,
+                refund_amount=paid_amount if paid_amount > 0 else order.total,
+            )
+            session.add(order_return)
+            session.flush()
+            return order_return
+
+    @staticmethod
+    def approve_return(
+        return_id: str, seller_id: int, seller_notes: Optional[str] = None
+    ):
+        """Seller approves a return and refunds the buyer to wallet."""
+        from app.wallet.services import WalletService
+
+        refund_amount = 0.0
+        buyer_user_id = None
+        order_id = None
+
+        with session_scope() as session:
+            order_return = (
+                session.query(OrderReturn)
+                .options(
+                    db.joinedload(OrderReturn.order).joinedload(Order.items),
+                    db.joinedload(OrderReturn.order).joinedload(Order.buyer),
+                    db.joinedload(OrderReturn.order).joinedload(Order.payments),
+                )
+                .get(return_id)
+            )
+            if not order_return:
+                raise NotFoundError("Return request not found")
+            if order_return.status != OrderReturnStatus.REQUESTED:
+                raise ConflictError("Return request is not pending approval")
+
+            order = order_return.order
+            is_seller = any(item.seller_id == seller_id for item in order.items)
+            if not is_seller:
+                raise ForbiddenError("Only a seller on this order can approve returns")
+
+            refund_amount = (
+                order_return.refund_amount
+                or OrderService._get_completed_payment_amount(order)
+            )
+            if refund_amount <= 0:
+                refund_amount = order.total or 0.0
+
+            OrderService._assert_refund_within_captured(
+                order, refund_amount, session=session
+            )
+
+            buyer_user_id = order.buyer.user_id if order.buyer else None
+            order_id = order.id
+
+            order_return.status = OrderReturnStatus.REFUNDED
+            order_return.seller_notes = seller_notes
+            order.status = OrderStatus.RETURNED
+
+            for item in order.items:
+                if item.status != OrderItem.Status.CANCELLED:
+                    item.status = OrderItem.Status.CANCELLED
+
+            for payment in order.payments or []:
+                if payment.status in (
+                    PaymentStatus.COMPLETED,
+                    PaymentStatus.PARTIALLY_REFUNDED,
+                ):
+                    payment.transition_to(PaymentStatus.REFUNDED)
+
+            session.flush()
+
+        if refund_amount > 0 and buyer_user_id:
+            from app.wallet.models import WalletReferenceType
+
+            WalletService.credit(
+                buyer_user_id,
+                refund_amount,
+                WalletReferenceType.ORDER_REFUND,
+                return_id,
+                description=f"Return refund for order {order_id}",
+                idempotency_key=f"return-refund:{return_id}",
+            )
+            try:
+                NotificationService.create_notification(
+                    user_id=buyer_user_id,
+                    notification_type=NotificationType.REFUND_ISSUED,
+                    reference_type="order",
+                    reference_id=order_id,
+                    metadata_={
+                        "message": (
+                            f"₦{refund_amount:.2f} was refunded to your "
+                            "wallet for your approved return."
+                        )
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to notify buyer of return refund for order %s", order_id
+                )
+
+        # Post-commit: claw back any gamification points earned on this order.
+        if order_id:
+            OrderService._emit_gam_order_reversed(order_id)
+
+        return order_return
+
+    @staticmethod
+    def refund_unresolved_item(
+        order_item_id: int, reason: Optional[str] = None
+    ) -> Optional["WalletEntry"]:
+        """11.8 / 9.1: refund a single item that couldn't be fulfilled,
+        without touching the rest of the order -- distinct from
+        cancel_order (whole order, buyer-initiated) and approve_return
+        (whole order, post-delivery). Today's only caller is the ASK
+        timeout worker (app.fulfilment.tasks.expire_stale_buyer_approvals,
+        9.1's "remove the unresolved item and adjust/refund" MVP policy),
+        but this is a standalone reusable primitive -- flagged as needed
+        back in Phase 4, genuinely blocked until an item-level "couldn't
+        be fulfilled" outcome existed to call it from.
+
+        Idempotent: a no-op (returns None) if the item is already
+        CANCELLED -- safe to call more than once for the same item.
+
+        Simplification, flagged: always marks the order's payment(s)
+        PARTIALLY_REFUNDED, even in the edge case where this happens to be
+        the order's only remaining un-refunded item (which would really be
+        a full refund). Detecting that would mean summing every other
+        item's own state here; not worth it for a label that doesn't
+        change the actual money movement -- cancel_order still correctly
+        finishes the job (-> REFUNDED) if the buyer goes on to cancel the
+        rest of the order.
+        """
+        from app.wallet.services import WalletService
+
+        refund_amount = 0.0
+        buyer_user_id = None
+
+        with session_scope() as session:
+            order_item = (
+                session.query(OrderItem)
+                .options(
+                    db.joinedload(OrderItem.order).joinedload(Order.payments),
+                    db.joinedload(OrderItem.order).joinedload(Order.buyer),
+                    db.joinedload(OrderItem.order).joinedload(Order.items),
+                )
+                .get(order_item_id)
+            )
+            if not order_item:
+                raise NotFoundError("Order item not found")
+
+            if order_item.status == OrderItem.Status.CANCELLED:
+                return None
+
+            order = order_item.order
+            refund_amount = round(
+                (order_item.price or 0) * (order_item.quantity or 0), 2
+            )
+
+            if refund_amount > 0:
+                OrderService._assert_refund_within_captured(
+                    order, refund_amount, session=session
+                )
+
+            order_item.transition_to(OrderItem.Status.CANCELLED)
+
+            for payment in order.payments or []:
+                if payment.status in (
+                    PaymentStatus.COMPLETED,
+                    PaymentStatus.PARTIALLY_REFUNDED,
+                ):
+                    payment.transition_to(PaymentStatus.PARTIALLY_REFUNDED)
+
+            buyer_user_id = order.buyer.user_id if order.buyer else None
+
+            OrderEventService.emit(
+                session,
+                order_id=order.id,
+                order_item_id=order_item_id,
+                event_type=OrderEventType.ITEM_REFUNDED,
+                actor_type=ActorType.SYSTEM,
+                metadata={
+                    "reason": reason,
+                    # float(), not the Decimal itself: event_metadata is JSONB
+                    # and json.dumps cannot serialise Decimal. Since
+                    # order_item.price became NUMERIC(12,2) this raised
+                    # "Object of type Decimal is not JSON serializable" and
+                    # took down every refund, for every caller.
+                    "refund_amount": money_to_float(refund_amount),
+                },
+                idempotency_key=f"event:item_refunded:{order_item_id}",
+            )
+
+            session.flush()
+
+        if refund_amount > 0 and buyer_user_id:
+            entry = WalletService.refund_order_item_to_wallet(
+                buyer_user_id, order_item_id, refund_amount, reason=reason
+            )
+            try:
+                NotificationService.create_notification(
+                    user_id=buyer_user_id,
+                    notification_type=NotificationType.REFUND_ISSUED,
+                    reference_type="order_item",
+                    reference_id=str(order_item_id),
+                    metadata_={
+                        "message": (
+                            f"₦{refund_amount:.2f} was refunded to your "
+                            "wallet for an item that couldn't be fulfilled."
+                        )
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to notify buyer of item %s refund", order_item_id
+                )
+            return entry
+        return None
+
+    @staticmethod
+    def refund_partial_quantity(
+        order_item_id: int,
+        new_quantity: int,
+        shortfall_ref: str,
+        reason: Optional[str] = None,
+    ) -> Optional["WalletEntry"]:
+        """5.1/5.2: accept a partial fulfilment -- reduce
+        OrderItem.quantity down to what was actually secured
+        (`new_quantity`) and refund the buyer for the difference,
+        WITHOUT cancelling the item (distinct from refund_unresolved_item,
+        which is whole-item). Only caller today is
+        ReroutingService.attempt_reroute's give-up branch, when
+        OrderItem.allow_partial_quantity is True and at least one
+        allocation for the item is still active.
+
+        `shortfall_ref` discriminates the wallet idempotency key from
+        refund_order_item_to_wallet's own `refund:item:{id}` key (which
+        assumes at most one refund ever happens per item -- true for a
+        full cancellation, not true here, since the same item could face
+        more than one shortfall over its lifetime as different
+        allocations fail). Pass something that uniquely and
+        deterministically identifies THIS shortfall event -- the failed
+        allocation's own id is the natural choice, see attempt_reroute --
+        so a retry of the same event doesn't double-credit.
+
+        No-op (returns None) if new_quantity >= the item's current
+        quantity -- nothing to refund, and this never raises quantity
+        back up.
+        """
+        from app.wallet.models import WalletReferenceType
+        from app.wallet.services import WalletService
+
+        refund_amount = 0.0
+        buyer_user_id = None
+        dropped_quantity = 0
+
+        with session_scope() as session:
+            order_item = (
+                session.query(OrderItem)
+                .options(
+                    db.joinedload(OrderItem.order).joinedload(Order.payments),
+                    db.joinedload(OrderItem.order).joinedload(Order.buyer),
+                )
+                .get(order_item_id)
+            )
+            if not order_item:
+                raise NotFoundError("Order item not found")
+
+            if new_quantity >= (order_item.quantity or 0):
+                return None
+
+            order = order_item.order
+            dropped_quantity = order_item.quantity - new_quantity
+            refund_amount = round((order_item.price or 0) * dropped_quantity, 2)
+
+            if refund_amount > 0:
+                OrderService._assert_refund_within_captured(
+                    order, refund_amount, session=session
+                )
+
+            order_item.quantity = new_quantity
+
+            for payment in order.payments or []:
+                if payment.status in (
+                    PaymentStatus.COMPLETED,
+                    PaymentStatus.PARTIALLY_REFUNDED,
+                ):
+                    payment.transition_to(PaymentStatus.PARTIALLY_REFUNDED)
+
+            buyer_user_id = order.buyer.user_id if order.buyer else None
+
+            OrderEventService.emit(
+                session,
+                order_id=order.id,
+                order_item_id=order_item_id,
+                event_type=OrderEventType.ITEM_REFUNDED,
+                actor_type=ActorType.SYSTEM,
+                metadata={
+                    "reason": reason,
+                    "refund_amount": refund_amount,
+                    "dropped_quantity": dropped_quantity,
+                    "new_quantity": new_quantity,
+                },
+                idempotency_key=f"event:item_refunded:partial:{shortfall_ref}",
+            )
+
+            session.flush()
+
+        if refund_amount > 0 and buyer_user_id:
+            entry = WalletService.credit(
+                buyer_user_id,
+                refund_amount,
+                WalletReferenceType.ORDER_REFUND,
+                str(order_item_id),
+                description=(
+                    f"Partial refund for order item {order_item_id}: "
+                    f"{dropped_quantity} unit(s) couldn't be fulfilled"
+                    + (f" ({reason})" if reason else "")
+                ),
+                idempotency_key=f"refund:item:{order_item_id}:partial:{shortfall_ref}",
+            )
+            try:
+                NotificationService.create_notification(
+                    user_id=buyer_user_id,
+                    notification_type=NotificationType.REFUND_ISSUED,
+                    reference_type="order_item",
+                    reference_id=str(order_item_id),
+                    metadata_={
+                        "message": (
+                            f"We could only secure {new_quantity} of your "
+                            f"requested {new_quantity + dropped_quantity} "
+                            f"unit(s) for an item. ₦{refund_amount:.2f} was "
+                            "refunded to your wallet for the rest."
+                        )
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to notify buyer of item %s partial refund",
+                    order_item_id,
+                )
+            return entry
+        return None
+
+    @staticmethod
+    def reject_return(
+        return_id: str, seller_id: int, seller_notes: Optional[str] = None
+    ):
+        """Seller rejects a return request."""
+        with session_scope() as session:
+            order_return = (
+                session.query(OrderReturn)
+                .options(db.joinedload(OrderReturn.order).joinedload(Order.items))
+                .get(return_id)
+            )
+            if not order_return:
+                raise NotFoundError("Return request not found")
+            if order_return.status != OrderReturnStatus.REQUESTED:
+                raise ConflictError("Return request is not pending approval")
+
+            is_seller = any(
+                item.seller_id == seller_id for item in order_return.order.items
+            )
+            if not is_seller:
+                raise ForbiddenError("Only a seller on this order can reject returns")
+
+            order_return.status = OrderReturnStatus.REJECTED
+            order_return.seller_notes = seller_notes
+            session.flush()
+            return order_return
 
     # TODO: Add order history tracking
     # TODO: Add refund processing
 
 
 class SellerOrderService:
+    # An order the buyer hasn't paid for isn't the seller's business yet.
+    # Showing them means asking someone to commit stock against money that may
+    # never arrive, and a seller "accepting" one implies a promise nobody has
+    # paid to hold.
+    UNPAID_ORDER_STATUSES = (
+        OrderStatus.PENDING_PAYMENT,
+        OrderStatus.PENDING,  # deprecated alias, still on older rows
+        OrderStatus.FAILED,
+    )
+
     @staticmethod
     def get_seller_orders(seller_id, status=None, page=1, per_page=20):
-        """For sellers - shows only their order items"""
+        """For sellers - shows only their order items, on paid orders."""
         with session_scope() as session:
             base_query = (
                 session.query(OrderItem)
-                .filter_by(seller_id=seller_id)
+                .join(Order, Order.id == OrderItem.order_id)
+                .filter(OrderItem.seller_id == seller_id)
+                .filter(Order.status.notin_(SellerOrderService.UNPAID_ORDER_STATUSES))
                 .options(
                     db.joinedload(OrderItem.order).joinedload(Order.buyer),
-                    db.joinedload(OrderItem.product),
+                    db.joinedload(OrderItem.product)
+                    .joinedload(Product.images)
+                    .joinedload(ProductImage.media),
                     db.joinedload(OrderItem.variant),
                 )
             )
@@ -279,55 +1164,146 @@ class SellerOrderService:
 
     @staticmethod
     def update_order_item_status(order_item_id, status, seller_id):
+        order_id = None
+        all_delivered = False
+        cancelled_item_id = None
+        cancelled_order_id = None
+
         with session_scope() as session:
             item = (
                 session.query(OrderItem)
+                .options(db.joinedload(OrderItem.seller))
                 .filter_by(id=order_item_id, seller_id=seller_id)
                 .first()
             )
 
             if not item:
-                raise ValueError("Order item not found")
+                raise NotFoundError("Order item not found")
 
-            valid_transitions = {
-                OrderItem.Status.PENDING: [
-                    OrderItem.Status.PROCESSING,
-                    OrderItem.Status.CANCELLED,
-                ],
-                OrderItem.Status.PROCESSING: [
-                    OrderItem.Status.SHIPPED,
-                    OrderItem.Status.CANCELLED,
-                ],
-                OrderItem.Status.SHIPPED: [OrderItem.Status.DELIVERED],
-                # Other status transitions...
-            }
-
-            if (
-                item.status not in valid_transitions
-                or status not in valid_transitions[item.status]
-            ):
-                raise ValueError(f"Cannot transition from {item.status} to {status}")
-
-            item.status = status
-
-            # If all items are delivered, mark order as completed
+            # A seller may not declare their own delivery. DELIVERED sets
+            # delivered_at, which starts the settlement hold that
+            # WalletService.settle_eligible_order_items pays out on -- so this
+            # endpoint let a seller release their own escrow with no proof that
+            # anything arrived. Delivery is confirmed by the buyer or the rider
+            # through the POD/QR flow (DeliveryService.confirm_order_qr_code,
+            # DeliveryRunPodService), which is what sets DELIVERED legitimately.
             if status == OrderItem.Status.DELIVERED:
-                order = session.query(Order).get(item.order_id)
-                if all(i.status == OrderItem.Status.DELIVERED for i in order.items):
-                    order.status = OrderStatus.DELIVERED
+                raise ValidationError(
+                    "Delivery is confirmed by the buyer or the delivery partner, "
+                    "not by the seller. Mark the item shipped and it will move to "
+                    "delivered once delivery is confirmed."
+                )
 
-            return item
+            # Declining must give the money back. There was no CANCELLED
+            # branch here at all -- no refund, no inventory restore, no
+            # notification -- so a seller could decline an order the buyer had
+            # already paid for and simply keep the money.
+            #
+            # Delegated rather than handled inline, because
+            # refund_unresolved_item already does the whole job (refund, mark
+            # the payment partially refunded, cancel the item) and is
+            # idempotent. It no-ops on an already-CANCELLED item, so the
+            # transition has to happen inside it, not before it.
+            if status == OrderItem.Status.CANCELLED:
+                cancelled_item_id = item.id
+                cancelled_order_id = item.order_id
+                order_id = item.order_id
+
+            if cancelled_item_id is None:
+                # transition_to raises ValueError on an illegal move. Left bare
+                # it reached the generic handler and came back as a 500 -- a
+                # seller trying to skip a step was told the server had broken.
+                # It is a client error, and the message names both states.
+                try:
+                    item.transition_to(status)
+                except ValueError as exc:
+                    raise ValidationError(str(exc))
+
+                order_id = item.order_id
+
+            if status == OrderItem.Status.DELIVERED:
+                order = session.query(Order).get(order_id)
+                all_delivered = all(
+                    i.status == OrderItem.Status.DELIVERED for i in order.items
+                )
+
+                # Starts the settlement hold (Phase 0: 12h) rather than
+                # paying out immediately -- see
+                # WalletService.settle_eligible_order_items.
+                if item.delivered_at is None:
+                    item.delivered_at = datetime.utcnow()
+
+        # Post-commit: delegate order-level completion (status, realtime
+        # event, gamification) to the single source of truth once every item
+        # on the order is in, instead of setting order.status here too.
+        if status == OrderItem.Status.DELIVERED and all_delivered:
+            OrderService.update_order_status(order_id, OrderStatus.DELIVERED)
+
+        if cancelled_item_id is not None:
+            # Opens its own scope, so it runs after this one has committed.
+            OrderService.refund_unresolved_item(
+                cancelled_item_id, reason="Declined by seller"
+            )
+            return SellerOrderService._reload_item(cancelled_item_id)
+
+        return item
+
+    @staticmethod
+    def _reload_item(order_item_id):
+        """Re-read after refund_unresolved_item, which committed in its own
+        scope -- the instance we held is stale."""
+        with read_scope() as session:
+            return (
+                session.query(OrderItem)
+                .options(db.joinedload(OrderItem.product))
+                .filter_by(id=order_item_id)
+                .first()
+            )
+
+    @staticmethod
+    def get_pending_action_count(seller_id) -> int:
+        """How many paid order items are waiting on this seller.
+
+        Deliberately its own endpoint rather than reusing get_seller_order_stats:
+        this backs a tab badge, so it gets polled far more often than a
+        dashboard, and it should cost one indexed COUNT rather than three
+        queries and a SUM over every item the seller has ever sold.
+
+        Same paid-order filter as the queue itself -- a badge that counts orders
+        the seller can't act on is worse than no badge.
+        """
+        with read_scope() as session:
+            return (
+                session.query(db.func.count(OrderItem.id))
+                .join(Order, Order.id == OrderItem.order_id)
+                .filter(
+                    OrderItem.seller_id == seller_id,
+                    OrderItem.status == OrderItem.Status.PENDING,
+                    Order.status.notin_(SellerOrderService.UNPAID_ORDER_STATUSES),
+                )
+                .scalar()
+                or 0
+            )
 
     @staticmethod
     def get_seller_order_stats(seller_id):
         with session_scope() as session:
+            # The unpaid filter matches the queue and the badge. Without it the
+            # dashboard counted orders the seller cannot act on, and disagreed
+            # with the list right below it.
+            paid_only = (
+                session.query(OrderItem)
+                .join(Order, Order.id == OrderItem.order_id)
+                .filter(Order.status.notin_(SellerOrderService.UNPAID_ORDER_STATUSES))
+            )
             return {
-                "total_orders": session.query(OrderItem)
-                .filter_by(seller_id=seller_id)
-                .count(),
-                "pending_orders": session.query(OrderItem)
-                .filter_by(seller_id=seller_id, status=OrderItem.Status.PENDING)
-                .count(),
+                "total_orders": paid_only.filter(
+                    OrderItem.seller_id == seller_id
+                ).count(),
+                "pending_orders": paid_only.filter(
+                    OrderItem.seller_id == seller_id,
+                    OrderItem.status == OrderItem.Status.PENDING,
+                ).count(),
                 "monthly_earnings": session.query(
                     db.func.sum(OrderItem.price * OrderItem.quantity)
                 )

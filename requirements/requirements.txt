@@ -39,13 +39,13 @@ click==8.1.7
 celery==5.3.6
 
 # Others
-boto3
-pillow
-gunicorn
+boto3==1.38.4
+pillow==11.2.1
+gunicorn==23.0.0
 ffmpeg-python==0.2.0
 # rembg
 # cryptography
 python-engineio==4.5.1
 python-socketio==5.8.0
-gevent==22.10.2
+gevent==24.11.1
 gevent-websocket==0.10.1

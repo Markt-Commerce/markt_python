@@ -1,6 +1,7 @@
 from enum import Enum
 from datetime import datetime
 from external.database import db
+from app.libs.money import MONEY
 from app.libs.models import BaseModel, StatusMixin
 from app.libs.helpers import UniqueIdMixin
 from sqlalchemy.dialects.postgresql import JSONB
@@ -25,17 +26,30 @@ class Order(BaseModel, UniqueIdMixin):
     id = db.Column(db.String(12), primary_key=True, default=None)
     buyer_id = db.Column(db.Integer, db.ForeignKey("buyers.id"))
     order_number = db.Column(db.String(21), unique=True)
-    subtotal = db.Column(db.Float)
-    shipping_fee = db.Column(db.Float)
-    tax = db.Column(db.Float)
-    discount = db.Column(db.Float)
-    total = db.Column(db.Float)
+    subtotal = db.Column(MONEY)
+    shipping_fee = db.Column(MONEY)
+    tax = db.Column(MONEY)
+    discount = db.Column(MONEY)
+    # Buyer-facing Service Fee (11.3, Phase 0: 2.5%, floor ₦25, ceiling
+    # ₦1,000). Nullable: orders from the pre-existing order-first checkout
+    # flow predate this fee and never set it.
+    service_fee = db.Column(MONEY, nullable=True)
+    # Reliability Fee (11.2, Phase 0: 10% of order value, capped ₦1,500) --
+    # opt-in, and only ever actually charged if a reroute fires. Rerouting
+    # doesn't exist yet (Phase 6), so today this is toggle + estimate only;
+    # reliability_fee_estimate is NEVER added to `total`/captured amount.
+    reliability_fee_opted_in = db.Column(db.Boolean, default=False, nullable=False)
+    reliability_fee_estimate = db.Column(MONEY, nullable=True)
+    total = db.Column(MONEY)
     status = db.Column(db.Enum(OrderStatus), default=OrderStatus.PENDING_PAYMENT)
     billing_address = db.Column(JSONB)
     customer_note = db.Column(db.Text)
     idempotency_key = db.Column(
         db.String(100), unique=True, nullable=True
     )  # Prevent duplicate orders
+    cancelled_at = db.Column(db.DateTime, nullable=True)
+    cancel_reason = db.Column(db.Text, nullable=True)
+    paystack_split_used = db.Column(db.Boolean, default=False, nullable=False)
     # Relationships
     buyer = db.relationship("Buyer", back_populates="orders")
     items = db.relationship(
@@ -49,6 +63,7 @@ class Order(BaseModel, UniqueIdMixin):
         cascade="all, delete-orphan",
     )
     shipments = db.relationship("Shipment", back_populates="order")
+    returns = db.relationship("OrderReturn", back_populates="order", lazy="dynamic")
 
     def generate_order_number(self):
         # Implement your order number generation logic
@@ -72,6 +87,27 @@ class Order(BaseModel, UniqueIdMixin):
         }
 
 
+class FulfilmentPreference(Enum):
+    """6: the buyer's substitution preference, set at checkout. Stored per
+    OrderItem (matching the 5.1 data model) rather than only on Order --
+    the rerouting engine (app.fulfilment.rerouting) reads it per item, and
+    this avoids a join back to Order every time it does. In practice the
+    buyer picks one preference for the whole order at checkout and it's
+    stamped onto every item Order.create_order_from_checkout_snapshot
+    creates (see PaymentService.initialize_checkout_payment)."""
+
+    # Markt may automatically reroute within the market. Default.
+    AUTO = "auto"
+    # Markt may find a candidate but must get buyer approval (6.1) before
+    # committing a material substitution -- a non-material one (same
+    # product/variant, same price, different seller) still proceeds
+    # silently, same as AUTO.
+    ASK = "ask"
+    # Only the originally chosen seller may fulfil; no rerouting at all --
+    # a decline/timeout skips straight to escalation (7.1 step 2).
+    SELLER_ONLY = "seller_only"
+
+
 class OrderItem(BaseModel, StatusMixin):
     __tablename__ = "order_items"
 
@@ -82,6 +118,19 @@ class OrderItem(BaseModel, StatusMixin):
         DELIVERED = "delivered"
         CANCELLED = "cancelled"
 
+    # Single source of truth for legal status transitions, used by every code
+    # path that moves an item forward (seller self-reported shipping,
+    # Markt-rider pickup/POD) so none of them can drift out of sync with the
+    # others. PROCESSING->DELIVERED is allowed directly because a
+    # rider-confirmed POD is authoritative even if the pickup step was never
+    # separately recorded -- the buyer having the item in hand shouldn't be
+    # blocked on earlier bookkeeping.
+    VALID_STATUS_TRANSITIONS = {
+        Status.PENDING: [Status.PROCESSING, Status.CANCELLED],
+        Status.PROCESSING: [Status.SHIPPED, Status.DELIVERED, Status.CANCELLED],
+        Status.SHIPPED: [Status.DELIVERED],
+    }
+
     id = db.Column(db.Integer, primary_key=True)
     order_id = db.Column(db.String(12), db.ForeignKey("orders.id"))
     product_id = db.Column(db.String(12), db.ForeignKey("products.id"))
@@ -90,13 +139,57 @@ class OrderItem(BaseModel, StatusMixin):
     )
     seller_id = db.Column(db.Integer, db.ForeignKey("sellers.id"))
     quantity = db.Column(db.Integer)
-    price = db.Column(db.Float)
+    price = db.Column(MONEY)
+    # When this item was marked DELIVERED -- starts the settlement hold
+    # (Phase 0: 12h). Set by whichever path transitions the item, never by
+    # WalletService itself.
+    delivered_at = db.Column(db.DateTime, nullable=True)
+    # Set once WalletService.settle_order_item has actually run for this
+    # item (regardless of whether it paid out or determined nothing was
+    # owed) -- lets the settlement worker query "still pending" cheaply
+    # without re-deriving that from the wallet ledger.
+    settled_at = db.Column(db.DateTime, nullable=True)
+    # 6: buyer substitution preference for this item. Nullable-in-effect
+    # via the default -- old-flow orders (cart checkout, pre-Phase 6) never
+    # set this explicitly and get AUTO, which matches their actual
+    # behaviour today (no rerouting existed before this, so nothing changes
+    # for them).
+    fulfilment_preference = db.Column(
+        db.Enum(FulfilmentPreference),
+        default=FulfilmentPreference.AUTO,
+        nullable=False,
+    )
+    # 5.1: sum of this item's currently-ACTIVE FulfilmentAllocation
+    # quantities -- "actual seller commitments," distinct from `quantity`
+    # (the *requested* amount). Recomputed (not incrementally tracked) by
+    # FulfilmentService.create_allocation and ReroutingService.attempt_reroute
+    # whenever this item's allocations change, since a live recompute at
+    # those specific touch points is more robust than a change-by-change
+    # counter threaded through every allocation-lifecycle call site.
+    fulfilled_quantity = db.Column(db.Integer, default=0, nullable=False)
+    # 5.1: "all-or-nothing" flag. True (default): if a shortfall can't be
+    # fully covered by the fulfilment deadline, accept whatever quantity
+    # WAS secured -- `quantity` itself is reduced to match, and the buyer
+    # is refunded for the difference (see
+    # ReroutingService.attempt_reroute's give-up branch and
+    # OrderService.refund_partial_quantity). False: never ship less than
+    # requested -- release everything secured so far and escalate the
+    # whole item instead (5.2's own explicit "all-or-nothing" example: 10
+    # units needed for an event, a partial delivery is useless).
+    allow_partial_quantity = db.Column(db.Boolean, default=True, nullable=False)
 
     # Relationships
     order = db.relationship("Order", back_populates="items")
     product = db.relationship("Product")
     variant = db.relationship("ProductVariant")
     seller = db.relationship("Seller")
+
+    def transition_to(self, new_status: "OrderItem.Status") -> None:
+        """Apply a status change, raising ValueError if it isn't a legal transition."""
+        allowed = OrderItem.VALID_STATUS_TRANSITIONS.get(self.status, [])
+        if new_status not in allowed:
+            raise ValueError(f"Cannot transition from {self.status} to {new_status}")
+        self.status = new_status
 
 
 class ShippingAddress(BaseModel):
@@ -114,8 +207,18 @@ class ShippingAddress(BaseModel):
     # if the longtitude and latitude are not provided, we can use a geocoding service to get them from the address
     longitude = db.Column(db.Float)
     latitude = db.Column(db.Float)
+    # 10.1: which Area (app.markets.models.Area) this address resolves to
+    # for delivery-run purposes -- a DeliveryRun serves one Market -> one
+    # Area. Nullable: resolved best-effort from lat/lon at order-creation
+    # time (see app.markets.services.MarketService.resolve_area_for_coordinates)
+    # rather than required at checkout, since Areas are a small, curated
+    # set (initially 3 campuses) and most addresses won't match one yet.
+    # An order whose address doesn't resolve to any Area simply isn't
+    # eligible to join a run until it does -- flagged, not faked.
+    area_id = db.Column(db.Integer, db.ForeignKey("areas.id"), nullable=True)
 
     order = db.relationship("Order", back_populates="shipping_address")
+    area = db.relationship("Area")
 
 
 class Shipment(BaseModel):
@@ -131,3 +234,28 @@ class Shipment(BaseModel):
     delivered_at = db.Column(db.DateTime)
 
     order = db.relationship("Order", back_populates="shipments")
+
+
+class OrderReturnStatus(Enum):
+    REQUESTED = "requested"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    REFUNDED = "refunded"
+
+
+class OrderReturn(BaseModel, UniqueIdMixin):
+    __tablename__ = "order_returns"
+    id_prefix = "RET_"
+
+    id = db.Column(db.String(12), primary_key=True, default=None)
+    order_id = db.Column(db.String(12), db.ForeignKey("orders.id"), nullable=False)
+    buyer_id = db.Column(db.Integer, db.ForeignKey("buyers.id"), nullable=False)
+    reason = db.Column(db.Text, nullable=False)
+    status = db.Column(
+        db.Enum(OrderReturnStatus), default=OrderReturnStatus.REQUESTED, nullable=False
+    )
+    refund_amount = db.Column(MONEY, nullable=True)
+    seller_notes = db.Column(db.Text, nullable=True)
+
+    order = db.relationship("Order", back_populates="returns")
+    buyer = db.relationship("Buyer")

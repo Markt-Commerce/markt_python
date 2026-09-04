@@ -17,6 +17,8 @@ from .schemas import (
     PaymentVerifySchema,
     PaymentListSchema,
     PaymentProcessSchema,
+    CheckoutPaymentInitializeSchema,
+    CheckoutPaymentResponseSchema,
 )
 
 bp = Blueprint(
@@ -44,9 +46,12 @@ class PaymentCreate(MethodView):
     @bp.response(201, PaymentSchema)
     def post(self, payment_data):
         """Create a new payment"""
+        # .get(): `amount` is optional in PaymentCreateSchema with no default,
+        # so bracket access raised KeyError (-> 500) whenever a client omitted
+        # it. The service already resolves a missing amount from order.total.
         return PaymentService.create_payment(
             order_id=payment_data["order_id"],
-            amount=payment_data["amount"],
+            amount=payment_data.get("amount"),
             currency=payment_data.get("currency", "NGN"),
             method=payment_data.get("method", "card"),
             metadata=payment_data.get("metadata"),
@@ -100,12 +105,15 @@ class PaystackWebhook(MethodView):
                 abort(400, message="Missing webhook signature")
 
             # Get webhook payload
+            raw_body = request.get_data()
             payload = request.get_json()
             if not payload:
                 abort(400, message="Invalid webhook payload")
 
             # Process webhook
-            success = PaymentService.handle_webhook(payload, signature)
+            success = PaymentService.handle_webhook(
+                payload, signature, raw_body=raw_body
+            )
 
             if success:
                 return jsonify({"status": "success"}), 200
@@ -127,9 +135,11 @@ class PaymentInitialize(MethodView):
     def post(self, payment_data):
         """Initialize Paystack payment (for frontend integration)"""
         try:
+            # .get(): see PaymentCreate — omitting the optional `amount` must
+            # not 500; the service falls back to order.total.
             payment = PaymentService.create_payment(
                 order_id=payment_data["order_id"],
-                amount=payment_data["amount"],
+                amount=payment_data.get("amount"),
                 currency=payment_data.get("currency", "NGN"),
                 method=payment_data.get("method", "card"),
                 metadata=payment_data.get("metadata"),
@@ -172,45 +182,112 @@ class PaymentInitialize(MethodView):
             abort(500, message=f"Failed to initialize payment: {str(e)}")
 
 
+@bp.route("/checkout/initialize")
+class CheckoutPaymentInitialize(MethodView):
+    @login_required
+    @buyer_required
+    @bp.arguments(CheckoutPaymentInitializeSchema)
+    @bp.response(200, CheckoutPaymentResponseSchema)
+    def post(self, checkout_data):
+        """Payment-first checkout (additive alternative to POST /cart/checkout
+        + POST /payments/initialize): reserves stock and starts payment
+        before any Order exists. The Order is created only once payment
+        succeeds -- there is no order_id in this response."""
+        try:
+            payment = PaymentService.initialize_checkout_payment(
+                current_user.buyer_account.id,
+                checkout_data,
+                idempotency_key=checkout_data.get("idempotency_key"),
+            )
+            if payment.gateway_response and "data" in payment.gateway_response:
+                gateway_data = payment.gateway_response["data"]
+                breakdown = payment.pending_checkout_data or {}
+                return {
+                    "payment_id": payment.id,
+                    "authorization_url": gateway_data.get("authorization_url"),
+                    "reference": gateway_data.get("reference"),
+                    "access_code": gateway_data.get("access_code"),
+                    "amount": payment.amount,
+                    "subtotal": breakdown.get("subtotal"),
+                    "shipping_fee": breakdown.get("shipping_fee"),
+                    "delivery_count": breakdown.get("delivery_count", 1),
+                    "service_fee": breakdown.get("service_fee"),
+                    "reliability_fee_opted_in": breakdown.get(
+                        "reliability_fee_opted_in", False
+                    ),
+                    "reliability_fee_estimate": breakdown.get(
+                        "reliability_fee_estimate", 0.0
+                    ),
+                    "capture_ceiling": breakdown.get("capture_ceiling"),
+                }
+            raise APIError(
+                "Failed to initialize payment: No gateway response from Paystack",
+                500,
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
 @bp.route("/callback/<payment_id>")
 class PaymentCallback(MethodView):
     def get(self, payment_id):
-        """Handle payment callback from Paystack and redirect to frontend"""
+        """Handle payment callback from Paystack and redirect to the mobile app or web app"""
         from flask import redirect
+        from urllib.parse import urlencode
         from main.config import settings
+
+        # The platform is set on the callback_url when the payment was
+        # initialized (see PaymentService._initialize_paystack_transaction)
+        # and echoed back by Paystack's redirect.
+        platform = request.args.get("platform", "web")
+
+        def client_redirect(status: str, **params):
+            query_params = {k: v for k, v in params.items() if v is not None}
+            query = urlencode(query_params)
+            if platform == "mobile":
+                url = f"{settings.MOBILE_APP_SCHEME}payment/{status}"
+            else:
+                url = f"{settings.WEB_APP_BASE_URL}/payment-{status}"
+            return redirect(f"{url}?{query}" if query else url)
 
         try:
             # Get reference from query params
             reference = request.args.get("reference")
             if not reference:
-                # Redirect to frontend error page
-                frontend_url = settings.FRONTEND_BASE_URL or "http://localhost:3000"
-                return redirect(
-                    f"{frontend_url}/payment/failed?error=missing_reference"
-                )
+                return client_redirect("failed", error="missing_reference")
 
             # Verify payment
             verification_result = PaymentService.verify_payment(payment_id)
 
-            # Get frontend URL from config
-            frontend_url = settings.FRONTEND_BASE_URL or "http://localhost:3000"
-
             if verification_result["verified"]:
-                # Redirect to frontend success page
-                return redirect(
-                    f"{frontend_url}/payment/success?payment_id={payment_id}&reference={reference}"
+                return client_redirect(
+                    "success", payment_id=payment_id, reference=reference
                 )
             else:
-                # Redirect to frontend failure page
-                return redirect(
-                    f"{frontend_url}/payment/failed?payment_id={payment_id}&reference={reference}"
+                return client_redirect(
+                    "failed", payment_id=payment_id, reference=reference
                 )
 
         except Exception as e:
-            current_app.logger.error(f"Payment callback error: {str(e)}")
-            # Redirect to frontend error page
-            frontend_url = settings.FRONTEND_BASE_URL or "http://localhost:3000"
-            return redirect(f"{frontend_url}/payment/failed?error=server_error")
+            current_app.logger.error(f"Payment callback error: {str(e)}", exc_info=True)
+            # Verification can fail transiently (gateway timeout, race with the
+            # charge.success webhook). If the webhook already completed this
+            # payment, the money is confirmed — never show the user "failed".
+            try:
+                from .models import PaymentStatus
+
+                payment = PaymentService.get_payment(payment_id)
+                if payment and payment.status == PaymentStatus.COMPLETED:
+                    return client_redirect(
+                        "success",
+                        payment_id=payment_id,
+                        reference=request.args.get("reference"),
+                    )
+            except Exception:
+                pass
+            return client_redirect(
+                "failed", payment_id=payment_id, error="server_error"
+            )
 
 
 # Admin routes for payment management

@@ -20,6 +20,7 @@ from .schemas import (
     CreateChatRoomSchema,
     SendMessageSchema,
     ChatMessageReactionCreateSchema,
+    ChatMessageReactionSchema,
     ChatMessageReactionSummarySchema,
 )
 from .services import ChatService, ChatReactionService, DiscountService
@@ -54,12 +55,18 @@ class ChatRooms(MethodView):
                 buyer_id = current_user.id
                 seller_id = room_data.get("seller_id")
                 if not seller_id:
-                    abort(400, message="seller_id is required when creating a chat room as a buyer")
+                    abort(
+                        400,
+                        message="seller_id is required when creating a chat room as a buyer",
+                    )
             else:
                 buyer_id = room_data.get("buyer_id")
                 seller_id = current_user.id
                 if not buyer_id:
-                    abort(400, message="buyer_id is required when creating a chat room as a seller")
+                    abort(
+                        400,
+                        message="buyer_id is required when creating a chat room as a seller",
+                    )
 
             room = ChatService.create_or_get_chat_room(
                 buyer_id=buyer_id,
@@ -74,9 +81,9 @@ class ChatRooms(MethodView):
                 "seller_id": room.seller_id,
                 "product_id": room.product_id,
                 "request_id": room.request_id,
-                "last_message_at": room.last_message_at
-                if room.last_message_at
-                else None,
+                "last_message_at": (
+                    room.last_message_at if room.last_message_at else None
+                ),
                 "unread_count_buyer": room.unread_count_buyer,
                 "unread_count_seller": room.unread_count_seller,
             }
@@ -190,7 +197,7 @@ class ChatMessageReactions(MethodView):
 
     @login_required
     @bp.arguments(ChatMessageReactionCreateSchema)
-    @bp.response(201)
+    @bp.response(201, ChatMessageReactionSchema)
     def post(self, reaction_data, message_id):
         """Add a reaction to a chat message"""
         try:

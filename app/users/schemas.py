@@ -31,6 +31,9 @@ class UserSchema(Schema):
     created_at = fields.DateTime(dump_only=True)
     updated_at = fields.DateTime(dump_only=True)
     last_login_at = fields.DateTime(dump_only=True)
+    # Bearer token, only populated on login/register responses (see routes).
+    # Absent elsewhere, so marshmallow omits it from other user payloads.
+    access_token = fields.Str(dump_only=True)
 
     def get_profile_picture_url(self, obj):
         """Get profile picture URL with fallback to default"""
@@ -330,8 +333,39 @@ class SettingsUpdateSchema(Schema):
     pass
 
 
+class PublicShopSchema(Schema):
+    id = fields.Int()
+    shop_name = fields.Str(allow_none=True)
+    shop_slug = fields.Str(allow_none=True)
+    description = fields.Str(allow_none=True)
+    products_count = fields.Int()
+    average_rating = fields.Float(allow_none=True)
+    total_raters = fields.Int()
+    verification_status = fields.Str(allow_none=True)
+
+
 class PublicProfileSchema(Schema):
-    pass
+    """What anyone may see about another user.
+
+    Deliberately narrow: no email, no phone, no address, no order history.
+    Adding a field here makes it public to every caller, authenticated or not.
+    """
+
+    id = fields.Str()
+    username = fields.Str()
+    profile_picture = fields.Str(allow_none=True)
+    is_seller = fields.Bool()
+    joined_at = fields.Str(allow_none=True)
+
+    followers_count = fields.Int()
+    following_count = fields.Int()
+    posts_count = fields.Int()
+
+    # Viewer-relative; False for anonymous callers.
+    is_followed = fields.Bool()
+    is_self = fields.Bool()
+
+    shop = fields.Nested(PublicShopSchema, allow_none=True)
 
 
 # Legacy schema for backward compatibility
@@ -409,3 +443,35 @@ class AnalyticsTimeseriesQuerySchema(Schema):
 
 class AnalyticsOverviewQuerySchema(Schema):
     window_days = fields.Int(missing=30, validate=validate.Range(min=1, max=365))
+
+
+# Account deletion (Apple App Store 5.1.1(v))
+class AccountDeletionBlockerSchema(Schema):
+    code = fields.Str()
+    message = fields.Str()
+    detail = fields.Dict()
+
+
+class AccountDeletionPreviewSchema(Schema):
+    can_delete = fields.Bool()
+    blockers = fields.List(fields.Nested(AccountDeletionBlockerSchema))
+
+
+class AccountDeletionRequestSchema(Schema):
+    """Deletion is irreversible, so it takes the password rather than relying
+    on the 30-day bearer token alone, plus a typed confirmation the UI makes
+    the user enter."""
+
+    password = fields.Str(required=True, load_only=True)
+    confirmation = fields.Str(
+        required=True,
+        validate=validate.Equal(
+            "DELETE", error="Type DELETE to confirm account deletion"
+        ),
+    )
+
+
+class AccountDeletionResponseSchema(Schema):
+    deleted = fields.Bool()
+    user_id = fields.Str()
+    message = fields.Str()

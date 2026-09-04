@@ -8,7 +8,16 @@ from flask_login import login_user, logout_user, login_required, current_user
 from sqlalchemy import or_
 
 # project imports
-from app.libs.errors import AuthError, NotFoundError, UnverifiedEmailError
+from flask import jsonify, make_response
+
+from app.libs.errors import (
+    AuthError,
+    NotFoundError,
+    UnverifiedEmailError,
+    APIError,
+    ConflictError,
+)
+from app.libs.auth_tokens import generate_auth_token
 from app.libs.pagination import Paginator
 from app.libs.schemas import PaginationQueryArgs
 from app.media.schemas import MediaSchema
@@ -44,11 +53,16 @@ from .schemas import (
     AnalyticsOverviewQuerySchema,
     AddressSchema,
     AddressUpdateSchema,
+    AccountDeletionPreviewSchema,
+    AccountDeletionRequestSchema,
+    AccountDeletionResponseSchema,
 )
 from .services import (
     AuthService,
     UserService,
     AccountService,
+    PublicProfileService,
+    AccountDeletionService,
     SellerStartCardsService,
     SellerAnalyticsService,
 )
@@ -69,6 +83,7 @@ class UserRegister(MethodView):
         try:
             user = AuthService.register_user(user_data)
             login_user(user)
+            user.access_token = generate_auth_token(user.id)
             return user
         except AuthError as e:
             abort(e.status_code, message=e.message)
@@ -89,6 +104,14 @@ class UserLogin(MethodView):
                 credentials.get("account_type"),  # Use .get() to handle optional field
             )
             login_user(user)
+            user.access_token = generate_auth_token(user.id)
+            # Gamification: first login of the day (idempotent per day).
+            try:
+                from app.signals import daily_login
+
+                daily_login.send("users", user_id=user.id)
+            except Exception as e:
+                logger.warning(f"gamification daily_login emit failed: {e}")
             return user
         except UnverifiedEmailError as e:
             # Return structured payload that frontend can detect easily
@@ -104,6 +127,68 @@ class UserLogout(MethodView):
     def post(self):
         logout_user()
         return None
+
+
+@bp.route("/account/deletion-check")
+class AccountDeletionCheck(MethodView):
+    @login_required
+    @bp.response(200, AccountDeletionPreviewSchema)
+    def get(self):
+        """Report whether this account can be deleted, and why not if it can't.
+
+        Lets the settings screen explain the problem (money still in the
+        wallet, orders in flight) up front instead of failing the delete.
+        """
+        try:
+            blockers = AccountDeletionService.check_blockers(current_user.id)
+            return {"can_delete": not blockers, "blockers": blockers}
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/account")
+class AccountDeletion(MethodView):
+    @login_required
+    @bp.arguments(AccountDeletionRequestSchema)
+    @bp.response(200, AccountDeletionResponseSchema)
+    def delete(self, data):
+        """Permanently delete the signed-in user's account.
+
+        Required by Apple App Store guideline 5.1.1(v): an account created in
+        the app has to be deletable from inside the app, and deactivation does
+        not satisfy it. Personal data is destroyed; posts, reviews and order
+        history survive attributed to a deleted user so other people's records
+        stay intact (see AccountDeletionService).
+        """
+        user_id = current_user.id
+        try:
+            result = AccountDeletionService.delete_account(user_id, data["password"])
+        except ConflictError as e:
+            # Built by hand rather than via abort(): flask-smorest's error
+            # handler renders only message/status/code and silently drops extra
+            # kwargs, so the blocker list never reached the client. The client
+            # needs the structured list to say *which* order or balance is in
+            # the way, not just a sentence.
+            blockers = (e.payload or {}).get("blockers") or []
+            return make_response(
+                jsonify(
+                    {
+                        "code": 409,
+                        "status": "Conflict",
+                        "message": e.message,
+                        "blockers": blockers,
+                    }
+                ),
+                409,
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+        # Drop the session cookie too. Bearer tokens are stateless, so they
+        # are refused by the loaders in main.setup on the strength of
+        # deleted_at rather than being revoked here.
+        logout_user()
+        return result
 
 
 @bp.route("/profile")
@@ -372,10 +457,22 @@ class ProfilePictureUpload(MethodView):
 class PublicProfile(MethodView):
     @bp.response(200, PublicProfileSchema)
     def get(self, user_id):
-        """View public profile"""
-        # TODO: Show public profile info
-        # TODO: Include social stats (followers, products)
-        # TODO: Privacy controls
+        """Public view of another user.
+
+        Was a stub -- three TODOs, no return, and an empty schema -- so it
+        500'd for anyone who called it. Nothing did, which is why the feed's
+        post-author header still links nowhere.
+
+        Deliberately open to anonymous callers (a shared product link should
+        render its seller), which is exactly why the schema is narrow.
+        """
+        try:
+            return PublicProfileService.get_public_profile(
+                user_id,
+                viewer_id=current_user.id if current_user.is_authenticated else None,
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
 
 
 @bp.route("/shops")

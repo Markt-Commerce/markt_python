@@ -5,6 +5,7 @@ import time
 # package imports
 from flask import Flask
 from flask_login import LoginManager
+from werkzeug.middleware.proxy_fix import ProxyFix
 from flask_migrate import Migrate
 from flask_cors import CORS
 from flask_smorest import Api
@@ -68,7 +69,17 @@ def create_app():
     setup_logging()
 
     app = Flask(__name__)
+
+    # Serve /path and /path/ alike instead of 308-redirecting between them.
+    # The redirect was the source of the mobile "empty categories" bug: werkzeug
+    # rebuilt the URL with the scheme it saw behind the proxy (http), and
+    # release Android builds refuse cleartext, so the request silently died.
+    app.url_map.strict_slashes = False
+
     app.wsgi_app = AuthMiddleware(app.wsgi_app)
+    # Trust the reverse proxy's X-Forwarded-* headers so any URL werkzeug does
+    # generate (redirects, url_for with _external) keeps https and the real host.
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
     # Track application start time for health checks
     app.start_time = time.time()
@@ -89,13 +100,45 @@ def create_app():
         def load_user(user_id):
             user = User.query.get(user_id)
             if user:
-                return user
+                # A deleted account keeps its row so other people's posts,
+                # reviews and order history stay coherent, but it must never
+                # authenticate again (see AccountDeletionService).
+                return None if user.deleted_at else user
 
             delivery_user = DeliveryUser.query.get(user_id)
             if delivery_user:
                 return delivery_user
 
             return None
+
+        @login_manager.request_loader
+        def load_user_from_token(req):
+            """Authenticate API clients that send a signed bearer token instead
+            of a session cookie (the React Native app). Falls back to None so
+            Flask-Login can still try the session cookie."""
+            auth_header = req.headers.get("Authorization", "")
+            if not auth_header.startswith("Bearer "):
+                return None
+
+            # Split off the "Bearer " prefix without a slice (avoids black's
+            # "whitespace before ':'" which flake8 flags as E203).
+            token = auth_header.split(" ", 1)[1].strip()
+            if not token:
+                return None
+
+            from app.libs.auth_tokens import verify_auth_token
+
+            user_id = verify_auth_token(token)
+            if not user_id:
+                return None
+
+            user = User.query.get(user_id)
+            if user:
+                # Bearer tokens are stateless signed user ids with a 30-day
+                # life, so this is the only thing that stops a token issued
+                # before deletion from continuing to work.
+                return None if user.deleted_at else user
+            return DeliveryUser.query.get(user_id)
 
         # Register routes
         register_blueprints(app, api)
@@ -116,6 +159,20 @@ def create_app():
             logger.warning(
                 "Paystack keys not configured - payment features will not work"
             )
+
+    # A wrong API_BASE_URL is silent on the server and ugly for the customer:
+    # the payment succeeds via webhook, but Paystack redirects their browser to
+    # an unreachable address and they see ERR_CONNECTION_REFUSED after paying.
+    # Nothing raises, so the only way to catch it is to look for it.
+    if settings.API_BASE_URL_IS_UNREACHABLE and settings.ENV != "development":
+        logger.error(
+            "API_BASE_URL is %r in a %s environment. Paystack will redirect "
+            "customers here after payment and it is not reachable from a "
+            "phone -- top-ups will appear to fail even though the webhook "
+            "credits them. Set API_BASE_URL to the public API URL.",
+            settings.API_BASE_URL or "(unset)",
+            settings.ENV,
+        )
 
     logger.info("Application initialized")
     return app, socketio

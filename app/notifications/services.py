@@ -64,10 +64,46 @@ class NotificationService:
             "title": "System notification",
             "message": "{message}",
         },
+        NotificationType.FULFILMENT_REQUEST: {
+            "title": "New order to fulfil",
+            "message": "{message}",
+        },
+        NotificationType.SUBSTITUTION_APPROVAL_REQUIRED: {
+            "title": "Approval needed",
+            "message": "{message}",
+        },
+        # 10.3 -- real bug, never caught: this type had no template entry
+        # at all, so a real (non-mocked) call would raise ValueError.
+        # Caught while wiring Phase 12's notifications, none of which
+        # exercise the real create_notification() call path in tests.
+        NotificationType.THIN_VOLUME_DELIVERY_CHOICE: {
+            "title": "Delivery update",
+            "message": "{message}",
+        },
+        NotificationType.ITEM_UNFULFILLED: {
+            "title": "Item couldn't be fulfilled",
+            "message": "{message}",
+        },
+        NotificationType.ORDER_CANCELLED: {
+            "title": "Order cancelled",
+            "message": "Order #{order_id} has been cancelled.",
+        },
+        NotificationType.DELIVERY_FAILED: {
+            "title": "Delivery attempt failed",
+            "message": "{message}",
+        },
+        NotificationType.REFUND_ISSUED: {
+            "title": "Refund issued",
+            "message": "{message}",
+        },
         # Buyer request notifications
         NotificationType.REQUEST_OFFER: {
             "title": "New offer",
             "message": "{seller_name} made an offer on your request: {request_title}",
+        },
+        NotificationType.NEW_REQUEST_MATCH: {
+            "title": "New request in your category",
+            "message": "{message}",
         },
         NotificationType.OFFER_ACCEPTED: {
             "title": "Offer accepted",
@@ -187,6 +223,24 @@ class NotificationService:
             "always_email": True,
             "always_push": True,
         },
+        # Seller fulfilment notifications (12.1-12.2). Same "no entry ->
+        # WEBSOCKET-only, so an offline seller/buyer never gets pushed" gap
+        # documented below at ITEM_UNFULFILLED -- caught the same way, by
+        # tracing how this reaches the phone rather than by a test. Both
+        # carry a hard response countdown (SELLER_RESPONSE_TIMEOUT_MINUTES /
+        # the 9.1 ASK deadline), so a missed push here directly costs the
+        # seller's Reliability score or strands the buyer's order -- no
+        # email, the window is too short for it to help.
+        NotificationType.FULFILMENT_REQUEST: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.SUBSTITUTION_APPROVAL_REQUIRED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
         # Buyer request notifications
         NotificationType.REQUEST_OFFER: {
             "channels": [
@@ -197,6 +251,12 @@ class NotificationService:
             "immediate_websocket": True,
             "push_when_offline": True,
             "always_email": True,  # Important business notification
+        },
+        NotificationType.NEW_REQUEST_MATCH: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": False,  # High-volume for an active seller; push is enough
         },
         NotificationType.OFFER_ACCEPTED: {
             "channels": [
@@ -269,6 +329,58 @@ class NotificationService:
             "push_when_offline": True,
             "always_email": True,  # Critical business notification
         },
+        # Phase 12 (15) -- same "critical business notification" treatment
+        # as payment/order events above. Without an explicit entry here,
+        # NotificationService.create_notification defaults a type to
+        # WEBSOCKET-only (see config_channels' own fallback) -- meaning a
+        # buyer not actively connected at that exact moment (the normal
+        # case for e.g. "a rider reported your delivery failed") would
+        # never be pushed at all. A real gap, caught by asking "how does
+        # this reach the mobile app" rather than by any test -- none of
+        # this phase's tests exercise CHANNEL_CONFIG, only that
+        # create_notification was called.
+        NotificationType.ITEM_UNFULFILLED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.ORDER_CANCELLED: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,
+        },
+        NotificationType.DELIVERY_FAILED: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,
+        },
+        NotificationType.REFUND_ISSUED: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,  # Money moved -- buyer should always know
+        },
+        # 10.3: informational/actionable in-app prompt, not a critical
+        # financial event -- push so it's not missed, no email.
+        NotificationType.THIN_VOLUME_DELIVERY_CHOICE: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
         # Social notifications
         NotificationType.NICHE_INVITATION: {
             "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
@@ -327,32 +439,42 @@ class NotificationService:
             # Format message with safe defaults
             format_data = {
                 "username": actor_name or "Someone",
-                "product_name": metadata_.get("product_name", "your product")
-                if metadata_
-                else "your product",
+                "product_name": (
+                    metadata_.get("product_name", "your product")
+                    if metadata_
+                    else "your product"
+                ),
                 "rating": metadata_.get("rating", 0) if metadata_ else 0,
                 "order_id": reference_id or "N/A",
-                "status": metadata_.get("status", "updated")
-                if metadata_
-                else "updated",
+                "status": (
+                    metadata_.get("status", "updated") if metadata_ else "updated"
+                ),
                 "message": metadata_.get("message", "") if metadata_ else "",
                 # Buyer request variables
-                "seller_name": metadata_.get("seller_name", "A seller")
-                if metadata_
-                else "A seller",
-                "request_title": metadata_.get("request_title", "your request")
-                if metadata_
-                else "your request",
+                "seller_name": (
+                    metadata_.get("seller_name", "A seller")
+                    if metadata_
+                    else "A seller"
+                ),
+                "request_title": (
+                    metadata_.get("request_title", "your request")
+                    if metadata_
+                    else "your request"
+                ),
                 # Social variables
-                "inviter_name": metadata_.get("inviter_name", "Someone")
-                if metadata_
-                else "Someone",
-                "niche_name": metadata_.get("niche_name", "a community")
-                if metadata_
-                else "a community",
-                "action_type": metadata_.get("action_type", "moderation")
-                if metadata_
-                else "moderation",
+                "inviter_name": (
+                    metadata_.get("inviter_name", "Someone") if metadata_ else "Someone"
+                ),
+                "niche_name": (
+                    metadata_.get("niche_name", "a community")
+                    if metadata_
+                    else "a community"
+                ),
+                "action_type": (
+                    metadata_.get("action_type", "moderation")
+                    if metadata_
+                    else "moderation"
+                ),
             }
 
             message = template["message"].format(**format_data)
@@ -566,3 +688,103 @@ class NotificationService:
             ).update({"is_seen": True}, synchronize_session=False)
         except Exception as e:
             logger.error(f"Error marking notifications as seen: {str(e)}")
+
+
+class PushService:
+    """Remote push notifications via the Expo Push API.
+
+    Tokens are Expo push tokens (``ExponentPushToken[...]``) registered by the
+    mobile client. Sending is best-effort; invalid tokens returned by Expo
+    (``DeviceNotRegistered``) are pruned so we stop pushing to dead devices.
+    """
+
+    EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
+
+    @staticmethod
+    def register_token(user_id: str, token: str, platform: str = None) -> None:
+        from .models import PushToken
+
+        if not token:
+            return
+        with session_scope() as session:
+            existing = session.query(PushToken).filter_by(token=token).first()
+            if existing:
+                existing.user_id = user_id
+                if platform:
+                    existing.platform = platform
+            else:
+                session.add(PushToken(user_id=user_id, token=token, platform=platform))
+
+    @staticmethod
+    def remove_token(token: str) -> None:
+        from .models import PushToken
+
+        with session_scope() as session:
+            session.query(PushToken).filter_by(token=token).delete()
+
+    @staticmethod
+    def get_user_tokens(user_id: str) -> List[str]:
+        from .models import PushToken
+
+        with session_scope() as session:
+            return [
+                t.token
+                for t in session.query(PushToken).filter_by(user_id=user_id).all()
+            ]
+
+    @staticmethod
+    def send_to_user(
+        user_id: str, title: str, body: str, data: Dict[str, Any] = None
+    ) -> None:
+        tokens = PushService.get_user_tokens(user_id)
+        if tokens:
+            PushService.send_to_tokens(tokens, title, body, data)
+
+    @staticmethod
+    def send_to_tokens(
+        tokens: List[str], title: str, body: str, data: Dict[str, Any] = None
+    ) -> None:
+        import requests
+
+        messages = [
+            {
+                "to": t,
+                "title": title,
+                "body": body,
+                "data": data or {},
+                "sound": "default",
+                "channelId": "default",
+            }
+            for t in tokens
+            if str(t).startswith("ExponentPushToken")
+        ]
+        if not messages:
+            return
+        try:
+            resp = requests.post(
+                PushService.EXPO_PUSH_URL,
+                json=messages,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                timeout=10,
+            )
+            PushService._prune_invalid(resp, messages)
+        except Exception as e:
+            logger.error(f"Expo push send failed: {e}")
+
+    @staticmethod
+    def _prune_invalid(resp, messages) -> None:
+        """Remove tokens Expo reports as no longer registered."""
+        try:
+            tickets = (resp.json() or {}).get("data", [])
+        except Exception:
+            return
+        for msg, ticket in zip(messages, tickets):
+            if (
+                isinstance(ticket, dict)
+                and ticket.get("status") == "error"
+                and (ticket.get("details") or {}).get("error") == "DeviceNotRegistered"
+            ):
+                PushService.remove_token(msg["to"])

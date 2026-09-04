@@ -15,7 +15,7 @@ from redis.exceptions import RedisError, ConnectionError as RedisConnectionError
 from external.database import db
 from external.redis import redis_client
 
-from app.libs.session import session_scope
+from app.libs.session import session_scope, read_scope
 from app.libs.pagination import Paginator
 from app.libs.errors import (
     NotFoundError,
@@ -25,7 +25,8 @@ from app.libs.errors import (
     ForbiddenError,
 )
 
-from app.users.models import User, Seller, SellerVerificationStatus
+from app.users.models import User, Seller, SellerVerificationStatus, Buyer
+from app.products.ratings import refresh_for_product
 from app.products.models import Product, ProductStatus
 from app.products.services import ProductService, ProductStatsService
 from app.orders.models import Order, OrderStatus, OrderItem
@@ -50,6 +51,7 @@ from .models import (
     PostStatus,
     FollowType,
     ProductReview,
+    ReviewUpvote,
     ProductView,
     Niche,
     NicheMembership,
@@ -63,6 +65,33 @@ from .models import (
 from .constants import POST_STATUS_TRANSITIONS
 
 logger = logging.getLogger(__name__)
+
+
+class _SignalPost:
+    """Minimal detached carrier for post gamification signals.
+
+    Signals fire post-commit, so we pass a tiny value object with just the
+    fields the listener needs (id, author user_id) rather than a live/detached
+    ORM row that could trigger lazy loads.
+    """
+
+    __slots__ = ("id", "user_id")
+
+    def __init__(self, post_id, user_id):
+        self.id = post_id
+        self.user_id = user_id
+
+
+class _SignalReview:
+    """Minimal detached carrier for review gamification signals."""
+
+    __slots__ = ("id", "user_id", "rating", "product_id")
+
+    def __init__(self, review_id, user_id, rating, product_id):
+        self.id = review_id
+        self.user_id = user_id
+        self.rating = rating
+        self.product_id = product_id
 
 
 class NicheService:
@@ -99,6 +128,10 @@ class NicheService:
                 raise ConflictError("A community with this name already exists")
 
             # Create niche
+            for field in ("image_id", "banner_id"):
+                if data.get(field) is not None:
+                    NicheService._assert_media_exists(session, data[field])
+
             niche = Niche(
                 name=data["name"],
                 description=data["description"],
@@ -108,6 +141,8 @@ class NicheService:
                 allow_seller_posts=data.get("allow_seller_posts", True),
                 require_approval=data.get("require_approval", False),
                 max_members=data.get("max_members", 10000),
+                image_id=data.get("image_id"),
+                banner_id=data.get("banner_id"),
                 tags=data.get("tags", []),
                 rules=data.get("rules", []),
                 settings=data.get("settings", {}),
@@ -184,6 +219,20 @@ class NicheService:
                 )
                 if not membership:
                     raise ForbiddenError("You don't have access to this community")
+
+            # Same is_member the list carries, so the detail screen's Join
+            # button doesn't have to work it out from a separate request.
+            niche.is_member = bool(
+                user_id
+                and session.query(NicheMembership.id)
+                .filter_by(
+                    niche_id=niche_id,
+                    user_id=user_id,
+                    is_active=True,
+                    is_banned=False,
+                )
+                .first()
+            )
 
             # TODO: Implement proper Redis caching with serialization
             # For now, disable caching to fix Redis DataError
@@ -389,19 +438,78 @@ class NicheService:
                 if category_filters:
                     base_query = base_query.filter(db.or_(*category_filters))
 
-            # Order by relevance (member count, activity)
-            base_query = base_query.order_by(
-                Niche.member_count.desc(),
-                Niche.post_count.desc(),
-                Niche.created_at.desc(),
+            # Membership filter, so one endpoint serves both the "your
+            # communities" tab and the "discover" tab.
+            membership = args.get("membership")
+            if membership and user_id:
+                joined_ids = session.query(NicheMembership.niche_id).filter(
+                    NicheMembership.user_id == user_id,
+                    NicheMembership.is_active.is_(True),
+                    NicheMembership.is_banned.is_(False),
+                )
+                if membership == "joined":
+                    base_query = base_query.filter(Niche.id.in_(joined_ids))
+                elif membership == "not_joined":
+                    base_query = base_query.filter(~Niche.id.in_(joined_ids))
+
+            # Ordering was hardcoded to member_count desc, so the largest
+            # communities were the only ones anyone ever saw and a new one could
+            # never surface. "trending" keeps that behaviour as the default.
+            sort = args.get("sort") or "trending"
+            if sort == "newest":
+                base_query = base_query.order_by(Niche.created_at.desc())
+            elif sort == "members":
+                base_query = base_query.order_by(
+                    Niche.member_count.desc(), Niche.created_at.desc()
+                )
+            elif sort == "name":
+                base_query = base_query.order_by(Niche.name.asc())
+            else:  # trending: recent activity weighted by size
+                base_query = base_query.order_by(
+                    Niche.post_count.desc(),
+                    Niche.member_count.desc(),
+                    Niche.created_at.desc(),
+                )
+
+            # Eager-load the imagery the cards render, or every row lazy-loads
+            # two media objects.
+            base_query = base_query.options(
+                joinedload(Niche.image), joinedload(Niche.banner)
             )
 
             paginator = Paginator(
                 base_query, page=args.get("page", 1), per_page=args.get("per_page", 20)
             )
-            result = paginator.paginate(args)
+            # Strip the keys we've already applied. Paginator reads "sort" from
+            # the args and applies its own ordering -- and Niche.members is a
+            # relationship, so sort=members made it order by niche_memberships
+            # without a join: "missing FROM-clause entry".
+            paginator_args = {
+                k: v for k, v in args.items() if k not in ("sort", "membership")
+            }
+            result = paginator.paginate(paginator_args)
+
+            # One query for "which of these am I in", rather than a call per
+            # card to decide between Join and Joined.
+            items = result["items"]
+            if user_id and items:
+                member_of = {
+                    nid
+                    for (nid,) in session.query(NicheMembership.niche_id).filter(
+                        NicheMembership.user_id == user_id,
+                        NicheMembership.is_active.is_(True),
+                        NicheMembership.is_banned.is_(False),
+                        NicheMembership.niche_id.in_([n.id for n in items]),
+                    )
+                }
+                for niche in items:
+                    niche.is_member = niche.id in member_of
+            else:
+                for niche in items:
+                    niche.is_member = False
+
             return {
-                "items": result["items"],
+                "items": items,
                 "pagination": {
                     "page": result["page"],
                     "per_page": result["per_page"],
@@ -789,6 +897,16 @@ class NicheService:
             return niche_post
 
     @staticmethod
+    def _assert_media_exists(session, media_id: int) -> None:
+        """A niche pointing at a media row that isn't there would render as a
+        broken image forever, and the FK error it would otherwise raise says
+        nothing useful to the person who picked the picture."""
+        from app.media.models import Media
+
+        if not session.query(Media.id).filter(Media.id == media_id).first():
+            raise ValidationError(f"No uploaded image with id {media_id}")
+
+    @staticmethod
     def update_niche(niche_id: str, user_id: str, data: Dict[str, Any]) -> Niche:
         """Update niche details (owner only)"""
         with session_scope() as session:
@@ -827,6 +945,16 @@ class NicheService:
 
             if data.get("visibility"):
                 niche.visibility = NicheVisibility(data["visibility"])
+
+            # Imagery. Validated so a community can't point at media that
+            # doesn't exist, and explicitly clearable with null -- an owner
+            # who wants no banner should be able to remove one.
+            for field in ("image_id", "banner_id"):
+                if field in data:
+                    media_id = data[field]
+                    if media_id is not None:
+                        NicheService._assert_media_exists(session, media_id)
+                    setattr(niche, field, media_id)
 
             if data.get("allow_buyer_posts") is not None:
                 niche.allow_buyer_posts = data["allow_buyer_posts"]
@@ -899,6 +1027,9 @@ class NicheService:
         redis_client.delete(
             NicheService.CACHE_KEYS["user_niches"].format(user_id=user_id)
         )
+        # Membership changes must immediately affect the aggregate community
+        # timeline as well as the memberships list.
+        redis_client.delete(f"feed:user:{user_id}:joined_niches")
 
 
 class PostService:
@@ -983,12 +1114,40 @@ class PostService:
                     {post.id: int(post.created_at.timestamp())},
                 )
 
-                return post
+                post_id = post.id
+
+            # Post-commit: award gamification points to the author.
+            PostService._emit_gam_post_created(post_id, user_id)
+            return post
         except SQLAlchemyError as e:
             logger.error(f"Error creating post: {str(e)}")
             raise ConflictError("Failed to create post")
         except (RedisError, RedisConnectionError) as e:
             logger.warning(f"Redis error while creating post: {str(e)}", exc_info=True)
+
+    @staticmethod
+    def _emit_gam_post_created(post_id, user_id):
+        """Fire the post-created domain signal (gamification listens)."""
+        try:
+            from app.signals import post_created
+
+            post_created.send("socials", post=_SignalPost(post_id, user_id))
+        except Exception as e:  # never let gamification break post creation
+            logger.warning(f"gamification post_created emit failed: {e}")
+
+    @staticmethod
+    def _emit_gam_post_reaction(post_id, author_user_id, reactor_id):
+        """Fire the post-reaction signal for the post author."""
+        try:
+            from app.signals import post_reaction_added
+
+            post_reaction_added.send(
+                "socials",
+                post=_SignalPost(post_id, author_user_id),
+                reactor_id=reactor_id,
+            )
+        except Exception as e:
+            logger.warning(f"gamification post_reaction emit failed: {e}")
 
     @staticmethod
     def get_post(post_id):
@@ -1012,6 +1171,24 @@ class PostService:
         except SQLAlchemyError as e:
             logger.error(f"Error fetching post {post_id}: {str(e)}")
             raise NotFoundError("Failed to fetch post")
+
+    @staticmethod
+    def is_liked_by(post_id: str, user_id: str) -> bool:
+        """Whether this user has already liked the post.
+
+        The feed computes this in batch during hydration; the detail endpoint
+        needs the single-post answer so an already-liked post doesn't open with
+        an empty heart.
+        """
+        if not post_id or not user_id:
+            return False
+        with session_scope() as session:
+            return (
+                session.query(PostLike.post_id)
+                .filter_by(post_id=post_id, user_id=user_id)
+                .first()
+                is not None
+            )
 
     @staticmethod
     def get_post_with_niche_context(post_id):
@@ -1156,7 +1333,12 @@ class PostService:
                 except Exception as e:
                     logger.warning(f"Failed to queue post_liked event: {e}")
 
-                return like
+                author_id = post.user_id if (post and post.user_id != user_id) else None
+
+            # Post-commit: award reaction points to the post author (capped/day).
+            if author_id:
+                PostService._emit_gam_post_reaction(post_id, author_id, user_id)
+            return like
         except SQLAlchemyError as e:
             logger.error(f"Error liking post: {str(e)}")
             raise ConflictError("Failed to like post")
@@ -1462,7 +1644,7 @@ class PostService:
             }
 
     @staticmethod
-    def get_posts(args):
+    def get_posts(args, market_id=None):
         """Get paginated posts with filtering"""
         with session_scope() as session:
             base_query = (
@@ -1478,6 +1660,14 @@ class PostService:
                     joinedload(Post.niche_posts).joinedload(NichePost.niche),
                 )
             )
+
+            # Market browsing (markets feature): posts by sellers assigned
+            # to this market. Server-determined from the URL path, not a
+            # client-supplied filter -- see app.markets.services.
+            if market_id is not None:
+                base_query = base_query.join(
+                    Seller, Seller.user_id == Post.user_id
+                ).filter(Seller.market_id == market_id)
 
             # Apply filters
             # 1) Basic filters from args (user, category)
@@ -1795,6 +1985,28 @@ class PostService:
 
 class ProductSocialService:
     @staticmethod
+    def _find_delivered_order(session, user_id, product_id):
+        """The buyer's most recent delivered order containing this product.
+
+        Returns the order id, or None if they have never received it. Resolved
+        from the buyer's own orders so a supplied order_id can't be used to
+        borrow someone else's purchase.
+        """
+        row = (
+            session.query(Order.id)
+            .join(OrderItem, OrderItem.order_id == Order.id)
+            .join(Buyer, Buyer.id == Order.buyer_id)
+            .filter(
+                Buyer.user_id == user_id,
+                OrderItem.product_id == product_id,
+                Order.status == OrderStatus.DELIVERED,
+            )
+            .order_by(Order.created_at.desc())
+            .first()
+        )
+        return row[0] if row else None
+
+    @staticmethod
     def create_review(user_id, product_id, data):
         try:
             with session_scope() as session:
@@ -1802,26 +2014,26 @@ class ProductSocialService:
                 if not product:
                     raise NotFoundError("Product not found")
 
-                # Verify purchase if order_id provided
-                if data.get("order_id"):
-                    order = (
-                        session.query(Order)
-                        .filter_by(
-                            id=data["order_id"],
-                            buyer_id=user_id,
-                            status=OrderStatus.DELIVERED,
-                        )
-                        .join(OrderItem)
-                        .filter_by(product_id=product_id)
-                        .first()
+                # Purchase verification is now unconditional. It used to run
+                # only `if data.get("order_id")` -- so omitting the field
+                # skipped the check entirely and anyone could review anything
+                # they had never bought. On a marketplace that makes fake
+                # reviews free, which is the one thing a rating has to be
+                # expensive to fake.
+                #
+                # The order is also resolved server-side rather than taken from
+                # the request: a client that names someone else's order should
+                # not get to decide whether its own review counts as verified.
+                delivered_order_id = ProductSocialService._find_delivered_order(
+                    session, user_id, product_id
+                )
+                if not delivered_order_id:
+                    raise APIError(
+                        "You can review this after your order has been delivered",
+                        403,
                     )
-
-                    if not order:
-                        raise APIError(
-                            "You must purchase this product before reviewing", 403
-                        )
-
-                    data["is_verified"] = True
+                data["order_id"] = delivered_order_id
+                data["is_verified"] = True
 
                 # Check for existing review
                 existing = (
@@ -1838,19 +2050,12 @@ class ProductSocialService:
                 session.add(review)
                 session.flush()
 
-                # Update Redis
-                redis_key = f"product:{product_id}:stats"
-
-                with redis_client.pipeline() as pipe:
-                    if data.get("rating"):
-                        pipe.hincrby(redis_key, "rating_sum", data["rating"])
-                        pipe.hincrby(redis_key, "rating_count", 1)
-
-                    pipe.hincrby(redis_key, "review_count", 1)
-                    pipe.execute()
-
-                # Update all derived stats
-                ProductStatsService.update_product_stats(product_id)
+                # Recompute from the database rather than incrementing counters
+                # that only Redis holds. The old path meant an evicted key
+                # silently reset a product to 0 stars while its reviews sat
+                # untouched in Postgres. This also writes the seller's
+                # total_rating/total_raters, which nothing wrote before.
+                stats = refresh_for_product(session, product_id)
 
                 # Trigger notification
                 from app.notifications.services import NotificationService
@@ -1881,27 +2086,96 @@ class ProductSocialService:
                             "user_id": user_id,
                             "username": user.username if user else "Unknown",
                             "rating": data.get("rating"),
-                            "review_count": int(
-                                redis_client.hget(redis_key, "review_count")
-                            ),
-                            "avg_rating": float(
-                                redis_client.hget(redis_key, "avg_rating") or 0
-                            ),
+                            "review_count": stats["review_count"],
+                            "avg_rating": stats["avg_rating"],
                             "is_verified": data.get("is_verified", False),
                         },
                     )
                 except Exception as e:
                     logger.warning(f"Failed to queue review_added event: {e}")
 
-                return review
+                review_id = review.id
+                review_rating = data.get("rating")
+
+            # Post-commit: award gamification points to the reviewer and fold the
+            # rating into the seller's aggregate for badge evaluation.
+            try:
+                from app.signals import review_created
+
+                review_created.send(
+                    "socials",
+                    review=_SignalReview(review_id, user_id, review_rating, product_id),
+                )
+            except Exception as e:
+                logger.warning(f"gamification review_created emit failed: {e}")
+
+            return review
+        except APIError:
+            # Deliberate, already-meaningful failures: "you haven't received
+            # this order yet" (403), "no such product" (404), "you've already
+            # reviewed this" (400). The blanket handler below used to swallow
+            # all of them and answer 500, so a buyer who simply hadn't taken
+            # delivery was told the server was broken.
+            raise
+        except SQLAlchemyError as e:
+            # Must precede `except Exception`, which would otherwise catch this
+            # first and make the branch unreachable -- as it was.
+            logger.error(f"Database error adding review: {str(e)}")
+            raise ConflictError("Failed to add review")
         except Exception as e:
             logger.error(f"Error adding review: {str(e)}")
             raise APIError("Failed to add review", 500)
-        except SQLAlchemyError as e:
-            logger.error(f"Error adding review: {str(e)}")
-            raise ConflictError("Failed to add review")
         except (RedisError, RedisConnectionError) as e:
             logger.warning(f"Redis error while adding review: {str(e)}", exc_info=True)
+
+    @staticmethod
+    def update_review(user_id, review_id, data):
+        """Edit your own review.
+
+        There was no way to change a review after posting it -- a mistyped
+        rating was permanent, and a seller who fixed a problem could never have
+        that reflected. Only the author may edit, and only the fields a person
+        would actually want to change; is_verified and order_id stay where the
+        server put them.
+        """
+        with session_scope() as session:
+            review = session.query(ProductReview).get(review_id)
+            if not review:
+                raise NotFoundError("Review not found")
+            if review.user_id != user_id:
+                raise ForbiddenError("You can only edit your own review")
+
+            for field in ("rating", "title", "content"):
+                if field in data:
+                    setattr(review, field, data[field])
+            session.flush()
+
+            product_id = review.product_id
+            refresh_for_product(session, product_id)
+            return session.query(ProductReview).get(review_id)
+
+    @staticmethod
+    def delete_review(user_id, review_id):
+        """Delete your own review, and correct the aggregates it fed."""
+        with session_scope() as session:
+            review = session.query(ProductReview).get(review_id)
+            if not review:
+                raise NotFoundError("Review not found")
+            if review.user_id != user_id:
+                raise ForbiddenError("You can only delete your own review")
+
+            product_id = review.product_id
+            # Upvotes reference the review, so they have to go first.
+            session.query(ReviewUpvote).filter_by(review_id=review_id).delete(
+                synchronize_session=False
+            )
+            session.delete(review)
+            session.flush()
+
+            # Without this the seller keeps the stars from a review that no
+            # longer exists.
+            refresh_for_product(session, product_id)
+            return {"deleted": True, "review_id": review_id}
 
     @staticmethod
     def upvote_review(user_id, review_id):
@@ -1915,13 +2189,38 @@ class ProductSocialService:
                 if review.user_id == user_id:
                     raise APIError("Cannot upvote your own review", 400)
 
-                review.upvotes += 1
-
-                # Update Redis
-                redis_client.zincrby(
-                    f"product:{review.product_id}:helpful_reviews", 1, review_id
+                # One vote per person. This used to be a bare `+= 1` with
+                # nothing recording who had voted, so tapping the button ten
+                # times counted ten times. The Redis set below was written but
+                # never read -- and a cache can't enforce uniqueness anyway.
+                already = (
+                    session.query(ReviewUpvote)
+                    .filter_by(user_id=user_id, review_id=review.id)
+                    .first()
                 )
-                redis_client.zincrby(f"user:{user_id}:upvoted_reviews", 1, review_id)
+                if already:
+                    raise APIError("You've already found this review helpful", 409)
+
+                session.add(ReviewUpvote(user_id=user_id, review_id=review.id))
+                session.flush()
+
+                # Derive the count from the rows rather than trusting a counter
+                # that earlier double-votes may already have inflated.
+                review.upvotes = (
+                    session.query(func.count(ReviewUpvote.user_id))
+                    .filter(ReviewUpvote.review_id == review.id)
+                    .scalar()
+                )
+
+                # Cache for the "most helpful" ordering. Best-effort: the row
+                # above is the record, this is just a leaderboard.
+                try:
+                    redis_client.zadd(
+                        f"product:{review.product_id}:helpful_reviews",
+                        {str(review_id): review.upvotes},
+                    )
+                except Exception as exc:
+                    logger.warning("Could not cache helpful-review score: %s", exc)
 
                 # Notify review author if different from upvoter
                 if review.user_id != user_id:
@@ -1956,7 +2255,12 @@ class ProductSocialService:
                 except Exception as e:
                     logger.warning(f"Failed to queue review_upvoted event: {e}")
 
-                return review
+                # Return what the route's ReviewUpvoteSchema actually declares.
+                # This used to return the ProductReview model, which has neither
+                # `success` nor `new_count`, so the endpoint serialised to `{}`
+                # -- a 200 that told the caller nothing, and left any client
+                # showing an optimistic count with no way to reconcile it.
+                return {"success": True, "new_count": review.upvotes}
         except SQLAlchemyError as e:
             logger.error(f"Error upvoting review: {str(e)}")
             raise ConflictError("Failed to upvote review")
@@ -2189,7 +2493,8 @@ class FeedService:
     @staticmethod
     def _hydrate_cached_items(cached_items, user_id=None):
         """Enhanced hydration with better error handling and performance.
-        user_id: current user for liked_by_me (posts) and is_followed/follower_count (sellers)."""
+        user_id: current user for liked_by_me (posts) and is_followed/follower_count (sellers).
+        """
         if not cached_items:
             return []
 
@@ -2220,16 +2525,18 @@ class FeedService:
             # Batch load posts and products
             posts = []
             products = []
+            likes_counts = {}
+            comments_counts = {}
+            review_counts = {}
+            avg_ratings = {}
 
             if post_ids:
-                with session_scope() as session:
+                with read_scope() as session:
                     posts = (
                         session.query(Post)
                         .options(
                             joinedload(Post.user),
                             joinedload(Post.social_media),
-                            joinedload(Post.likes),
-                            joinedload(Post.comments),
                             joinedload(Post.niche_posts).joinedload(NichePost.niche),
                         )
                         .filter(
@@ -2238,15 +2545,19 @@ class FeedService:
                         )
                         .all()
                     )
+                    # Counts via GROUP BY instead of loading every like/comment row.
+                    (
+                        likes_counts,
+                        comments_counts,
+                    ) = FeedService._batch_post_engagement_counts(session, post_ids)
 
             if product_ids:
-                with session_scope() as session:
+                with read_scope() as session:
                     products = (
                         session.query(Product)
                         .options(
                             joinedload(Product.seller).joinedload(Seller.user),
                             joinedload(Product.images),
-                            joinedload(Product.reviews),
                         )
                         .filter(
                             Product.id.in_(product_ids),
@@ -2254,6 +2565,11 @@ class FeedService:
                         )
                         .all()
                     )
+                    # Counts/avg via GROUP BY instead of loading every review row.
+                    (
+                        review_counts,
+                        avg_ratings,
+                    ) = FeedService._batch_product_review_stats(session, product_ids)
 
             # Create lookup dictionaries
             posts_dict = {post.id: post for post in posts}
@@ -2262,7 +2578,7 @@ class FeedService:
             # Batch: which posts has current user liked? (for liked_by_me)
             liked_post_ids = set()
             if user_id and post_ids:
-                with session_scope() as session:
+                with read_scope() as session:
                     rows = (
                         session.query(PostLike.post_id)
                         .filter(
@@ -2284,7 +2600,7 @@ class FeedService:
             follower_counts = {}  # followee_id -> count
             followed_by_me = set()  # followee_ids current user follows
             if seller_user_ids:
-                with session_scope() as session:
+                with read_scope() as session:
                     counts = (
                         session.query(
                             Follow.followee_id, func.count(Follow.follower_id)
@@ -2329,110 +2645,338 @@ class FeedService:
                 if isinstance(item_id, bytes):
                     item_id = item_id.decode("utf-8")
 
-                if item_id.startswith("PST_"):
-                    post = posts_dict.get(item_id)
-                    if post:
-                        hydrated_items.append(
-                            {
-                                "id": post.id,
-                                "type": "post",
-                                "caption": post.caption,
-                                "user": {
-                                    "id": post.user.id,
-                                    "username": post.user.username,
-                                    "profile_picture": post.user.profile_picture,
-                                },
-                                "media": [
-                                    {
-                                        "url": m.media.get_url(),
-                                        "type": m.media.media_type.value,
-                                        "platform": m.platform,
-                                        "post_type": m.post_type,
-                                        "aspect_ratio": m.aspect_ratio,
-                                        "optimized_for_platform": m.optimized_for_platform,
-                                    }
-                                    for m in post.social_media
-                                ],
-                                "likes_count": len(post.likes),
-                                "comments_count": len(post.comments),
-                                "liked_by_me": post.id in liked_post_ids,
-                                "created_at": post.created_at.isoformat(),
-                                "score": score,
-                                "niche": {
-                                    "id": post.niche_posts[0].niche.id,
-                                    "name": post.niche_posts[0].niche.name,
-                                    "slug": post.niche_posts[0].niche.slug,
-                                    "visibility": post.niche_posts[
-                                        0
-                                    ].niche.visibility.value,
-                                    "is_pinned": post.niche_posts[0].is_pinned,
-                                    "is_featured": post.niche_posts[0].is_featured,
-                                    "niche_likes": post.niche_posts[0].niche_likes,
-                                    "niche_comments": post.niche_posts[
-                                        0
-                                    ].niche_comments,
+                try:
+                    if item_id.startswith("PST_"):
+                        post = posts_dict.get(item_id)
+                        if post:
+                            hydrated_items.append(
+                                {
+                                    "id": post.id,
+                                    "type": "post",
+                                    "caption": post.caption,
+                                    "user": {
+                                        "id": post.user.id,
+                                        "username": post.user.username,
+                                        "profile_picture": post.user.profile_picture,
+                                    },
+                                    "media": [
+                                        {
+                                            "url": m.media.get_url(),
+                                            "type": m.media.media_type.value,
+                                            "platform": m.platform,
+                                            "post_type": m.post_type,
+                                            "aspect_ratio": m.aspect_ratio,
+                                            "optimized_for_platform": m.optimized_for_platform,
+                                        }
+                                        for m in post.social_media
+                                    ],
+                                    "likes_count": likes_counts.get(post.id, 0),
+                                    "comments_count": comments_counts.get(post.id, 0),
+                                    "liked_by_me": post.id in liked_post_ids,
+                                    "created_at": post.created_at.isoformat(),
+                                    "score": score,
+                                    "niche": (
+                                        {
+                                            "id": post.niche_posts[0].niche.id,
+                                            "name": post.niche_posts[0].niche.name,
+                                            "slug": post.niche_posts[0].niche.slug,
+                                            "visibility": post.niche_posts[
+                                                0
+                                            ].niche.visibility.value,
+                                            "is_pinned": post.niche_posts[0].is_pinned,
+                                            "is_featured": post.niche_posts[
+                                                0
+                                            ].is_featured,
+                                            "niche_likes": post.niche_posts[
+                                                0
+                                            ].niche_likes,
+                                            "niche_comments": post.niche_posts[
+                                                0
+                                            ].niche_comments,
+                                        }
+                                        if post.niche_posts
+                                        else None
+                                    ),
                                 }
-                                if post.niche_posts
-                                else None,
-                            }
-                        )
+                            )
 
-                elif item_id.startswith("PRD_"):
-                    product = products_dict.get(item_id)
-                    if product:
-                        seller_user_id = (
-                            product.seller.user.id
-                            if (
-                                product.seller and getattr(product.seller, "user", None)
-                            )
-                            else None
-                        )
-                        seller_payload = {
-                            "id": product.seller.id,
-                            "shop_name": product.seller.shop_name,
-                            "user": {
-                                "id": product.seller.user.id,
-                                "username": product.seller.user.username,
-                                "profile_picture": product.seller.user.profile_picture,
-                            },
-                        }
-                        if seller_user_id is not None:
-                            seller_payload["follower_count"] = follower_counts.get(
-                                seller_user_id, 0
-                            )
-                            seller_payload["is_followed"] = (
-                                seller_user_id in followed_by_me if user_id else False
-                            )
-                        hydrated_items.append(
-                            {
-                                "id": product.id,
-                                "type": "product",
-                                "name": product.name,
-                                "description": product.description,
-                                "price": float(product.price),
-                                "seller": seller_payload,
-                                "images": [
-                                    {
-                                        "url": m.media.get_url(),
-                                        "type": m.media.media_type.value,
-                                        "sort_order": m.sort_order,
-                                        "is_featured": m.is_featured,
-                                        "alt_text": m.alt_text,
-                                    }
-                                    for m in product.images
-                                ],
-                                "rating": product.average_rating,
-                                "reviews_count": len(product.reviews),
-                                "created_at": product.created_at.isoformat(),
-                                "score": score,
+                    elif item_id.startswith("PRD_"):
+                        product = products_dict.get(item_id)
+                        # A product without a linked seller/user can't be
+                        # rendered — skip it rather than raising.
+                        if (
+                            product
+                            and product.seller
+                            and getattr(product.seller, "user", None)
+                        ):
+                            seller_user_id = product.seller.user.id
+                            seller_payload = {
+                                "id": product.seller.id,
+                                "shop_name": product.seller.shop_name,
+                                "user": {
+                                    "id": product.seller.user.id,
+                                    "username": product.seller.user.username,
+                                    "profile_picture": product.seller.user.profile_picture,
+                                },
+                                "follower_count": follower_counts.get(
+                                    seller_user_id, 0
+                                ),
+                                "is_followed": (
+                                    seller_user_id in followed_by_me
+                                    if user_id
+                                    else False
+                                ),
                             }
-                        )
+                            hydrated_items.append(
+                                {
+                                    "id": product.id,
+                                    "type": "product",
+                                    "name": product.name,
+                                    "description": product.description,
+                                    "price": float(product.price),
+                                    "seller": seller_payload,
+                                    "images": [
+                                        {
+                                            "url": m.media.get_url(),
+                                            "type": m.media.media_type.value,
+                                            "sort_order": m.sort_order,
+                                            "is_featured": m.is_featured,
+                                            "alt_text": m.alt_text,
+                                        }
+                                        for m in product.images
+                                    ],
+                                    "rating": avg_ratings.get(product.id, 0.0),
+                                    "reviews_count": review_counts.get(product.id, 0),
+                                    "created_at": product.created_at.isoformat(),
+                                    "score": score,
+                                }
+                            )
+                except Exception as item_err:
+                    # One bad record must not blank the whole feed — skip it.
+                    logger.warning(f"Skipping feed item {item_id}: {str(item_err)}")
+                    continue
 
-            return hydrated_items
+            return FeedService._drop_blocked_authors(hydrated_items, user_id)
 
         except Exception as e:
             logger.error(f"Error hydrating cached items: {str(e)}")
             return []
+
+    @staticmethod
+    def _drop_blocked_authors(items, user_id=None):
+        """Remove content authored by anyone in a block relationship with the
+        viewer (App Store 1.2: blocking has to actually block something).
+
+        Applied at hydration rather than in the feed query because the ranked
+        feed is served from cache: filtering here means a block takes effect on
+        the very next request instead of whenever the cache next regenerates.
+
+        Deliberately fail-open -- if the block lookup errors, the user sees an
+        unfiltered feed rather than an empty one.
+        """
+        if not user_id or not items:
+            return items
+
+        try:
+            from app.moderation.services import ModerationService
+
+            blocked = ModerationService.blocked_user_ids(user_id)
+        except Exception as exc:
+            logger.warning("Block filter unavailable, serving unfiltered feed: %s", exc)
+            return items
+
+        if not blocked:
+            return items
+
+        def author_of(item):
+            if item.get("type") == "post":
+                return (item.get("user") or {}).get("id")
+            return ((item.get("seller") or {}).get("user") or {}).get("id")
+
+        return [item for item in items if author_of(item) not in blocked]
+
+    # ------------------------------------------------------------------
+    # Batch-loading helpers. Feed generation scores dozens/hundreds of
+    # posts and products per request; these exist so that work is done
+    # with one GROUP BY / IN (...) query per feed source instead of a
+    # query per item (the N+1 pattern that used to make the feed slow).
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _batch_is_followed(session, user_id, candidate_user_ids):
+        """Return the subset of candidate_user_ids that user_id follows."""
+        candidate_user_ids = {uid for uid in candidate_user_ids if uid}
+        if not user_id or not candidate_user_ids:
+            return set()
+        rows = (
+            session.query(Follow.followee_id)
+            .filter(
+                Follow.follower_id == user_id,
+                Follow.followee_id.in_(candidate_user_ids),
+            )
+            .all()
+        )
+        return {r[0] for r in rows}
+
+    @staticmethod
+    def _batch_post_engagement_counts(session, post_ids):
+        """Return (likes_count, comments_count) dicts keyed by post_id."""
+        if not post_ids:
+            return {}, {}
+        likes = (
+            session.query(PostLike.post_id, func.count(PostLike.user_id))
+            .filter(PostLike.post_id.in_(post_ids))
+            .group_by(PostLike.post_id)
+            .all()
+        )
+        comments = (
+            session.query(PostComment.post_id, func.count(PostComment.id))
+            .filter(PostComment.post_id.in_(post_ids))
+            .group_by(PostComment.post_id)
+            .all()
+        )
+        return {pid: c for pid, c in likes}, {pid: c for pid, c in comments}
+
+    @staticmethod
+    def _batch_post_category_ids(session, post_ids):
+        """Return {post_id: {category_id, ...}} for the given posts."""
+        if not post_ids:
+            return {}
+        rows = (
+            session.query(PostCategory.post_id, PostCategory.category_id)
+            .filter(PostCategory.post_id.in_(post_ids))
+            .all()
+        )
+        result = {}
+        for pid, category_id in rows:
+            result.setdefault(pid, set()).add(category_id)
+        return result
+
+    @staticmethod
+    def _batch_product_category_ids(session, product_ids):
+        """Return {product_id: {category_id, ...}} for the given products."""
+        if not product_ids:
+            return {}
+        rows = (
+            session.query(ProductCategory.product_id, ProductCategory.category_id)
+            .filter(ProductCategory.product_id.in_(product_ids))
+            .all()
+        )
+        result = {}
+        for pid, category_id in rows:
+            result.setdefault(pid, set()).add(category_id)
+        return result
+
+    @staticmethod
+    def _batch_product_review_stats(session, product_ids):
+        """Return (review_count, avg_rating) dicts keyed by product_id."""
+        if not product_ids:
+            return {}, {}
+        rows = (
+            session.query(
+                ProductReview.product_id,
+                func.count(ProductReview.id),
+                func.avg(ProductReview.rating),
+            )
+            .filter(ProductReview.product_id.in_(product_ids))
+            .group_by(ProductReview.product_id)
+            .all()
+        )
+        review_counts = {pid: c for pid, c, _ in rows}
+        avg_ratings = {
+            pid: (round(float(a), 2) if a is not None else 0.0) for pid, _, a in rows
+        }
+        return review_counts, avg_ratings
+
+    @staticmethod
+    def _batch_product_view_counts(session, product_ids):
+        """Return {product_id: view_count} for the given products."""
+        if not product_ids:
+            return {}
+        rows = (
+            session.query(ProductView.product_id, func.count(ProductView.id))
+            .filter(ProductView.product_id.in_(product_ids))
+            .group_by(ProductView.product_id)
+            .all()
+        )
+        return {pid: c for pid, c in rows}
+
+    @staticmethod
+    def _batch_post_scoring_context(session, posts, user_id):
+        """Precompute everything `_calculate_post_score` needs for a batch of posts."""
+        if not posts:
+            return {}
+
+        post_ids = [p.id for p in posts]
+        likes_counts, comments_counts = FeedService._batch_post_engagement_counts(
+            session, post_ids
+        )
+        category_map = FeedService._batch_post_category_ids(session, post_ids)
+        user_interests = FeedService._get_user_interests(user_id) if user_id else {}
+
+        author_ids = {p.user_id for p in posts}
+        followed_ids = FeedService._batch_is_followed(session, user_id, author_ids)
+
+        context = {}
+        for post in posts:
+            category_ids = category_map.get(post.id, set())
+            context[post.id] = {
+                "is_followed": post.user_id in followed_ids,
+                "likes_count": likes_counts.get(post.id, 0),
+                "comments_count": comments_counts.get(post.id, 0),
+                "matches_interests": bool(category_ids)
+                and any(cid in user_interests for cid in category_ids),
+            }
+        return context
+
+    @staticmethod
+    def _batch_product_scoring_context(session, products, user_id):
+        """Precompute everything `_calculate_product_score` needs for a batch of products."""
+        if not products:
+            return {}
+
+        product_ids = [p.id for p in products]
+
+        seller_rows = (
+            session.query(Product.id, Seller.verification_status)
+            .join(Seller, Seller.id == Product.seller_id)
+            .filter(Product.id.in_(product_ids))
+            .all()
+        )
+        seller_verification = {pid: v for pid, v in seller_rows}
+
+        review_counts, avg_ratings = FeedService._batch_product_review_stats(
+            session, product_ids
+        )
+        view_counts = FeedService._batch_product_view_counts(session, product_ids)
+        category_map = FeedService._batch_product_category_ids(session, product_ids)
+
+        user_preferences = FeedService._get_user_preferences(user_id) if user_id else {}
+        price_range = user_preferences.get("price_range")
+        category_preferences = user_preferences.get("category_preferences", {})
+
+        context = {}
+        for product in products:
+            category_ids = category_map.get(product.id, set())
+
+            price_ok = not (
+                price_range
+                and not (price_range["min"] <= product.price <= price_range["max"])
+            )
+            matches_preferences = (
+                price_ok
+                and bool(category_ids)
+                and any(cid in category_preferences for cid in category_ids)
+            )
+
+            context[product.id] = {
+                "review_count": review_counts.get(product.id, 0),
+                "avg_rating": avg_ratings.get(product.id, 0.0),
+                "view_count": view_counts.get(product.id, 0),
+                "verification_status": seller_verification.get(product.id),
+                "matches_preferences": matches_preferences,
+            }
+        return context
 
     @staticmethod
     def _generate_fresh_feed(user_id, feed_type="personalized", **kwargs):
@@ -2506,6 +3050,36 @@ class FeedService:
                 niche_items = FeedService._get_niche_content(niche_id, user_id)
                 feed_items.extend(niche_items)
 
+            elif feed_type == "joined_niches":
+                # One batched query across all active memberships. This is the
+                # source for the X-style Communities home feed; unlike calling
+                # the single-niche endpoint repeatedly, it paginates the
+                # combined result and keeps ordering consistent across niches.
+                feed_items.extend(FeedService._get_joined_niches_content(user_id))
+
+            # Personalized combines several sources that can return the same
+            # item — keep the first occurrence (followed > engaged > trending
+            # > discover) so pages never repeat an id.
+            seen_ids = set()
+            deduped_items = []
+            for item in feed_items:
+                item_id = item.get("id") if isinstance(item, dict) else None
+                if item_id and item_id in seen_ids:
+                    continue
+                if item_id:
+                    seen_ids.add(item_id)
+                deduped_items.append(item)
+            feed_items = deduped_items
+
+            if feed_type == "joined_niches":
+                # Communities use a chronological timeline, not the ranked
+                # and type-diversified marketplace feed.
+                return sorted(
+                    feed_items,
+                    key=lambda item: item.get("created_at") or datetime.min,
+                    reverse=True,
+                )[:100]
+
             # Apply personalization scoring
             scored_items = FeedService._apply_personalization_scoring(
                 feed_items, user_id
@@ -2514,11 +3088,28 @@ class FeedService:
             # Apply diversity and freshness
             final_items = FeedService._apply_diversity_and_freshness(scored_items)
 
-            return final_items
+            # Young-marketplace safeguard: personalized sources are sparse or
+            # empty for new users (no follows, likes, or views yet). Backfill
+            # with recent platform content so the main feed always has items
+            # to show and paginate.
+            if feed_type == "personalized" and len(final_items) < 40:
+                existing_ids = {i["id"] for i in final_items}
+                backfill = [
+                    item
+                    for item in FeedService._get_recent_content_fallback()
+                    if item["id"] not in existing_ids
+                ]
+                final_items.extend(FeedService._apply_diversity_and_freshness(backfill))
+
+            return final_items[:100]
 
         except Exception as e:
             logger.error(f"Error generating fresh feed: {str(e)}")
-            return FeedService._get_fallback_feed(page=1, per_page=20, user_id=user_id)
+            # Return a list of item-refs. _get_fallback_feed returns an already
+            # paginated dict, which the caller would then try to hydrate/paginate
+            # again — iterating its keys and yielding an empty feed. The recent
+            # content list hydrates correctly and keeps the feed non-empty.
+            return FeedService._get_recent_content_fallback()
 
     @staticmethod
     def _get_user_interests(user_id):
@@ -2671,7 +3262,10 @@ class FeedService:
             # Analyze patterns
             preferences = {
                 "content_ratio": 0.5,  # Default 50% posts, 50% products
-                "price_range": {"min": 0, "max": 1000},
+                # None = no price constraint until we learn one from view history.
+                # A hardcoded default (e.g. 0-1000) filters out virtually all
+                # naira-priced products and empties the discover source.
+                "price_range": None,
                 "category_preferences": {},
                 "engagement_preference": "high",  # high/medium/low
                 "freshness_preference": "recent",  # recent/trending/classic
@@ -2781,11 +3375,20 @@ class FeedService:
                 .all()
             )
 
-            # Score and format items
+            # Score and format items (batched: one query per signal, not per item)
+            post_context = FeedService._batch_post_scoring_context(
+                session, posts, user_id
+            )
+            product_context = FeedService._batch_product_scoring_context(
+                session, products, user_id
+            )
+
             feed_items = []
 
             for post in posts:
-                score = FeedService._calculate_post_score(post, user_id)
+                score = FeedService._calculate_post_score(
+                    post, user_id, post_context.get(post.id)
+                )
                 feed_items.append(
                     {
                         "id": post.id,
@@ -2796,7 +3399,9 @@ class FeedService:
                 )
 
             for product in products:
-                score = FeedService._calculate_product_score(product, user_id)
+                score = FeedService._calculate_product_score(
+                    product, user_id, product_context.get(product.id)
+                )
                 feed_items.append(
                     {
                         "id": product.id,
@@ -2820,68 +3425,58 @@ class FeedService:
                 "popular_posts", 0, 99, withscores=True
             )
             trending_products = redis_client.zrevrange(
-                "popular_products", 0, 99, withscores=True
+                "trending_products", 0, 99, withscores=True
             )
         except RedisError:
             return []
 
-        # Filter by interests
+        def _decode(item_id):
+            return item_id.decode("utf-8") if isinstance(item_id, bytes) else item_id
+
+        post_scores = {_decode(pid): score for pid, score in trending_posts}
+        product_scores = {_decode(pid): score for pid, score in trending_products}
+
         filtered_items = []
 
-        # Process trending posts
-        for post_id, score in trending_posts:
-            if isinstance(post_id, bytes):
-                post_id = post_id.decode("utf-8")
-
-            # Check if post category matches user interests
-            with session_scope() as session:
-                post = (
-                    session.query(Post)
-                    .options(
-                        joinedload(Post.categories).joinedload(PostCategory.category)
-                    )
-                    .filter(Post.id == post_id)
-                    .first()
+        # Batch-fetch posts/products and their categories in one round trip
+        # each, instead of one session_scope()+query per trending item.
+        with session_scope() as session:
+            if post_scores:
+                posts = (
+                    session.query(Post).filter(Post.id.in_(post_scores.keys())).all()
                 )
-                if post and post.categories:
-                    # Check if any of the post's categories match user interests
-                    post_category_ids = [pc.category_id for pc in post.categories]
-                    if any(cat_id in interests for cat_id in post_category_ids):
+                post_categories = FeedService._batch_post_category_ids(
+                    session, [p.id for p in posts]
+                )
+                for post in posts:
+                    category_ids = post_categories.get(post.id, set())
+                    if category_ids and any(cid in interests for cid in category_ids):
                         filtered_items.append(
                             {
-                                "id": post_id,
+                                "id": post.id,
                                 "type": "post",
-                                "score": score,
+                                "score": post_scores[post.id],
                                 "created_at": post.created_at,
                             }
                         )
 
-        # Process trending products
-        for product_id, score in trending_products:
-            if isinstance(product_id, bytes):
-                product_id = product_id.decode("utf-8")
-
-            # Check if product category matches user interests
-            with session_scope() as session:
-                product = (
+            if product_scores:
+                products = (
                     session.query(Product)
-                    .options(
-                        joinedload(Product.categories).joinedload(
-                            ProductCategory.category
-                        )
-                    )
-                    .filter(Product.id == product_id)
-                    .first()
+                    .filter(Product.id.in_(product_scores.keys()))
+                    .all()
                 )
-                if product and product.categories:
-                    # Check if any of the product's categories match user interests
-                    product_category_ids = [pc.category_id for pc in product.categories]
-                    if any(cat_id in interests for cat_id in product_category_ids):
+                product_categories = FeedService._batch_product_category_ids(
+                    session, [p.id for p in products]
+                )
+                for product in products:
+                    category_ids = product_categories.get(product.id, set())
+                    if category_ids and any(cid in interests for cid in category_ids):
                         filtered_items.append(
                             {
-                                "id": product_id,
+                                "id": product.id,
                                 "type": "product",
-                                "score": score,
+                                "score": product_scores[product.id],
                                 "created_at": product.created_at,
                             }
                         )
@@ -2919,9 +3514,14 @@ class FeedService:
                 )
                 posts = FeedService._filter_posts_by_niche_visibility(posts, user_id)
 
+            post_context = FeedService._batch_post_scoring_context(
+                session, posts, user_id
+            )
             for post in posts:
                 score = (
-                    FeedService._calculate_post_score(post, user_id)
+                    FeedService._calculate_post_score(
+                        post, user_id, post_context.get(post.id)
+                    )
                     if hasattr(FeedService, "_calculate_post_score")
                     else 1
                 )
@@ -2930,27 +3530,35 @@ class FeedService:
                         "id": post.id,
                         "type": "post",
                         "score": score,
-                        "created_at": post.created_at
-                        if hasattr(post, "created_at")
-                        else datetime.utcnow(),
+                        "created_at": (
+                            post.created_at
+                            if hasattr(post, "created_at")
+                            else datetime.utcnow()
+                        ),
                     }
                 )
 
-            # Get products in user's price range
-            price_range = preferences.get("price_range", {"min": 0, "max": 1000})
-            products = (
-                session.query(Product)
-                .filter(
-                    Product.price.between(price_range["min"], price_range["max"]),
-                    Product.status == Product.Status.ACTIVE,
+            # Get products in user's price range. Only constrain by price when a
+            # range was actually learned from the user's view history.
+            price_range = preferences.get("price_range")
+            products_query = session.query(Product).filter(
+                Product.status == Product.Status.ACTIVE
+            )
+            if price_range:
+                products_query = products_query.filter(
+                    Product.price.between(price_range["min"], price_range["max"])
                 )
-                .order_by(Product.created_at.desc())
-                .limit(20)
-                .all()
+            products = (
+                products_query.order_by(Product.created_at.desc()).limit(20).all()
+            )
+            product_context = FeedService._batch_product_scoring_context(
+                session, products, user_id
             )
             for product in products:
                 score = (
-                    FeedService._calculate_product_score(product, user_id)
+                    FeedService._calculate_product_score(
+                        product, user_id, product_context.get(product.id)
+                    )
                     if hasattr(FeedService, "_calculate_product_score")
                     else 1
                 )
@@ -2959,9 +3567,11 @@ class FeedService:
                         "id": product.id,
                         "type": "product",
                         "score": score,
-                        "created_at": product.created_at
-                        if hasattr(product, "created_at")
-                        else datetime.utcnow(),
+                        "created_at": (
+                            product.created_at
+                            if hasattr(product, "created_at")
+                            else datetime.utcnow()
+                        ),
                     }
                 )
 
@@ -2969,43 +3579,72 @@ class FeedService:
 
     @staticmethod
     def _apply_personalization_scoring(items, user_id):
-        """Apply personalized scoring to feed items. Handles missing 'created_at' gracefully."""
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            if item.get("type") == "post":
-                with session_scope() as session:
-                    post = session.query(Post).filter(Post.id == item["id"]).first()
-                    if post:
-                        is_followed = FeedService._is_from_followed_user(post, user_id)
-                        if is_followed:
+        """Apply personalized scoring to feed items. Handles missing 'created_at' gracefully.
+
+        Batches one Post/Product fetch (plus their scoring context) for the
+        whole item list instead of a query per item — this used to be the
+        single biggest source of feed-generation latency.
+        """
+        post_ids = [
+            item["id"]
+            for item in items
+            if isinstance(item, dict) and item.get("type") == "post"
+        ]
+        product_ids = [
+            item["id"]
+            for item in items
+            if isinstance(item, dict) and item.get("type") == "product"
+        ]
+
+        if not post_ids and not product_ids:
+            return items
+
+        with session_scope() as session:
+            posts = (
+                session.query(Post).filter(Post.id.in_(post_ids)).all()
+                if post_ids
+                else []
+            )
+            products = (
+                session.query(Product).filter(Product.id.in_(product_ids)).all()
+                if product_ids
+                else []
+            )
+            posts_by_id = {p.id: p for p in posts}
+            products_by_id = {p.id: p for p in products}
+
+            post_context = FeedService._batch_post_scoring_context(
+                session, posts, user_id
+            )
+            product_context = FeedService._batch_product_scoring_context(
+                session, products, user_id
+            )
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "post":
+                    post = posts_by_id.get(item["id"])
+                    ctx = post_context.get(item["id"])
+                    if post and ctx:
+                        if ctx["is_followed"]:
                             item["score"] *= 1.5
-                        matches_interests = FeedService._matches_user_interests(
-                            post, user_id
-                        )
-                        if matches_interests:
+                        if ctx["matches_interests"]:
                             item["score"] *= 1.3
                         created_at = item.get("created_at") or getattr(
                             post, "created_at", datetime.utcnow()
                         )
-                        time_decay = FeedService._calculate_time_decay(created_at)
-                        item["score"] *= time_decay
-            elif item.get("type") == "product":
-                with session_scope() as session:
-                    product = (
-                        session.query(Product).filter(Product.id == item["id"]).first()
-                    )
-                    if product:
-                        matches_preferences = FeedService._matches_user_preferences(
-                            product, user_id
-                        )
-                        if matches_preferences:
+                        item["score"] *= FeedService._calculate_time_decay(created_at)
+                elif item.get("type") == "product":
+                    product = products_by_id.get(item["id"])
+                    ctx = product_context.get(item["id"])
+                    if product and ctx:
+                        if ctx["matches_preferences"]:
                             item["score"] *= 1.4
                         created_at = item.get("created_at") or getattr(
                             product, "created_at", datetime.utcnow()
                         )
-                        time_decay = FeedService._calculate_time_decay(created_at)
-                        item["score"] *= time_decay
+                        item["score"] *= FeedService._calculate_time_decay(created_at)
         return items
 
     @staticmethod
@@ -3056,14 +3695,15 @@ class FeedService:
     @staticmethod
     def _get_fallback_feed(page=1, per_page=20, user_id=None):
         """Get fallback trending feed when personalized feed fails.
-        user_id: optional; when set, hydration includes liked_by_me and seller is_followed."""
+        user_id: optional; when set, hydration includes liked_by_me and seller is_followed.
+        """
         try:
             # Get trending content from Redis
             trending_posts = redis_client.zrevrange(
                 "popular_posts", 0, 49, withscores=True
             )
             trending_products = redis_client.zrevrange(
-                "popular_products", 0, 49, withscores=True
+                "trending_products", 0, 49, withscores=True
             )
 
             feed_items = []
@@ -3120,7 +3760,7 @@ class FeedService:
                     )
                     .filter(Post.status == PostStatus.ACTIVE)
                     .order_by(Post.created_at.desc())
-                    .limit(20)
+                    .limit(50)
                     .all()
                 )
 
@@ -3134,7 +3774,7 @@ class FeedService:
                     session.query(Product)
                     .filter(Product.status == Product.Status.ACTIVE)
                     .order_by(Product.created_at.desc())
-                    .limit(20)
+                    .limit(50)
                     .all()
                 )
 
@@ -3190,9 +3830,11 @@ class FeedService:
                     "id": item.get("id"),
                     "type": item.get("type"),
                     "score": item.get("score", 0),
-                    "created_at": item.get("created_at").isoformat()
-                    if item.get("created_at")
-                    else None,
+                    "created_at": (
+                        item.get("created_at").isoformat()
+                        if item.get("created_at")
+                        else None
+                    ),
                 }
                 serializable_items.append(serializable_item)
 
@@ -3258,51 +3900,6 @@ class FeedService:
         }
 
     @staticmethod
-    def _is_from_followed_user(post, user_id):
-        """Check if post is from a followed user"""
-        with session_scope() as session:
-            follow = (
-                session.query(Follow)
-                .filter(
-                    Follow.follower_id == user_id,
-                    Follow.followee_id == post.user_id,
-                    # Follow.is_active == True,
-                )
-                .first()
-            )
-            return follow is not None
-
-    @staticmethod
-    def _matches_user_interests(post, user_id):
-        """Check if post matches user interests"""
-        user_interests = FeedService._get_user_interests(user_id)
-        if not post.categories:
-            return False
-
-        # Check if any of the post's categories match user interests
-        post_category_ids = [pc.category_id for pc in post.categories]
-        return any(cat_id in user_interests for cat_id in post_category_ids)
-
-    @staticmethod
-    def _matches_user_preferences(product, user_id):
-        """Check if product matches user preferences"""
-        user_preferences = FeedService._get_user_preferences(user_id)
-
-        # Check price range
-        price_range = user_preferences.get("price_range", {"min": 0, "max": 1000})
-        if not (price_range["min"] <= product.price <= price_range["max"]):
-            return False
-
-        # Check category preferences
-        category_preferences = user_preferences.get("category_preferences", {})
-        if product.categories:
-            product_category_ids = [pc.category_id for pc in product.categories]
-            if any(cat_id in category_preferences for cat_id in product_category_ids):
-                return True
-
-        return False
-
-    @staticmethod
     def _invalidate_user_feed_cache(user_id):
         """Invalidate user's feed cache when content changes"""
         try:
@@ -3342,7 +3939,7 @@ class FeedService:
                 "popular_posts", 0, 99, withscores=True
             )
             trending_products = redis_client.zrevrange(
-                "popular_products", 0, 99, withscores=True
+                "trending_products", 0, 99, withscores=True
             )
 
             feed_items = []
@@ -3396,6 +3993,7 @@ class FeedService:
             # Get niche posts
             niche_posts = (
                 session.query(NichePost)
+                .options(joinedload(NichePost.post))
                 .filter(
                     NichePost.niche_id == niche_id,
                     NichePost.is_approved == True,
@@ -3405,72 +4003,147 @@ class FeedService:
                 .all()
             )
 
+            posts = [niche_post.post for niche_post in niche_posts]
+            post_context = FeedService._batch_post_scoring_context(
+                session, posts, user_id
+            )
+
             feed_items = []
             for niche_post in niche_posts:
-                score = FeedService._calculate_post_score(niche_post.post, user_id)
+                post = niche_post.post
+                score = FeedService._calculate_post_score(
+                    post, user_id, post_context.get(post.id)
+                )
                 feed_items.append(
                     {
-                        "id": niche_post.post.id,
+                        "id": post.id,
                         "type": "post",
                         "score": score,
-                        "created_at": niche_post.post.created_at,
+                        "created_at": post.created_at,
                     }
                 )
 
             return feed_items
 
     @staticmethod
-    def _calculate_post_score(post, user_id):
-        """Calculate composite score for a post"""
+    def _get_joined_niches_content(user_id):
+        """Return recent active posts from every niche the user joined."""
+        with session_scope() as session:
+            niche_posts = (
+                session.query(NichePost)
+                .join(
+                    NicheMembership,
+                    NicheMembership.niche_id == NichePost.niche_id,
+                )
+                .options(
+                    joinedload(NichePost.post),
+                    joinedload(NichePost.niche),
+                )
+                .filter(
+                    NicheMembership.user_id == user_id,
+                    NicheMembership.is_active == True,
+                    NicheMembership.is_banned == False,
+                    NichePost.status == PostStatus.ACTIVE,
+                    NichePost.is_approved == True,
+                    NichePost.post.has(Post.status == PostStatus.ACTIVE),
+                )
+                .order_by(NichePost.created_at.desc())
+                .limit(100)
+                .all()
+            )
+
+            # A post may be attached to more than one niche. Keep one feed
+            # entry per post so the unified timeline never repeats content.
+            seen_post_ids = set()
+            feed_items = []
+            for niche_post in niche_posts:
+                post = niche_post.post
+                if not post or post.id in seen_post_ids:
+                    continue
+                seen_post_ids.add(post.id)
+                feed_items.append(
+                    {
+                        "id": post.id,
+                        "type": "post",
+                        "score": 0,
+                        "created_at": niche_post.created_at,
+                    }
+                )
+
+            return feed_items
+
+    @staticmethod
+    def _calculate_post_score(post, user_id, context=None):
+        """Calculate composite score for a post.
+
+        `context` should be the per-post dict from `_batch_post_scoring_context`
+        (is_followed/likes_count/comments_count/matches_interests) — callers
+        scoring more than one post must batch-build it first and pass it in
+        here; without it, this falls back to computing it for just this one
+        post, which is fine for a single item but reintroduces per-item
+        queries if used in a loop.
+        """
+        if context is None:
+            with session_scope() as session:
+                context = FeedService._batch_post_scoring_context(
+                    session, [post], user_id
+                ).get(post.id, {})
+
         score = 0
 
         # 1. Base score for followed accounts
-        is_followed = FeedService._is_from_followed_user(post, user_id)
-        score += 15 if is_followed else 5
+        score += 15 if context.get("is_followed") else 5
 
         # 2. Engagement signals with logarithmic scaling
-        score += math.log1p(len(post.likes)) * 2
-        score += math.log1p(len(post.comments)) * 1.5
+        score += math.log1p(context.get("likes_count", 0)) * 2
+        score += math.log1p(context.get("comments_count", 0)) * 1.5
 
         # 3. Recency decay (halflife of 3 days)
         hours_old = (datetime.utcnow() - post.created_at).total_seconds() / 3600
         score *= 0.5 ** (hours_old / 72)
 
         # 4. Personalization bonus
-        if FeedService._matches_user_interests(post, user_id):
+        if context.get("matches_interests"):
             score *= 1.5
 
         return score
 
     @staticmethod
-    def _calculate_product_score(product, user_id):
-        """Calculate composite score for a product"""
+    def _calculate_product_score(product, user_id, context=None):
+        """Calculate composite score for a product.
+
+        `context` should be the per-product dict from
+        `_batch_product_scoring_context` — see `_calculate_post_score` for why
+        this must be batch-built for multi-item callers.
+        """
+        if context is None:
+            with session_scope() as session:
+                context = FeedService._batch_product_scoring_context(
+                    session, [product], user_id
+                ).get(product.id, {})
+
         score = 0
 
         # 1. Base score
         score += 10
 
         # 2. Engagement signals
-        score += math.log1p(product.view_count or 0) * 1.2
-        score += math.log1p(len(product.reviews)) * 1.5
+        score += math.log1p(context.get("view_count", 0)) * 1.2
+        score += math.log1p(context.get("review_count", 0)) * 1.5
 
         # 3. Rating quality
-        if product.average_rating and product.average_rating >= 4:
+        avg_rating = context.get("avg_rating") or 0
+        if avg_rating >= 4:
             score += 10
-        elif product.average_rating and product.average_rating >= 3:
+        elif avg_rating >= 3:
             score += 5
 
         # 4. Seller reputation
-        if (
-            hasattr(product, "seller")
-            and product.seller
-            and hasattr(product.seller, "verification_status")
-        ):
-            if product.seller.verification_status == SellerVerificationStatus.VERIFIED:
-                score += 5
+        if context.get("verification_status") == SellerVerificationStatus.VERIFIED:
+            score += 5
 
         # 5. Personalization
-        if FeedService._matches_user_preferences(product, user_id):
+        if context.get("matches_preferences"):
             score *= 1.5
 
         return score
@@ -3526,10 +4199,19 @@ class FeedService:
             )
 
             # Score and format items with higher weight for engagement
+            post_context = FeedService._batch_post_scoring_context(
+                session, posts, user_id
+            )
+            product_context = FeedService._batch_product_scoring_context(
+                session, products, user_id
+            )
+
             feed_items = []
 
             for post in posts:
-                score = FeedService._calculate_post_score(post, user_id)
+                score = FeedService._calculate_post_score(
+                    post, user_id, post_context.get(post.id)
+                )
                 # Boost score for posts from engaged sellers
                 score *= 1.3
                 feed_items.append(
@@ -3542,7 +4224,9 @@ class FeedService:
                 )
 
             for product in products:
-                score = FeedService._calculate_product_score(product, user_id)
+                score = FeedService._calculate_product_score(
+                    product, user_id, product_context.get(product.id)
+                )
                 # Boost score for products from engaged sellers
                 score *= 1.2
                 feed_items.append(
@@ -3557,40 +4241,47 @@ class FeedService:
             return feed_items
 
     @staticmethod
-    def _can_user_see_niche_post(post, user_id):
-        """Check if user can see a niche post based on visibility and membership"""
-        if not post.niche_posts:
-            return True  # Not a niche post, always visible
-
-        niche_post = post.niche_posts[0]  # Assuming one niche per post
-        niche = niche_post.niche
-
-        # Public niches are always visible
-        if niche.visibility == NicheVisibility.PUBLIC:
-            return True
-
-        # Private and restricted niches require membership
-        if not user_id:
-            return False
-
-        with session_scope() as session:
-            membership = (
-                session.query(NicheMembership)
-                .filter(
-                    NicheMembership.niche_id == niche.id,
-                    NicheMembership.user_id == user_id,
-                    NicheMembership.is_active == True,
-                )
-                .first()
-            )
-            return membership is not None
-
-    @staticmethod
     def _filter_posts_by_niche_visibility(posts, user_id):
-        """Filter posts based on niche visibility and user membership"""
+        """Filter posts based on niche visibility and user membership.
+
+        Callers eager-load Post.niche_posts -> niche, so this touches no new
+        posts/niches; the only query is a single batched membership check
+        instead of one NicheMembership lookup per private/restricted post.
+        """
+        if not posts:
+            return []
+
+        restricted_niche_ids = {
+            post.niche_posts[0].niche.id
+            for post in posts
+            if post.niche_posts
+            and post.niche_posts[0].niche.visibility != NicheVisibility.PUBLIC
+        }
+
+        member_niche_ids = set()
+        if restricted_niche_ids and user_id:
+            with session_scope() as session:
+                rows = (
+                    session.query(NicheMembership.niche_id)
+                    .filter(
+                        NicheMembership.niche_id.in_(restricted_niche_ids),
+                        NicheMembership.user_id == user_id,
+                        NicheMembership.is_active == True,
+                    )
+                    .all()
+                )
+                member_niche_ids = {r[0] for r in rows}
+
         filtered_posts = []
         for post in posts:
-            if FeedService._can_user_see_niche_post(post, user_id):
+            if not post.niche_posts:
+                filtered_posts.append(post)
+                continue
+            niche = post.niche_posts[0].niche
+            if (
+                niche.visibility == NicheVisibility.PUBLIC
+                or niche.id in member_niche_ids
+            ):
                 filtered_posts.append(post)
         return filtered_posts
 
@@ -3793,3 +4484,183 @@ class TrendingService:
                     "total_pages": 0,
                 },
             }
+
+
+class SavedItemService:
+    """Saved posts and wishlisted products.
+
+    One service because the home feed mixes both and the client wants a single
+    saved list back -- see SavedItem.
+    """
+
+    @staticmethod
+    def _resolve_type(content_type: str):
+        from .models import SavedItemType
+
+        try:
+            return SavedItemType(content_type)
+        except ValueError:
+            raise ValidationError("Unknown content type")
+
+    @staticmethod
+    def save(user_id: str, content_type: str, content_id: str):
+        from .models import SavedItem, SavedItemType
+        from app.products.models import Product
+
+        ctype = SavedItemService._resolve_type(content_type)
+
+        with session_scope() as session:
+            if ctype == SavedItemType.POST:
+                exists = session.query(Post.id).filter_by(id=content_id).first()
+            else:
+                exists = session.query(Product.id).filter_by(id=content_id).first()
+            if not exists:
+                raise NotFoundError("That item no longer exists")
+
+            existing = (
+                session.query(SavedItem)
+                .filter_by(user_id=user_id, content_type=ctype, content_id=content_id)
+                .first()
+            )
+            # Saving twice is the same intent as saving once, so report success
+            # rather than a conflict.
+            if not existing:
+                session.add(
+                    SavedItem(
+                        user_id=user_id, content_type=ctype, content_id=content_id
+                    )
+                )
+                session.flush()
+
+        return {"saved": True, "content_type": content_type, "content_id": content_id}
+
+    @staticmethod
+    def unsave(user_id: str, content_type: str, content_id: str):
+        from .models import SavedItem
+
+        ctype = SavedItemService._resolve_type(content_type)
+        with session_scope() as session:
+            session.query(SavedItem).filter_by(
+                user_id=user_id, content_type=ctype, content_id=content_id
+            ).delete(synchronize_session=False)
+        return {"saved": False, "content_type": content_type, "content_id": content_id}
+
+    @staticmethod
+    def list_saved(user_id: str, content_type=None, page: int = 1, per_page: int = 20):
+        """Saved items, newest first, with enough of each item to render a row
+        without a second round trip per entry."""
+        from .models import SavedItem, SavedItemType
+        from app.products.models import Product
+        from app.media.models import ProductImage
+
+        with session_scope() as session:
+            query = session.query(SavedItem).filter_by(user_id=user_id)
+            if content_type:
+                query = query.filter_by(
+                    content_type=SavedItemService._resolve_type(content_type)
+                )
+            query = query.order_by(SavedItem.created_at.desc())
+
+            total = query.count()
+            rows = query.offset((page - 1) * per_page).limit(per_page).all()
+
+            post_ids = [
+                r.content_id for r in rows if r.content_type == SavedItemType.POST
+            ]
+            product_ids = [
+                r.content_id for r in rows if r.content_type == SavedItemType.PRODUCT
+            ]
+
+            posts = {
+                p.id: p
+                for p in (
+                    session.query(Post).filter(Post.id.in_(post_ids)).all()
+                    if post_ids
+                    else []
+                )
+            }
+            products = {
+                p.id: p
+                for p in (
+                    session.query(Product)
+                    .options(
+                        joinedload(Product.images).joinedload(ProductImage.media),
+                        joinedload(Product.seller),
+                    )
+                    .filter(Product.id.in_(product_ids))
+                    .all()
+                    if product_ids
+                    else []
+                )
+            }
+
+            items = []
+            for row in rows:
+                saved_at = row.created_at.isoformat() if row.created_at else None
+                if row.content_type == SavedItemType.POST:
+                    post = posts.get(row.content_id)
+                    # Saved content can be deleted after the fact. Skip rather
+                    # than returning a half-empty row the client must special-case.
+                    if not post:
+                        continue
+                    items.append(
+                        {
+                            "content_type": "post",
+                            "content_id": post.id,
+                            "saved_at": saved_at,
+                            "title": (post.caption or "")[:140],
+                            "image_url": None,
+                            "price": None,
+                        }
+                    )
+                else:
+                    product = products.get(row.content_id)
+                    if not product:
+                        continue
+                    image_url = None
+                    if product.images:
+                        try:
+                            image_url = product.images[0].media.get_url()
+                        except Exception:
+                            image_url = None
+                    items.append(
+                        {
+                            "content_type": "product",
+                            "content_id": product.id,
+                            "saved_at": saved_at,
+                            "title": product.name,
+                            "image_url": image_url,
+                            "price": float(product.price) if product.price else None,
+                        }
+                    )
+
+            return {
+                "items": items,
+                "pagination": {
+                    "page": page,
+                    "per_page": per_page,
+                    "total_items": total,
+                    "total_pages": (total + per_page - 1) // per_page,
+                },
+            }
+
+    @staticmethod
+    def saved_ids(user_id, content_type: str, content_ids):
+        """Which of these the user has already saved -- for rendering filled vs
+        empty save icons in a list without one query per row."""
+        from .models import SavedItem
+
+        if not user_id or not content_ids:
+            return set()
+        ctype = SavedItemService._resolve_type(content_type)
+        with session_scope() as session:
+            rows = (
+                session.query(SavedItem.content_id)
+                .filter(
+                    SavedItem.user_id == user_id,
+                    SavedItem.content_type == ctype,
+                    SavedItem.content_id.in_(list(content_ids)),
+                )
+                .all()
+            )
+        return {r[0] for r in rows}

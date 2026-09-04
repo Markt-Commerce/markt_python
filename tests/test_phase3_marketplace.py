@@ -1,0 +1,189 @@
+"""Tests for Phase 3 marketplace payment features."""
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from app.libs.errors import ValidationError
+from app.notifications.models import NotificationType
+from app.orders.models import OrderReturnStatus, OrderStatus
+from app.orders.services import OrderService, RETURNABLE_ORDER_STATUSES
+from app.payments.services import PaymentService
+from app.wallet.models import TopUpStatus, WalletReferenceType
+from app.wallet.services import WalletService
+
+
+def test_returnable_order_statuses():
+    assert OrderStatus.SHIPPED in RETURNABLE_ORDER_STATUSES
+    assert OrderStatus.DELIVERED in RETURNABLE_ORDER_STATUSES
+    assert OrderStatus.PENDING_PAYMENT not in RETURNABLE_ORDER_STATUSES
+
+
+@patch("app.orders.services.NotificationService.create_notification")
+@patch("app.wallet.services.WalletService.credit")
+def test_approve_return_credits_buyer_wallet(mock_credit, mock_notify):
+    from app.payments.models import Payment, PaymentStatus
+    from app.orders.models import OrderItem
+
+    payment = SimpleNamespace(status=PaymentStatus.COMPLETED, amount=8000.0)
+    payment.transition_to = lambda new_status, _p=payment: Payment.transition_to(
+        _p, new_status
+    )
+
+    order = SimpleNamespace(
+        id="ORD_RET001",
+        total=8000.0,
+        buyer=SimpleNamespace(user_id="USR_BUYER1"),
+        items=[SimpleNamespace(id=1, seller_id=7, status=OrderItem.Status.DELIVERED)],
+        payments=[payment],
+    )
+    order_return = SimpleNamespace(
+        id="RET_TEST01",
+        status=OrderReturnStatus.REQUESTED,
+        refund_amount=8000.0,
+        order=order,
+        seller_notes=None,
+    )
+
+    session = MagicMock()
+    session.query.return_value.options.return_value.get.return_value = order_return
+    # No prior refunds against this order -- _get_total_refunded's sum query.
+    session.query.return_value.filter.return_value.scalar.return_value = 0.0
+
+    with patch("app.orders.services.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        OrderService.approve_return("RET_TEST01", seller_id=7)
+
+    mock_credit.assert_called_once()
+    assert mock_credit.call_args.kwargs["idempotency_key"] == "return-refund:RET_TEST01"
+    assert payment.status == PaymentStatus.REFUNDED
+    # Phase 12 (15): "refund issued" notification.
+    mock_notify.assert_called_once()
+    assert mock_notify.call_args.kwargs["user_id"] == "USR_BUYER1"
+    assert (
+        mock_notify.call_args.kwargs["notification_type"]
+        == NotificationType.REFUND_ISSUED
+    )
+
+
+@patch("app.wallet.services.WalletService.credit")
+def test_approve_return_rejects_refund_exceeding_captured_payment(mock_credit):
+    """Escrow invariant: a return refund can never exceed what was actually captured."""
+    from app.payments.models import PaymentStatus
+
+    order = SimpleNamespace(
+        id="ORD_RET002",
+        total=50000.0,
+        buyer=SimpleNamespace(user_id="USR_BUYER1"),
+        items=[
+            SimpleNamespace(
+                id=1, seller_id=7, status=SimpleNamespace(value="delivered")
+            )
+        ],
+        payments=[SimpleNamespace(status=PaymentStatus.COMPLETED, amount=8000.0)],
+    )
+    order_return = SimpleNamespace(
+        id="RET_TEST02",
+        status=OrderReturnStatus.REQUESTED,
+        refund_amount=50000.0,
+        order=order,
+        seller_notes=None,
+    )
+
+    session = MagicMock()
+    session.query.return_value.options.return_value.get.return_value = order_return
+    session.query.return_value.filter.return_value.scalar.return_value = 0.0
+
+    with patch("app.orders.services.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        with pytest.raises(ValidationError):
+            OrderService.approve_return("RET_TEST02", seller_id=7)
+
+    mock_credit.assert_not_called()
+
+
+@patch("app.wallet.services.WalletService.credit")
+def test_complete_topup_is_idempotent(mock_credit):
+    topup = SimpleNamespace(
+        id="TOP_ABC123",
+        user_id="USR_1",
+        amount=5000.0,
+        currency="NGN",
+        status=TopUpStatus.PENDING,
+    )
+
+    session = MagicMock()
+    session.query.return_value.get.return_value = topup
+
+    with patch("app.wallet.services.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        assert WalletService.complete_topup("TOP_TOP_ABC123") is True
+
+    mock_credit.assert_called_once()
+    assert mock_credit.call_args[0][2] == WalletReferenceType.WALLET_TOPUP
+
+
+@patch.object(WalletService, "credit")
+def test_settle_order_item_skips_when_paystack_split_used(mock_credit):
+    item = SimpleNamespace(
+        id=99,
+        order_id="ORD_SPLIT1",
+        price=1000.0,
+        quantity=1,
+        seller=SimpleNamespace(user_id="USR_SELLER"),
+    )
+    order = SimpleNamespace(paystack_split_used=True)
+
+    session = MagicMock()
+    session.query.return_value.get.return_value = order
+
+    with patch("app.wallet.services.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        result = WalletService.settle_order_item(item)
+
+    assert result is None
+    mock_credit.assert_not_called()
+
+
+@patch("app.payments.services.PaymentService.complete_payment")
+@patch("app.wallet.services.WalletService.complete_topup")
+def test_webhook_routes_topup_references(mock_topup, mock_complete):
+    mock_topup.return_value = True
+    data = {"reference": "TOP_123", "metadata": {"type": "wallet_topup"}}
+    assert PaymentService._handle_successful_charge(data) is True
+    mock_topup.assert_called_once()
+    mock_complete.assert_not_called()
+
+
+@patch("app.wallet.paystack_subaccounts.PaystackSubaccountClient.create_subaccount")
+def test_register_seller_payout_account(mock_create):
+    mock_create.return_value = {"subaccount_code": "ACCT_sub123"}
+    seller = SimpleNamespace(
+        id=5,
+        shop_name="Ada Shop",
+        paystack_subaccount_code=None,
+        payout_bank_code=None,
+        payout_account_number=None,
+        payout_account_name=None,
+    )
+
+    session = MagicMock()
+    session.query.return_value.get.return_value = seller
+
+    with patch("app.wallet.services.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        result = WalletService.register_seller_payout_account(
+            5,
+            bank_code="058",
+            account_number="0123456789",
+            account_name="Ada Lovelace",
+        )
+
+    assert result["subaccount_code"] == "ACCT_sub123"
+    mock_create.assert_called_once()
+
+
+def test_initialize_topup_rejects_small_amount():
+    with pytest.raises(ValidationError):
+        WalletService.initialize_topup("USR_1", 50.0)
