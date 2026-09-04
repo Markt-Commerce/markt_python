@@ -13,6 +13,8 @@ from sqlalchemy.orm import joinedload
 # project imports
 from external.redis import redis_client
 from app.libs.session import session_scope
+from decimal import Decimal
+
 from app.libs.money import to_money, to_subunit
 from app.libs.errors import (
     NotFoundError,
@@ -67,15 +69,29 @@ class PaymentService:
     @staticmethod
     def _resolve_order_payment_amount(
         order: Order, client_amount: Optional[float]
-    ) -> float:
-        """Derive the payable amount from the order; optionally validate client input."""
-        expected = order.total if order.total is not None else order.subtotal
+    ) -> Decimal:
+        """Derive the payable amount from the order; optionally validate client input.
+
+        Both sides go through to_money before they meet. order.total is Decimal
+        (NUMERIC(12,2)) while client_amount arrives from JSON as a float, and
+        subtracting one from the other raises:
+
+            unsupported operand type(s) for -: 'float' and 'decimal.Decimal'
+
+        which surfaced to the buyer as "Failed to initialize payment" -- every
+        card payment, blocked. Returns Decimal because that is what
+        Payment.amount stores and what WalletService.pay_for_order expects.
+        """
+        expected = to_money(order.total if order.total is not None else order.subtotal)
         if expected is None:
             raise ValidationError("Order total is not set")
-        if client_amount is not None and abs(client_amount - expected) > 0.01:
-            raise ValidationError(
-                f"Payment amount {client_amount} does not match order total {expected}"
-            )
+        if client_amount is not None:
+            supplied = to_money(client_amount)
+            # A cent of tolerance, as before -- clients round.
+            if supplied is None or abs(supplied - expected) > Decimal("0.01"):
+                raise ValidationError(
+                    f"Payment amount {client_amount} does not match order total {expected}"
+                )
         return expected
 
     @staticmethod
