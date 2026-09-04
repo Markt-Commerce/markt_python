@@ -1132,9 +1132,18 @@ class SellerOrderService:
             )
 
             if not item:
-                raise ValueError("Order item not found")
+                raise NotFoundError("Order item not found")
 
-            item.transition_to(status)
+            # transition_to raises ValueError on an illegal move. Left bare it
+            # reached the generic handler and came back as a 500 -- a seller
+            # trying to skip a step was told the server had broken. It is a
+            # client error, and the message names both states so the app can
+            # say what actually went wrong.
+            try:
+                item.transition_to(status)
+            except ValueError as exc:
+                raise ValidationError(str(exc))
+
             order_id = item.order_id
 
             if status == OrderItem.Status.DELIVERED:
