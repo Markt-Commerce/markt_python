@@ -128,6 +128,10 @@ class NicheService:
                 raise ConflictError("A community with this name already exists")
 
             # Create niche
+            for field in ("image_id", "banner_id"):
+                if data.get(field) is not None:
+                    NicheService._assert_media_exists(session, data[field])
+
             niche = Niche(
                 name=data["name"],
                 description=data["description"],
@@ -137,6 +141,8 @@ class NicheService:
                 allow_seller_posts=data.get("allow_seller_posts", True),
                 require_approval=data.get("require_approval", False),
                 max_members=data.get("max_members", 10000),
+                image_id=data.get("image_id"),
+                banner_id=data.get("banner_id"),
                 tags=data.get("tags", []),
                 rules=data.get("rules", []),
                 settings=data.get("settings", {}),
@@ -213,6 +219,20 @@ class NicheService:
                 )
                 if not membership:
                     raise ForbiddenError("You don't have access to this community")
+
+            # Same is_member the list carries, so the detail screen's Join
+            # button doesn't have to work it out from a separate request.
+            niche.is_member = bool(
+                user_id
+                and session.query(NicheMembership.id)
+                .filter_by(
+                    niche_id=niche_id,
+                    user_id=user_id,
+                    is_active=True,
+                    is_banned=False,
+                )
+                .first()
+            )
 
             # TODO: Implement proper Redis caching with serialization
             # For now, disable caching to fix Redis DataError
@@ -877,6 +897,16 @@ class NicheService:
             return niche_post
 
     @staticmethod
+    def _assert_media_exists(session, media_id: int) -> None:
+        """A niche pointing at a media row that isn't there would render as a
+        broken image forever, and the FK error it would otherwise raise says
+        nothing useful to the person who picked the picture."""
+        from app.media.models import Media
+
+        if not session.query(Media.id).filter(Media.id == media_id).first():
+            raise ValidationError(f"No uploaded image with id {media_id}")
+
+    @staticmethod
     def update_niche(niche_id: str, user_id: str, data: Dict[str, Any]) -> Niche:
         """Update niche details (owner only)"""
         with session_scope() as session:
@@ -915,6 +945,16 @@ class NicheService:
 
             if data.get("visibility"):
                 niche.visibility = NicheVisibility(data["visibility"])
+
+            # Imagery. Validated so a community can't point at media that
+            # doesn't exist, and explicitly clearable with null -- an owner
+            # who wants no banner should be able to remove one.
+            for field in ("image_id", "banner_id"):
+                if field in data:
+                    media_id = data[field]
+                    if media_id is not None:
+                        NicheService._assert_media_exists(session, media_id)
+                    setattr(niche, field, media_id)
 
             if data.get("allow_buyer_posts") is not None:
                 niche.allow_buyer_posts = data["allow_buyer_posts"]

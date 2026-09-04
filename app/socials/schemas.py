@@ -108,6 +108,11 @@ class NicheCreateSchema(Schema):
     allow_seller_posts = fields.Bool(missing=True)
     require_approval = fields.Bool(missing=False)
     max_members = fields.Int(validate=validate.Range(min=1, max=100000), missing=10000)
+    # Media already uploaded via POST /media/upload. Same pattern products use
+    # with media_ids: the client uploads first, then attaches the id. Without
+    # these the columns existed and nothing could ever set them.
+    image_id = fields.Int(allow_none=True)
+    banner_id = fields.Int(allow_none=True)
     category_ids = fields.List(fields.Int(), missing=[])
     tags = fields.List(fields.Str(), missing=[])
     rules = fields.List(fields.Str(), missing=[])
@@ -124,6 +129,11 @@ class NicheUpdateSchema(Schema):
     allow_seller_posts = fields.Bool()
     require_approval = fields.Bool()
     max_members = fields.Int(validate=validate.Range(min=1, max=100000))
+    # Media already uploaded via POST /media/upload. Same pattern products use
+    # with media_ids: the client uploads first, then attaches the id. Without
+    # these the columns existed and nothing could ever set them.
+    image_id = fields.Int(allow_none=True)
+    banner_id = fields.Int(allow_none=True)
     category_ids = fields.List(fields.Int())
     tags = fields.List(fields.Str())
     rules = fields.List(fields.Str())

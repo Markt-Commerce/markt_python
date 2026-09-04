@@ -158,3 +158,9 @@ class OrderEventSchema(Schema):
     actor_type = fields.Enum(ActorType, by_value=True, dump_only=True)
     metadata = fields.Dict(dump_only=True, attribute="event_metadata")
     created_at = fields.DateTime(dump_only=True)
+
+
+class SellerPendingCountSchema(Schema):
+    """One number: paid order items waiting on this seller."""
+
+    needs_action = fields.Int()

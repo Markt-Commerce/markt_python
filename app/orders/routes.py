@@ -18,6 +18,7 @@ from .schemas import (
     TrackingSchema,
     ReviewSchema,
     OrderItemSchema,
+    SellerPendingCountSchema,
     OrderPaginationSchema,
     SellerOrderResponseSchema,
     BuyerOrderSchema,
@@ -144,6 +145,25 @@ class SellerOrderStats(MethodView):
     def get(self):
         """Get seller order statistics"""
         return SellerOrderService.get_seller_order_stats(current_user.seller_account.id)
+
+
+@bp.route("/seller/pending-count")
+class SellerPendingCount(MethodView):
+    """Just the number, for the Orders tab badge.
+
+    Separate from /seller/stats because a badge is polled far more often than a
+    dashboard and shouldn't pay for a SUM over every item the seller has sold.
+    """
+
+    @login_required
+    @seller_required
+    @bp.response(200, SellerPendingCountSchema)
+    def get(self):
+        return {
+            "needs_action": SellerOrderService.get_pending_action_count(
+                current_user.seller_account.id
+            )
+        }
 
 
 @bp.route("/seller/items/<int:order_item_id>")

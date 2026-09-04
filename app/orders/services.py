@@ -1261,15 +1261,49 @@ class SellerOrderService:
             )
 
     @staticmethod
+    def get_pending_action_count(seller_id) -> int:
+        """How many paid order items are waiting on this seller.
+
+        Deliberately its own endpoint rather than reusing get_seller_order_stats:
+        this backs a tab badge, so it gets polled far more often than a
+        dashboard, and it should cost one indexed COUNT rather than three
+        queries and a SUM over every item the seller has ever sold.
+
+        Same paid-order filter as the queue itself -- a badge that counts orders
+        the seller can't act on is worse than no badge.
+        """
+        with read_scope() as session:
+            return (
+                session.query(db.func.count(OrderItem.id))
+                .join(Order, Order.id == OrderItem.order_id)
+                .filter(
+                    OrderItem.seller_id == seller_id,
+                    OrderItem.status == OrderItem.Status.PENDING,
+                    Order.status.notin_(SellerOrderService.UNPAID_ORDER_STATUSES),
+                )
+                .scalar()
+                or 0
+            )
+
+    @staticmethod
     def get_seller_order_stats(seller_id):
         with session_scope() as session:
+            # The unpaid filter matches the queue and the badge. Without it the
+            # dashboard counted orders the seller cannot act on, and disagreed
+            # with the list right below it.
+            paid_only = (
+                session.query(OrderItem)
+                .join(Order, Order.id == OrderItem.order_id)
+                .filter(Order.status.notin_(SellerOrderService.UNPAID_ORDER_STATUSES))
+            )
             return {
-                "total_orders": session.query(OrderItem)
-                .filter_by(seller_id=seller_id)
-                .count(),
-                "pending_orders": session.query(OrderItem)
-                .filter_by(seller_id=seller_id, status=OrderItem.Status.PENDING)
-                .count(),
+                "total_orders": paid_only.filter(
+                    OrderItem.seller_id == seller_id
+                ).count(),
+                "pending_orders": paid_only.filter(
+                    OrderItem.seller_id == seller_id,
+                    OrderItem.status == OrderItem.Status.PENDING,
+                ).count(),
                 "monthly_earnings": session.query(
                     db.func.sum(OrderItem.price * OrderItem.quantity)
                 )
