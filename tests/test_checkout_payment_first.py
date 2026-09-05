@@ -197,7 +197,13 @@ def _checkout_session(*, buyer=None, cart=None):
         elif name == "Payment":
             mock.filter_by.return_value.first.return_value = None
         elif name == "Cart":
-            mock.filter_by.return_value.first.return_value = cart
+            # Cart lookups go through CartService.resolve_cart now, which adds
+            # an explicit order_by -- an unordered .first() let two callers get
+            # two different carts for the same buyer.
+            chain = mock.filter_by.return_value
+            chain.options.return_value = chain
+            chain.order_by.return_value.first.return_value = cart
+            chain.first.return_value = cart
         return mock
 
     session.query.side_effect = query_side_effect

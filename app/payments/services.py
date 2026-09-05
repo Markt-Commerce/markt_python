@@ -281,11 +281,21 @@ class PaymentService:
                 if snapshot_item.get("reservation_id") in failed_reservation_ids
             ]
 
-            cart = session.query(Cart).filter_by(buyer_id=payment.buyer_id).first()
+            # Through the same resolver the read path uses. These two used to
+            # disagree -- this one had no expiry filter and no ordering, the
+            # read had both -- so with more than one cart row per buyer this
+            # could clear a different cart than the app was displaying, and the
+            # paid-for item stayed in the basket.
+            from app.cart.services import CartService
+
+            cart = CartService.resolve_cart(session, payment.buyer_id)
             if cart:
                 from app.cart.models import CartItem
 
                 session.query(CartItem).filter_by(cart_id=cart.id).delete()
+                # The bulk delete bypasses the ORM, so nothing invalidates the
+                # cached copy on its own.
+                CartService._invalidate_cart_cache(cart.buyer_id)
 
             session.flush()
             payment_id_for_cache = payment.id
@@ -480,7 +490,7 @@ class PaymentService:
             if not buyer or not buyer.user:
                 raise NotFoundError("Buyer not found")
 
-            cart = session.query(Cart).filter_by(buyer_id=buyer_id).first()
+            cart = CartService.resolve_cart(session, buyer_id)
             if not cart or not cart.items:
                 raise ValidationError("Cart is empty")
 

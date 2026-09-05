@@ -23,7 +23,7 @@ from app.libs.errors import (
 )
 
 # app imports
-from .models import Cart, CartItem
+from .models import Cart, CartItem, CART_TTL
 from app.users.models import User, Buyer
 from app.products.models import Product, ProductVariant
 from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
@@ -45,6 +45,28 @@ class CartService:
     CART_CACHE_KEY = "cart:{buyer_id}"
 
     @staticmethod
+    def resolve_cart(session, buyer_id: int, *, options=None):
+        """The one definition of "this buyer's cart".
+
+        There used to be three, and they disagreed. The read paths filtered on
+        `expires_at > now()`; the clear paths (clear_cart, apply_coupon, and
+        payment completion) did not, and every one of them used an unordered
+        `.first()`. With more than one cart row per buyer -- which nothing
+        prevented -- checkout could clear one cart while the app went on
+        reading another, so a paid-for item stayed in the basket.
+
+        Expiry is deliberately *not* a filter here. A cart past its TTL is
+        still that buyer's cart; hiding it is what caused a second one to be
+        created alongside it. Callers that care about staleness should say so.
+        """
+        query = session.query(Cart).filter_by(buyer_id=buyer_id)
+        if options:
+            query = query.options(*options)
+        # Ordered, so that even if a duplicate survives the backfill this is
+        # deterministic rather than whatever Postgres hands back first.
+        return query.order_by(Cart.id.desc()).first()
+
+    @staticmethod
     def get_or_create_cart(user_id: str) -> Cart:
         """Get existing cart or create new one for user"""
         with session_scope() as session:
@@ -53,25 +75,27 @@ class CartService:
             if not user or not user.is_buyer:
                 raise ForbiddenError("Only buyers can have shopping carts")
 
-            # Try to get existing active cart
-            cart = (
-                session.query(Cart)
-                .filter_by(buyer_id=user.buyer_account.id)
-                .filter(Cart.expires_at > datetime.utcnow())
-                .options(joinedload(Cart.items).joinedload(CartItem.product))
-                .first()
+            cart = CartService.resolve_cart(
+                session,
+                user.buyer_account.id,
+                options=[joinedload(Cart.items).joinedload(CartItem.product)],
             )
 
             if not cart:
                 # Create new cart
                 cart = Cart()
                 cart.buyer_id = user.buyer_account.id
-                cart.expires_at = datetime.utcnow() + timedelta(days=30)
+                cart.expires_at = datetime.utcnow() + CART_TTL
                 session.add(cart)
                 session.flush()
 
                 # Cache the new cart
                 CartService._cache_cart(cart)
+            elif cart.expires_at is None or cart.expires_at <= datetime.utcnow():
+                # Renew rather than abandon. Abandoning is what left the buyer
+                # with an invisible cart still holding items.
+                cart.expires_at = datetime.utcnow() + CART_TTL
+                session.flush()
 
             return cart
 
@@ -233,7 +257,7 @@ class CartService:
                 raise ForbiddenError("Only buyers can clear cart")
 
             # Get cart
-            cart = session.query(Cart).filter_by(buyer_id=user.buyer_account.id).first()
+            cart = CartService.resolve_cart(session, user.buyer_account.id)
 
             if not cart:
                 return True  # No cart to clear
@@ -272,15 +296,13 @@ class CartService:
                     pass
 
             # Get cart with items
-            cart = (
-                session.query(Cart)
-                .filter_by(buyer_id=buyer_id)
-                .filter(Cart.expires_at > datetime.utcnow())
-                .options(
+            cart = CartService.resolve_cart(
+                session,
+                buyer_id,
+                options=[
                     joinedload(Cart.items).joinedload(CartItem.product),
                     joinedload(Cart.items).joinedload(CartItem.variant),
-                )
-                .first()
+                ],
             )
 
             if cart:
@@ -395,7 +417,7 @@ class CartService:
                 raise ForbiddenError("Only buyers can apply coupons")
 
             # Get cart
-            cart = session.query(Cart).filter_by(buyer_id=user.buyer_account.id).first()
+            cart = CartService.resolve_cart(session, user.buyer_account.id)
 
             if not cart:
                 raise ValidationError("No active cart found")

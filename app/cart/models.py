@@ -4,12 +4,37 @@ from app.libs.money import MONEY
 from app.libs.models import BaseModel
 
 
+CART_TTL = timedelta(days=30)
+
+
+def _default_expires_at():
+    """Evaluated per row.
+
+    This was `default=datetime.utcnow() + timedelta(days=30)` -- an expression,
+    so SQLAlchemy stored the *result* as a scalar default computed once when
+    this module was imported. Every cart a process created got the same
+    timestamp no matter when it was created, and once that moment passed, new
+    carts were born already expired.
+
+    That is what made carts pile up: the read path filters on
+    `expires_at > now()`, so an expired cart is invisible and the next
+    add-to-cart creates another one.
+    """
+    return datetime.utcnow() + CART_TTL
+
+
 class Cart(BaseModel):
     __tablename__ = "carts"
 
+    # One live cart per buyer, enforced in the database. Before this, nothing
+    # stopped a buyer accumulating rows, and the various `.first()` lookups
+    # could each land on a different one -- checkout would clear one cart
+    # while the app read another.
+    __table_args__ = (db.UniqueConstraint("buyer_id", name="uq_carts_buyer_id"),)
+
     id = db.Column(db.Integer, primary_key=True)
     buyer_id = db.Column(db.Integer, db.ForeignKey("buyers.id"))
-    expires_at = db.Column(db.DateTime, default=datetime.utcnow() + timedelta(days=30))
+    expires_at = db.Column(db.DateTime, default=_default_expires_at)
     coupon_code = db.Column(db.String(50))
 
     # Relationships
