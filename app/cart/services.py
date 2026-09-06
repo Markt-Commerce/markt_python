@@ -484,16 +484,38 @@ class CartService:
                 }
                 cart_data["items"].append(item_data)
 
-            # Cache serialized data
-            redis_client.set(
-                cache_key, json.dumps(cart_data), ex=CartService.CACHE_EXPIRY
-            )
+            # Same reasoning as _invalidate_cart_cache: writing the cache is
+            # an optimisation, and a Redis outage should not turn add-to-cart
+            # into a 500.
+            try:
+                redis_client.set(
+                    cache_key, json.dumps(cart_data), ex=CartService.CACHE_EXPIRY
+                )
+            except Exception:
+                logger.warning(
+                    "Could not cache cart for buyer %s", cart.buyer_id, exc_info=True
+                )
 
     @staticmethod
     def _invalidate_cart_cache(buyer_id: int):
-        """Invalidate cart cache"""
+        """Drop the cached cart. Best-effort.
+
+        This runs inside payment completion, and the two failure modes are not
+        symmetric: a missed invalidation costs one stale read, while raising
+        here costs a *paid* order its completion. The cache is derived data --
+        it is never the only record of anything -- so a Redis outage must not
+        propagate.
+        """
         cache_key = CartService.CART_CACHE_KEY.format(buyer_id=buyer_id)
-        redis_client.delete(cache_key)
+        try:
+            redis_client.delete(cache_key)
+        except Exception:
+            logger.warning(
+                "Could not invalidate cart cache for buyer %s; a stale cart "
+                "may be served until it expires",
+                buyer_id,
+                exc_info=True,
+            )
 
     @staticmethod
     def _validate_cart_items(cart_items: List[CartItem]):

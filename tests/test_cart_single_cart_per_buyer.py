@@ -115,3 +115,49 @@ def test_carts_have_a_unique_constraint_on_buyer_id():
         "One cart per buyer must be enforced in the database. Without it, the "
         "various .first() lookups can each land on a different row."
     )
+
+
+# ---------------------------------------------------------------------------
+# 4. Cache work must never fail the thing it is optimising
+# ---------------------------------------------------------------------------
+
+
+def test_invalidate_cart_cache_survives_redis_being_down(monkeypatch, caplog):
+    """Cache invalidation runs inside payment completion.
+
+    The failure modes are not symmetric: a missed invalidation costs one stale
+    read, while raising here costs a *paid* order its completion. This is also
+    what CI hits -- the unit-test job has no Redis.
+    """
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    from external import redis as redis_module
+
+    def boom(*_args, **_kwargs):
+        raise RedisConnectionError("Error 111 connecting to localhost:6379")
+
+    monkeypatch.setattr(redis_module.redis_client, "delete", boom, raising=False)
+
+    CartService._invalidate_cart_cache(1)  # must not raise
+
+
+def test_cache_cart_survives_redis_being_down(monkeypatch):
+    """Same reasoning for the write side: a Redis outage should not turn
+    add-to-cart into a 500."""
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    from external import redis as redis_module
+
+    def boom(*_args, **_kwargs):
+        raise RedisConnectionError("Error 111 connecting to localhost:6379")
+
+    monkeypatch.setattr(redis_module.redis_client, "set", boom, raising=False)
+
+    cart = Cart()
+    cart.id = 1
+    cart.buyer_id = 1
+    cart.coupon_code = None
+    cart.expires_at = datetime.utcnow() + CART_TTL
+    cart.items = []
+
+    CartService._cache_cart(cart)  # must not raise
