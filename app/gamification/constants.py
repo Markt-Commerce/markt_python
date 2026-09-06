@@ -263,3 +263,9 @@ def stats_cache_key(user_id: str) -> str:
 
 def ratelimit_key(reason: str, user_id: str, day: str) -> str:
     return f"gam:ratelimit:{reason}:{user_id}:{day}"
+
+
+# Days worth a bigger celebration than the daily tick. Chosen to be frequent
+# early (a new user gets one in their first week) and then meaningful rather
+# than constant -- a milestone every day is not a milestone.
+STREAK_MILESTONES = frozenset({3, 7, 14, 30, 60, 100, 180, 365})

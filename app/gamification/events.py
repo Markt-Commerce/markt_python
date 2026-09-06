@@ -227,6 +227,12 @@ def _on_daily_login(sender, user_id=None, **kw):
     services.award_by_reason(
         user_id, "daily_first_login", ref_type="day", ref_id=f"{user_id}:{day}"
     )
+    # Advance the consecutive-day count off the same signal. Idempotent per
+    # calendar day, so the extra logins that award_by_reason already ignores
+    # are ignored here too.
+    result = services.advance_streak(user_id)
+    if result["is_new_day"]:
+        services.emit_streak(user_id, result)
 
 
 @seller_verified.connect
