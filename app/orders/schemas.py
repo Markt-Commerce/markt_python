@@ -164,3 +164,9 @@ class SellerPendingCountSchema(Schema):
     """One number: paid order items waiting on this seller."""
 
     needs_action = fields.Int()
+
+
+class BuyerPendingCountSchema(Schema):
+    """One number: order items waiting on this buyer to decide."""
+
+    needs_action = fields.Int()

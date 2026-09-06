@@ -19,6 +19,7 @@ from .schemas import (
     ReviewSchema,
     OrderItemSchema,
     SellerPendingCountSchema,
+    BuyerPendingCountSchema,
     OrderPaginationSchema,
     SellerOrderResponseSchema,
     BuyerOrderSchema,
@@ -162,6 +163,26 @@ class SellerPendingCount(MethodView):
         return {
             "needs_action": SellerOrderService.get_pending_action_count(
                 current_user.seller_account.id
+            )
+        }
+
+
+@bp.route("/buyer/pending-count")
+class BuyerPendingCount(MethodView):
+    """Just the number, for the buyer's Ongoing tab badge.
+
+    Counts substitutions awaiting the buyer's approval -- not ongoing orders.
+    A badge is a call to action, and an order in transit is not one; see
+    OrderService.get_buyer_pending_action_count.
+    """
+
+    @login_required
+    @buyer_required
+    @bp.response(200, BuyerPendingCountSchema)
+    def get(self):
+        return {
+            "needs_action": OrderService.get_buyer_pending_action_count(
+                current_user.buyer_account.id
             )
         }
 
