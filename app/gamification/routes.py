@@ -27,6 +27,9 @@ from .schemas import (
     TierConfigSchema,
     PreferencesUpdateSchema,
     PreferencesResponseSchema,
+    UnseenAchievementsSchema,
+    MarkSeenSchema,
+    MarkSeenResponseSchema,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,6 +77,40 @@ class UserBadges(MethodView):
     def get(self, user_id):
         """Badges held by a user, with progress on locked ones."""
         return services.get_user_badges(user_id)
+
+
+@bp.route("/me/achievements/unseen")
+class MyUnseenAchievements(MethodView):
+    """What the user has earned but never been shown.
+
+    A socket event is lost if the app was backgrounded when it fired, and a
+    local flag cannot be shared with a second device -- so the server holds the
+    acknowledgement and the app asks, on open, what it still owes the user.
+    """
+
+    @login_required
+    @bp.response(200, UnseenAchievementsSchema)
+    def get(self):
+        return services.get_unseen_achievements(current_user.id)
+
+
+@bp.route("/me/achievements/seen")
+class MarkAchievementsSeen(MethodView):
+    """Acknowledge celebrations the app has actually shown.
+
+    Called after the animation runs rather than before: if the app dies mid
+    celebration the user sees it again, which is the right way round.
+    """
+
+    @login_required
+    @bp.arguments(MarkSeenSchema)
+    @bp.response(200, MarkSeenResponseSchema)
+    def post(self, data):
+        return services.mark_achievements_seen(
+            current_user.id,
+            badge_slugs=data.get("badge_slugs"),
+            tier=data.get("tier"),
+        )
 
 
 @bp.route("/points/history")

@@ -59,6 +59,22 @@ class UserStats(BaseModel):
     weekly_period = db.Column(db.String(8), nullable=True)  # e.g. "2026-W30"
     current_tier = db.Column(db.String(20), nullable=False, default="newcomer")
 
+    # 15.1 celebrate-exactly-once: the last tier the client has actually shown
+    # a celebration for. current_tier alone can't answer "is this new to the
+    # user" -- it is already updated by the time anything reads it, and a
+    # socket event is lost if the app was backgrounded. Comparing the two
+    # survives a restart, a reinstall, and a second device.
+    celebrated_tier = db.Column(db.String(20), nullable=True)
+
+    # 15.2 streak. daily_login already awards points idempotently per day; this
+    # counts the consecutive run so it can be shown and celebrated.
+    # last_active_date is a date, not a timestamp: "did they show up today" is
+    # a calendar question, and storing a time invites timezone drift into a
+    # comparison that only cares about the day.
+    streak_days = db.Column(db.Integer, nullable=False, default=0)
+    longest_streak = db.Column(db.Integer, nullable=False, default=0)
+    last_active_date = db.Column(db.Date, nullable=True)
+
 
 class SellerStats(BaseModel):
     """Aggregates that feed seller badge criteria.
@@ -115,6 +131,12 @@ class UserBadge(BaseModel):
     badge_id = db.Column(db.Integer, db.ForeignKey("gam_badges.id"), nullable=False)
     awarded_at = db.Column(db.DateTime, server_default=db.func.now())
     progress_json = db.Column(db.JSON, nullable=True)
+
+    # 15.1 celebrate-exactly-once. NULL means the user has never been shown
+    # this unlock. Deliberately a timestamp rather than a boolean: it costs the
+    # same and answers "when did they see it", which a support question about a
+    # missed celebration actually needs.
+    seen_at = db.Column(db.DateTime, nullable=True, index=True)
 
     badge = db.relationship("Badge")
 

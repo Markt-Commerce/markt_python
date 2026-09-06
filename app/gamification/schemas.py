@@ -35,6 +35,13 @@ class BadgeSchema(Schema):
     priority = fields.Int()
 
 
+class StreakSchema(Schema):
+    days = fields.Int()
+    longest = fields.Int()
+    last_active_date = fields.Date(allow_none=True)
+    active_today = fields.Bool()
+
+
 # --- GET /me ------------------------------------------------------------------
 class GamMeSchema(Schema):
     user_id = fields.Str()
@@ -46,6 +53,34 @@ class GamMeSchema(Schema):
     badges_total = fields.Int()
     weekly_rank = fields.Nested(WeeklyRankSchema, allow_none=True)
     opt_out_leaderboard = fields.Bool()
+    streak = fields.Nested(StreakSchema)
+
+
+# --- GET /me/achievements/unseen ---------------------------------------------
+class UnseenBadgeSchema(BadgeSchema):
+    awarded_at = fields.DateTime(allow_none=True)
+
+
+class UnseenTierUpSchema(Schema):
+    from_tier = fields.Str()
+    to_tier = fields.Str()
+    tier = fields.Nested(TierSchema)
+
+
+class UnseenAchievementsSchema(Schema):
+    badges = fields.List(fields.Nested(UnseenBadgeSchema))
+    tier_up = fields.Nested(UnseenTierUpSchema, allow_none=True)
+
+
+# --- POST /me/achievements/seen ----------------------------------------------
+class MarkSeenSchema(Schema):
+    badge_slugs = fields.List(fields.Str(), load_default=None)
+    tier = fields.Str(load_default=None)
+
+
+class MarkSeenResponseSchema(Schema):
+    badges_marked = fields.Int()
+    tier_marked = fields.Bool()
 
 
 # --- GET /users/{id}/profile --------------------------------------------------

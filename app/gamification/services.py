@@ -28,6 +28,7 @@ from .constants import (
     stats_cache_key,
     STATS_CACHE_TTL_SECONDS,
     LB_SCOPE_GLOBAL,
+    STREAK_MILESTONES,
 )
 from .models import (
     PointsLedger,
@@ -561,6 +562,9 @@ def get_me(user_id: str) -> dict:
         earned = session.query(UserBadge).filter_by(user_id=user_id).count()
         total_badges = session.query(Badge).filter(Badge.is_active.is_(True)).count()
         opt_out = _get_opt_out(session, user_id)
+        streak = stats.streak_days if stats else 0
+        longest = stats.longest_streak if stats else 0
+        last_active = stats.last_active_date if stats else None
 
     prog = tier_engine.tier_progress(lifetime, _tier_rows())
     rank = leaderboard.get_user_rank(LB_SCOPE_GLOBAL, "weekly", user_id)
@@ -579,7 +583,159 @@ def get_me(user_id: str) -> dict:
             else None
         ),
         "opt_out_leaderboard": opt_out,
+        "streak": {
+            "days": streak,
+            "longest": longest,
+            "last_active_date": last_active,
+            # Whether today is already counted, so the app can show a live
+            # streak without having to guess from a date.
+            "active_today": last_active == datetime.utcnow().date(),
+        },
     }
+
+
+def advance_streak(user_id: str) -> dict:
+    """Move the consecutive-day streak on, called from the daily_login signal.
+
+    Idempotent per calendar day: logging in five times today leaves the streak
+    where the first login put it. A gap of more than one day restarts at 1
+    rather than resetting to 0 -- the user *is* here today, and showing them a
+    zero would be both wrong and discouraging.
+
+    Dates, not timestamps: "did they show up today" is a calendar question, and
+    comparing times drags timezone drift into it.
+    """
+    today = datetime.utcnow().date()
+    with session_scope() as session:
+        stats = _get_or_create_stats(session, user_id)
+        last = stats.last_active_date
+
+        if last == today:
+            # Already counted today.
+            return {
+                "streak_days": stats.streak_days,
+                "longest_streak": stats.longest_streak,
+                "is_new_day": False,
+                "is_milestone": False,
+            }
+
+        if last is not None and (today - last).days == 1:
+            stats.streak_days = (stats.streak_days or 0) + 1
+        else:
+            stats.streak_days = 1
+
+        stats.last_active_date = today
+        stats.longest_streak = max(stats.longest_streak or 0, stats.streak_days)
+        streak = stats.streak_days
+        longest = stats.longest_streak
+
+    _invalidate_stats_cache(user_id)
+    return {
+        "streak_days": streak,
+        "longest_streak": longest,
+        "is_new_day": True,
+        "is_milestone": streak in STREAK_MILESTONES,
+    }
+
+
+def emit_streak(user_id: str, result: dict) -> None:
+    """Tell the app the streak moved, so it can celebrate without polling."""
+    _emit(
+        user_id,
+        "streak_advanced",
+        {
+            "streak_days": result["streak_days"],
+            "longest_streak": result["longest_streak"],
+            "is_milestone": result["is_milestone"],
+        },
+    )
+
+
+def get_unseen_achievements(user_id: str) -> dict:
+    """Everything the user has earned but never been shown.
+
+    This is what makes "celebrate exactly once" reliable. A socket event is
+    lost if the app was backgrounded when it fired, and a local flag cannot be
+    shared with a second device -- so the server holds the acknowledgement and
+    the client asks what it still owes the user on open.
+    """
+    with session_scope() as session:
+        rows = (
+            session.query(UserBadge, Badge)
+            .join(Badge, Badge.id == UserBadge.badge_id)
+            .filter(UserBadge.user_id == user_id, UserBadge.seen_at.is_(None))
+            .order_by(UserBadge.awarded_at.asc())
+            .all()
+        )
+        badges = [
+            {
+                "slug": badge.slug,
+                "name": badge.name,
+                "description": badge.description,
+                "icon_url": badge.icon_url,
+                "category": badge.category,
+                "audience": badge.audience,
+                "priority": badge.priority,
+                "awarded_at": user_badge.awarded_at,
+            }
+            for user_badge, badge in rows
+        ]
+
+        stats = session.query(UserStats).filter_by(user_id=user_id).first()
+        tier_payload = None
+        if stats and stats.current_tier != (stats.celebrated_tier or ""):
+            # celebrated_tier is NULL for every existing user. Treating that as
+            # "owes a celebration" would fire a tier-up at everyone on deploy,
+            # so a first sight of a user is recorded silently -- only a change
+            # from a tier we have already acknowledged is worth celebrating.
+            if stats.celebrated_tier is None:
+                stats.celebrated_tier = stats.current_tier
+            else:
+                prog = tier_engine.tier_progress(stats.lifetime_points, _tier_rows())
+                tier_payload = {
+                    "from_tier": stats.celebrated_tier,
+                    "to_tier": stats.current_tier,
+                    "tier": _tier_payload(prog),
+                }
+
+    return {"badges": badges, "tier_up": tier_payload}
+
+
+def mark_achievements_seen(
+    user_id: str, badge_slugs: list = None, tier: str = None
+) -> dict:
+    """Acknowledge celebrations the client has actually shown.
+
+    Called after the animation runs, not before it: if the app dies mid
+    celebration the user sees it again, which is the right way round.
+    """
+    now = datetime.utcnow()
+    with session_scope() as session:
+        marked = 0
+        if badge_slugs:
+            ids = [
+                b.id
+                for b in session.query(Badge).filter(Badge.slug.in_(badge_slugs)).all()
+            ]
+            if ids:
+                marked = (
+                    session.query(UserBadge)
+                    .filter(
+                        UserBadge.user_id == user_id,
+                        UserBadge.badge_id.in_(ids),
+                        UserBadge.seen_at.is_(None),
+                    )
+                    .update({UserBadge.seen_at: now}, synchronize_session=False)
+                )
+
+        tier_marked = False
+        if tier:
+            stats = session.query(UserStats).filter_by(user_id=user_id).first()
+            if stats and stats.current_tier == tier:
+                stats.celebrated_tier = tier
+                tier_marked = True
+
+    return {"badges_marked": marked, "tier_marked": tier_marked}
 
 
 def get_public_profile(user_id: str) -> dict:
