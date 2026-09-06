@@ -42,6 +42,14 @@ jobs:
       - name: Lint with flake8
         run: flake8 .
 
+      # Two branches cut from the same revision and merged separately fork the
+      # chain, and alembic then refuses to run at all. The deploy job upgrades
+      # to `head`, so that failure lands on develop after review rather than on
+      # the branch that caused it. Reads the migration files directly, so it
+      # needs no database and belongs here rather than in the integration job.
+      - name: Single migration head
+        run: python scripts/check_single_migration_head.py
+
       - name: Check formatting with black
         run: |
           set -euo pipefail
