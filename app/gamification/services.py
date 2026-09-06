@@ -642,7 +642,7 @@ def emit_streak(user_id: str, result: dict) -> None:
     """Tell the app the streak moved, so it can celebrate without polling."""
     _emit(
         user_id,
-        "streak_advanced",
+        "gamification:streak_advanced",
         {
             "streak_days": result["streak_days"],
             "longest_streak": result["longest_streak"],
