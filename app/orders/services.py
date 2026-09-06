@@ -217,6 +217,40 @@ class OrderService:
         return geocode_address(address_dict)
 
     @staticmethod
+    def get_buyer_pending_action_count(buyer_id) -> int:
+        """How many order items are waiting on this buyer to decide.
+
+        Deliberately counts only AWAITING_BUYER_APPROVAL -- a material
+        substitution that the buyer's ASK preference says cannot be committed
+        without them (6.1). That is the one state where the order genuinely
+        cannot move until the buyer does something.
+
+        It is *not* a count of ongoing orders. A badge means "act on this", and
+        an order that is simply in transit needs nothing; a number that never
+        clears teaches people to ignore badges, including the ones that matter.
+        Same reasoning as get_pending_action_count on the seller side, and the
+        same shape: one indexed COUNT, because a badge gets polled.
+        """
+        from app.fulfilment.models import (
+            FulfilmentAllocation,
+            FulfilmentAllocationStatus,
+        )
+
+        with read_scope() as session:
+            return (
+                session.query(db.func.count(FulfilmentAllocation.id))
+                .join(OrderItem, OrderItem.id == FulfilmentAllocation.order_item_id)
+                .join(Order, Order.id == OrderItem.order_id)
+                .filter(
+                    Order.buyer_id == buyer_id,
+                    FulfilmentAllocation.status
+                    == FulfilmentAllocationStatus.AWAITING_BUYER_APPROVAL,
+                )
+                .scalar()
+                or 0
+            )
+
+    @staticmethod
     def get_user_orders(user_id):
         """For buyers - shows complete orders with all items.
 
