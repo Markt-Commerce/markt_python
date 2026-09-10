@@ -475,3 +475,32 @@ class AccountDeletionResponseSchema(Schema):
     deleted = fields.Bool()
     user_id = fields.Str()
     message = fields.Str()
+
+
+class OAuthSignInSchema(Schema):
+    """POST /users/auth/oauth.
+
+    `identity_token` is the JWT the provider handed the app. It is a carrier,
+    not a credential we trust -- see app/users/oauth.py.
+    """
+
+    class Meta:
+        unknown = EXCLUDE
+
+    provider = fields.Str(required=True, validate=validate.OneOf(["google", "apple"]))
+    identity_token = fields.Str(required=True, load_only=True)
+
+    # Apple echoes the nonce the app generated for this attempt; checking it
+    # stops a token captured from an earlier sign-in being replayed.
+    nonce = fields.Str(load_default=None, allow_none=True)
+
+    # Apple returns the user's name exactly once, on first authorisation, and
+    # never inside the token -- so the app forwards it separately or it is
+    # lost for good.
+    full_name = fields.Str(load_default=None, allow_none=True)
+
+    account_type = fields.Str(
+        load_default=None,
+        allow_none=True,
+        validate=validate.OneOf(["buyer", "seller"]),
+    )

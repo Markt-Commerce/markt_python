@@ -187,6 +187,51 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
         self.deactivated_at = None
 
 
+class SocialAccount(BaseModel):
+    """A verified third-party identity linked to a Markt user.
+
+    Keyed on (provider, provider_sub) rather than email, deliberately. `sub` is
+    the provider's stable, immutable subject id; an email can be changed by the
+    user, and Apple's private-relay addresses can be revoked entirely. Matching
+    on email would mean losing the link the moment either happens.
+
+    One row per (provider, user), so a user can hold both a Google and an Apple
+    identity, but a single provider identity can never point at two accounts.
+    """
+
+    __tablename__ = "social_accounts"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(
+        db.String(12), db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    provider = db.Column(db.String(16), nullable=False)  # "google" | "apple"
+
+    # The provider's subject claim. Unique per provider, never reused.
+    provider_sub = db.Column(db.String(255), nullable=False)
+
+    # What the provider told us at link time, kept for support questions.
+    # Apple sends the name exactly once, on first authorisation, so if it is
+    # not captured here it is gone for good.
+    email_at_link = db.Column(db.String(255), nullable=True)
+    name_at_link = db.Column(db.String(255), nullable=True)
+
+    # True when the provider asserted the email was verified. Drives whether an
+    # email collision may auto-link; an unverified provider email would
+    # otherwise be an account-takeover vector.
+    email_verified_at_link = db.Column(db.Boolean, nullable=False, default=False)
+
+    linked_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    last_used_at = db.Column(db.DateTime, nullable=True)
+
+    user = db.relationship("User", backref=db.backref("social_accounts", lazy=True))
+
+    __table_args__ = (
+        db.UniqueConstraint("provider", "provider_sub", name="uq_social_provider_sub"),
+        db.UniqueConstraint("provider", "user_id", name="uq_social_provider_user"),
+    )
+
+
 class Buyer(BaseModel):
     __tablename__ = "buyers"
 

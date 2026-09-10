@@ -1,5 +1,7 @@
 # python imports
 import random
+import re
+import uuid
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -24,6 +26,7 @@ from app.libs.email_service import email_service
 
 from app.products.models import Product
 from app.socials.models import Post, PostStatus, Follow, ProductView
+from .models import SocialAccount
 from app.media.services import media_service
 from app.media.models import Media, MediaVariantType, MediaVariant
 from app.categories.models import Category, SellerCategory
@@ -305,6 +308,147 @@ class AuthService:
             redis_client.delete_verification_code(user.email)
 
             return True
+
+
+class SocialAuthService:
+    """Sign-in with a verified third-party identity.
+
+    The token is verified before anything here runs (app/users/oauth.py); this
+    decides which Markt account a verified identity belongs to.
+
+    Three cases, in priority order:
+
+    1. **Known identity** -- (provider, sub) already linked. Sign that user in.
+       Checked first so a user who changed their email still lands on their own
+       account.
+    2. **Email collision** -- no link yet, but the address belongs to an
+       existing account. Auto-linked *only* when the provider asserts the email
+       is verified. If it does not, we refuse with 409 and make them prove
+       ownership with their password. An unverified provider email is an
+       account-takeover vector: sign up to that provider with someone else's
+       address and you would inherit their Markt account.
+    3. **New user** -- create the account, with no password. `password_hash` is
+       already nullable, so an OAuth-only user needs no placeholder secret.
+    """
+
+    PROVIDERS = ("google", "apple")
+
+    @staticmethod
+    def _unique_username(session, seed: Optional[str]) -> str:
+        """A free username derived from the provider's name or email.
+
+        `username` is unique NOT NULL, and the provider gives us no say in it,
+        so one has to be minted. Suffixed and retried on collision rather than
+        trusting a single attempt -- two people called "Ada Obi" will collide.
+        """
+        base = re.sub(r"[^a-zA-Z0-9_]", "", (seed or "").split("@")[0]) or "markt"
+        base = base[:14].lower() or "markt"
+        if len(base) < 3:
+            base = f"{base}user"
+
+        for _ in range(12):
+            candidate = f"{base}{random.randint(1000, 9999)}"
+            if not session.query(User).filter(User.username == candidate).first():
+                return candidate
+
+        # Vanishingly unlikely; a uuid tail is still better than raising at
+        # someone mid sign-in.
+        return f"{base}{uuid.uuid4().hex[:8]}"
+
+    @staticmethod
+    def authenticate(identity: Dict[str, Any], *, name_hint: Optional[str] = None):
+        """Return (user, created) for a verified provider identity."""
+        provider = identity["provider"]
+        if provider not in SocialAuthService.PROVIDERS:
+            raise ValidationError(f"Unsupported provider: {provider}")
+
+        sub = identity["sub"]
+        email = (identity.get("email") or "").strip().lower() or None
+        # Apple sends the name once, beside the token, never inside it.
+        display_name = identity.get("name") or name_hint
+
+        with session_scope() as session:
+            # 1. Known identity.
+            link = (
+                session.query(SocialAccount)
+                .filter_by(provider=provider, provider_sub=sub)
+                .first()
+            )
+            if link:
+                link.last_used_at = datetime.utcnow()
+                user = session.query(User).get(link.user_id)
+                if not user:
+                    # The account was deleted but the link outlived it. Treat
+                    # the identity as new rather than 500-ing on a dangling row.
+                    session.delete(link)
+                else:
+                    user.last_login_at = datetime.utcnow()
+                    session.flush()
+                    return user, False
+
+            # 2. Email collision.
+            if email:
+                existing = session.query(User).filter(User.email == email).first()
+                if existing:
+                    if not identity.get("email_verified"):
+                        raise ConflictError(
+                            "An account already uses that email. Sign in with "
+                            "your password to connect this provider."
+                        )
+                    session.add(
+                        SocialAccount(
+                            user_id=existing.id,
+                            provider=provider,
+                            provider_sub=sub,
+                            email_at_link=email,
+                            name_at_link=display_name,
+                            email_verified_at_link=True,
+                            last_used_at=datetime.utcnow(),
+                        )
+                    )
+                    existing.last_login_at = datetime.utcnow()
+                    # A provider that verified the address is better evidence
+                    # than our own unfinished email loop.
+                    existing.email_verified = True
+                    session.flush()
+                    return existing, False
+
+            # 3. New user.
+            if not email:
+                # Every provider we support sends one; refusing beats inventing
+                # a placeholder address that can never receive mail.
+                raise ValidationError(
+                    "That sign-in did not share an email address, which Markt "
+                    "needs to create your account."
+                )
+
+            user = User(
+                email=email,
+                username=SocialAuthService._unique_username(
+                    session, display_name or email
+                ),
+                # No password. This account signs in through the provider
+                # until the user sets one.
+                password_hash=None,
+                email_verified=bool(identity.get("email_verified")),
+            )
+            session.add(user)
+            session.flush()
+
+            session.add(
+                SocialAccount(
+                    user_id=user.id,
+                    provider=provider,
+                    provider_sub=sub,
+                    email_at_link=email,
+                    name_at_link=display_name,
+                    email_verified_at_link=bool(identity.get("email_verified")),
+                    last_used_at=datetime.utcnow(),
+                )
+            )
+            user.last_login_at = datetime.utcnow()
+            session.flush()
+            return user, True
 
 
 class UserService:

@@ -8,7 +8,7 @@ from flask_login import login_user, logout_user, login_required, current_user
 from sqlalchemy import or_
 
 # project imports
-from flask import jsonify, make_response
+from flask import jsonify, make_response, current_app
 
 from app.libs.errors import (
     AuthError,
@@ -18,6 +18,7 @@ from app.libs.errors import (
     ConflictError,
 )
 from app.libs.auth_tokens import generate_auth_token
+from .oauth import verify_google, verify_apple, OAuthError
 from app.libs.pagination import Paginator
 from app.libs.schemas import PaginationQueryArgs
 from app.media.schemas import MediaSchema
@@ -56,6 +57,7 @@ from .schemas import (
     AccountDeletionPreviewSchema,
     AccountDeletionRequestSchema,
     AccountDeletionResponseSchema,
+    OAuthSignInSchema,
 )
 from .services import (
     AuthService,
@@ -65,6 +67,7 @@ from .services import (
     AccountDeletionService,
     SellerStartCardsService,
     SellerAnalyticsService,
+    SocialAuthService,
 )
 from .models import User
 
@@ -89,6 +92,65 @@ class UserRegister(MethodView):
             abort(e.status_code, message=e.message)
         except ValueError as e:
             abort(400, message=str(e))
+
+
+@bp.route("/auth/oauth")
+class OAuthSignIn(MethodView):
+    """Sign in (or sign up) with a verified Google or Apple identity.
+
+    One endpoint for both providers and for both new and returning users: the
+    app cannot know which of those it is until the token is verified, and
+    making it guess would mean a wrong guess becomes a dead end mid sign-in.
+
+    Returns the same bearer token the password path issues, so every existing
+    consumer of `access_token` is unchanged.
+    """
+
+    @bp.arguments(OAuthSignInSchema)
+    @bp.response(200, UserSchema)
+    @bp.alt_response(401, description="Token could not be verified")
+    @bp.alt_response(409, description="Email belongs to an existing account")
+    @bp.alt_response(503, description="Social sign-in not configured")
+    def post(self, data):
+        provider = data["provider"]
+        try:
+            if provider == "google":
+                identity = verify_google(
+                    data["identity_token"],
+                    audiences=current_app.config["GOOGLE_AUDIENCES"],
+                    nonce=data.get("nonce"),
+                )
+            else:
+                identity = verify_apple(
+                    data["identity_token"],
+                    audiences=current_app.config["APPLE_AUDIENCES"],
+                    nonce=data.get("nonce"),
+                )
+        except OAuthError as e:
+            abort(e.status_code, message=e.message, errors={"code": e.code})
+
+        try:
+            user, created = SocialAuthService.authenticate(
+                identity, name_hint=data.get("full_name")
+            )
+        except ConflictError as e:
+            # The app turns this into "sign in with your password once to
+            # connect Google", so the code matters as much as the message.
+            abort(409, message=e.message, errors={"code": "ACCOUNT_EXISTS"})
+        except (ValidationError, AuthError) as e:
+            abort(getattr(e, "status_code", 400), message=str(getattr(e, "message", e)))
+
+        login_user(user)
+        user.access_token = generate_auth_token(user.id)
+
+        try:
+            from app.signals import daily_login
+
+            daily_login.send("users", user_id=user.id)
+        except Exception as e:
+            logger.warning(f"gamification daily_login emit failed: {e}")
+
+        return user
 
 
 @bp.route("/login")
