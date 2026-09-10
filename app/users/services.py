@@ -22,6 +22,7 @@ from app.libs.errors import (
     UnverifiedEmailError,
 )
 from app.libs.pagination import Paginator
+from app.libs.geo import is_valid_coordinate
 from app.libs.email_service import email_service
 
 from app.products.models import Product
@@ -594,6 +595,21 @@ class UserService:
                 seller.description = data["description"]
             if "policies" in data:
                 seller.policies = data["policies"]
+            if "shop_address" in data:
+                seller.shop_address = data["shop_address"]
+
+            # Only written as a pair, and only when both are usable. A lone
+            # latitude is not a location, and (0, 0) is what a failed geocode
+            # looks like rather than a shop in the Gulf of Guinea.
+            if "shop_latitude" in data and "shop_longitude" in data:
+                lat, lng = data["shop_latitude"], data["shop_longitude"]
+                if is_valid_coordinate(lat, lng):
+                    seller.shop_latitude = lat
+                    seller.shop_longitude = lng
+                else:
+                    raise ValidationError(
+                        "That doesn't look like a valid shop location."
+                    )
 
             # Handle category updates
             if "category_ids" in data:

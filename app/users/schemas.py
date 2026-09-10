@@ -109,6 +109,17 @@ class SellerUpdateSchema(Schema):
     category_ids = fields.List(fields.Int(), description="List of category IDs")
     policies = fields.Dict()
 
+    # Where the shop actually is. The columns existed but nothing could set
+    # them -- the only writes in the codebase were to None, on account
+    # deletion -- so every seller was unlocated and the proximity feed could
+    # never rank anyone. This is what gives it data.
+    #
+    # Sent as a pair or not at all: one coordinate without the other is not a
+    # location, and storing half of one would place the shop in the ocean.
+    shop_latitude = fields.Float(validate=validate.Range(-90, 90))
+    shop_longitude = fields.Float(validate=validate.Range(-180, 180))
+    shop_address = fields.Dict()
+
 
 class UserLoginSchema(Schema):
     email = fields.Email(required=True)
