@@ -29,6 +29,7 @@ def register_blueprints(app, api):
         "metrics",
         "markets",
         "moderation",
+        "location",
     ]
 
     for module in modules:
