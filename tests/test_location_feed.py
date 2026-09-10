@@ -108,3 +108,59 @@ def test_the_box_corner_is_rejected_by_the_haversine_pass():
         result = scoped_products(*IKEJA, limit=5)
 
     assert result["scope"] != LocationScope.NEARBY
+
+
+# ---------------------------------------------------------------------------
+# Seller shop location — the thing that gives the feed data at all
+# ---------------------------------------------------------------------------
+
+
+def test_seller_update_schema_accepts_shop_coordinates():
+    """The columns existed but nothing could write them: the only assignments
+    in the codebase set them to None on account deletion, so every seller was
+    unlocated and the proximity feed could never rank anyone."""
+    from app.users.schemas import SellerUpdateSchema
+
+    fields = SellerUpdateSchema().fields
+    assert "shop_latitude" in fields
+    assert "shop_longitude" in fields
+
+
+def test_shop_coordinates_are_written_as_a_pair():
+    """One coordinate without the other is not a location, and storing half of
+    one would place the shop in the ocean."""
+    from app.users import services as user_services
+
+    seller = MagicMock()
+    seller.shop_latitude = None
+    seller.shop_longitude = None
+
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.first.return_value = seller
+    scope = MagicMock()
+    scope.__enter__ = MagicMock(return_value=session)
+    scope.__exit__ = MagicMock(return_value=False)
+
+    with patch.object(user_services, "session_scope", return_value=scope):
+        user_services.UserService.update_seller_profile("USR_1", {"shop_latitude": 6.6})
+
+    assert seller.shop_latitude is None, "a lone latitude must not be stored"
+
+
+def test_zero_zero_shop_location_is_refused():
+    """(0, 0) is what a failed geocode looks like, not a shop."""
+    from app.libs.errors import ValidationError
+    from app.users import services as user_services
+
+    seller = MagicMock()
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.first.return_value = seller
+    scope = MagicMock()
+    scope.__enter__ = MagicMock(return_value=session)
+    scope.__exit__ = MagicMock(return_value=False)
+
+    with patch.object(user_services, "session_scope", return_value=scope):
+        with pytest.raises(ValidationError):
+            user_services.UserService.update_seller_profile(
+                "USR_1", {"shop_latitude": 0, "shop_longitude": 0}
+            )
