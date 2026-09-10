@@ -44,48 +44,60 @@ REF_REACTION = "reaction"
 # --- Tiers / Stars (Appendix C) ------------------------------------------------
 # Ordered ascending by min_lifetime_points. Colours are placeholders pending the
 # Blink Graphics palette; the API exposes them so the client never hard-codes.
+# Tier colours are a single ascending ramp inside the brand family.
+#
+# They used to be six unrelated hues -- slate, sienna, grey, orange, teal and
+# #3A86FF, a vivid blue -- picked without reference to the palette. Because
+# they live in the database they bypassed the app's design tokens entirely and
+# were invisible to its colour linter, which is how a blue accent ended up
+# rendering inside an orange app.
+#
+# The app now derives a *theme-aware* colour from the tier key instead of
+# reading these, so a tier badge is correct in both light and dark. These
+# values remain as the fallback for any other consumer (email, a future web
+# client) and so an older app build still shows something on-brand.
 TIER_SEED = [
     {
         "tier": "newcomer",
         "name": "Newcomer",
         "star_count": 0,
         "min_lifetime_points": 0,
-        "color_hex": "#5C677D",
+        "color_hex": "#6B6B75",  # neutral: a tier you have not earned colour for yet
     },
     {
         "tier": "hustler",
         "name": "Hustler",
         "star_count": 1,
         "min_lifetime_points": 100,
-        "color_hex": "#A0522D",
+        "color_hex": "#F4A98F",  # the brand at its lightest
     },
     {
         "tier": "trader",
         "name": "Trader",
         "star_count": 2,
         "min_lifetime_points": 500,
-        "color_hex": "#9AA0A6",
+        "color_hex": "#F4805F",  # primaryText
     },
     {
         "tier": "merchant",
         "name": "Merchant",
         "star_count": 3,
         "min_lifetime_points": 1500,
-        "color_hex": "#E36414",
+        "color_hex": "#E94C2A",  # the brand itself
     },
     {
         "tier": "magnate",
         "name": "Magnate",
         "star_count": 4,
         "min_lifetime_points": 5000,
-        "color_hex": "#0F4C5C",
+        "color_hex": "#C93E1F",  # primaryFill
     },
     {
         "tier": "mogul",
         "name": "Mogul",
         "star_count": 5,
         "min_lifetime_points": 15000,
-        "color_hex": "#3A86FF",
+        "color_hex": "#9E3B22",  # the deepest step in the family
     },
 ]
 
