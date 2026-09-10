@@ -28,6 +28,7 @@ from app.libs.email_service import email_service
 from app.products.models import Product
 from app.socials.models import Post, PostStatus, Follow, ProductView
 from .models import SocialAccount
+from . import verification
 from app.media.services import media_service
 from app.media.models import Media, MediaVariantType, MediaVariant
 from app.categories.models import Category, SellerCategory
@@ -251,8 +252,13 @@ class AuthService:
 
     @staticmethod
     def generate_verification_code():
-        """Generate a 6-digit verification code"""
-        return str(random.randint(100000, 999999))
+        """A 6-digit code from a cryptographically secure source.
+
+        See app/users/verification.py: this used `random.randint`, a Mersenne
+        Twister, whose state is recoverable from enough outputs. Fine for
+        shuffling a feed, not for a credential.
+        """
+        return verification.generate_code()
 
     @staticmethod
     def send_email_verification(email: str):
@@ -264,6 +270,10 @@ class AuthService:
 
             if user.email_verified:
                 raise AuthError("Email already verified")
+
+            # Refuse before generating: an unlimited resend is a free way to
+            # use Markt's mail quota to send someone email they did not ask for.
+            verification.assert_can_send(user.email)
 
             # Generate verification code
             verification_code = AuthService.generate_verification_code()
@@ -285,6 +295,10 @@ class AuthService:
                 redis_client.delete_verification_code(user.email)
                 raise AuthError("Failed to send verification email")
 
+            # Only counted once the mail actually went out, so a provider
+            # outage does not burn the user's hourly allowance.
+            verification.record_send(user.email)
+
             return True
 
     @staticmethod
@@ -298,15 +312,28 @@ class AuthService:
             if user.email_verified:
                 raise AuthError("Email already verified")
 
-            # Verify code from Redis
+            # A 6-digit code with unlimited attempts is a 1-in-a-million guess
+            # repeated as fast as requests can be sent. Nothing counted before.
+            verification.assert_can_attempt(user.email)
+
             if not redis_client.verify_verification_code(user.email, verification_code):
-                raise AuthError("Invalid or expired verification code")
+                remaining = verification.record_failure(user.email)
+                raise AuthError(
+                    "That code isn't right."
+                    + (
+                        f" {remaining} attempt{'s' if remaining != 1 else ''} left."
+                        if remaining
+                        else " Please request a new one."
+                    )
+                )
 
             # Mark email as verified
             user.email_verified = True
 
             # Clean up verification code from Redis
             redis_client.delete_verification_code(user.email)
+            # Counters cleared so a later email change starts fresh.
+            verification.clear(user.email)
 
             return True
 
