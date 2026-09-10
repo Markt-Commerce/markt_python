@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from external.database import db
 from external.redis import redis_client
 from app.libs.session import session_scope
+from app.libs.market_time import market_today
 
 from . import leaderboard, tier_engine, badge_engine
 from .constants import (
@@ -589,7 +590,7 @@ def get_me(user_id: str) -> dict:
             "last_active_date": last_active,
             # Whether today is already counted, so the app can show a live
             # streak without having to guess from a date.
-            "active_today": last_active == datetime.utcnow().date(),
+            "active_today": last_active == market_today(),
         },
     }
 
@@ -605,7 +606,10 @@ def advance_streak(user_id: str) -> dict:
     Dates, not timestamps: "did they show up today" is a calendar question, and
     comparing times drags timezone drift into it.
     """
-    today = datetime.utcnow().date()
+    # The market's day, not UTC's. With utcnow() the streak rolled over at
+    # 01:00 in Lagos, so someone opening the app at 00:30 had it counted
+    # against yesterday and could lose a streak they had not broken.
+    today = market_today()
     with session_scope() as session:
         stats = _get_or_create_stats(session, user_id)
         last = stats.last_active_date

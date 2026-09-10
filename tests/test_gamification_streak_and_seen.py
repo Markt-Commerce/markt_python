@@ -5,7 +5,7 @@ backgrounded when it fired, and a local flag cannot be shared with a second
 device. The server holds the acknowledgement instead.
 """
 
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,6 +13,7 @@ import pytest
 from app.gamification import services
 from app.gamification.constants import STREAK_MILESTONES
 from app.gamification.models import UserStats
+from app.libs.market_time import market_today
 
 
 def _scope(session):
@@ -58,14 +59,14 @@ def test_first_ever_login_starts_at_one():
 
 
 def test_consecutive_day_increments():
-    stats = _stats(streak_days=4, last_active_date=date.today() - timedelta(days=1))
+    stats = _stats(streak_days=4, last_active_date=market_today() - timedelta(days=1))
     _advance(stats)
     assert stats.streak_days == 5
 
 
 def test_same_day_login_is_idempotent():
     """Logging in five times today must not award a five-day streak."""
-    stats = _stats(streak_days=3, last_active_date=date.today())
+    stats = _stats(streak_days=3, last_active_date=market_today())
     result = _advance(stats)
     assert stats.streak_days == 3
     assert result["is_new_day"] is False
@@ -74,7 +75,7 @@ def test_same_day_login_is_idempotent():
 def test_gap_restarts_at_one_not_zero():
     """The user *is* here today. Showing them 0 would be both wrong and
     discouraging."""
-    stats = _stats(streak_days=9, last_active_date=date.today() - timedelta(days=3))
+    stats = _stats(streak_days=9, last_active_date=market_today() - timedelta(days=3))
     _advance(stats)
     assert stats.streak_days == 1
 
@@ -83,7 +84,7 @@ def test_longest_streak_survives_a_break():
     stats = _stats(
         streak_days=9,
         longest_streak=9,
-        last_active_date=date.today() - timedelta(days=3),
+        last_active_date=market_today() - timedelta(days=3),
     )
     _advance(stats)
     assert stats.streak_days == 1
@@ -94,7 +95,7 @@ def test_longest_streak_advances_with_a_new_best():
     stats = _stats(
         streak_days=9,
         longest_streak=9,
-        last_active_date=date.today() - timedelta(days=1),
+        last_active_date=market_today() - timedelta(days=1),
     )
     _advance(stats)
     assert stats.longest_streak == 10
@@ -103,7 +104,7 @@ def test_longest_streak_advances_with_a_new_best():
 @pytest.mark.parametrize("day", sorted(STREAK_MILESTONES)[:4])
 def test_milestone_days_are_flagged(day):
     stats = _stats(
-        streak_days=day - 1, last_active_date=date.today() - timedelta(days=1)
+        streak_days=day - 1, last_active_date=market_today() - timedelta(days=1)
     )
     result = _advance(stats)
     assert result["streak_days"] == day
@@ -111,7 +112,7 @@ def test_milestone_days_are_flagged(day):
 
 
 def test_ordinary_day_is_not_a_milestone():
-    stats = _stats(streak_days=4, last_active_date=date.today() - timedelta(days=1))
+    stats = _stats(streak_days=4, last_active_date=market_today() - timedelta(days=1))
     result = _advance(stats)
     assert result["streak_days"] == 5
     assert result["is_milestone"] is False
@@ -180,3 +181,39 @@ def test_marking_the_current_tier_seen_works():
         result = services.mark_achievements_seen("USR_1", tier="gold")
     assert result["tier_marked"] is True
     assert stats.celebrated_tier == "gold"
+
+
+# ---------------------------------------------------------------------------
+# The market's calendar, not UTC's
+# ---------------------------------------------------------------------------
+
+
+def test_streak_uses_the_market_day_not_utc():
+    """`datetime.utcnow().date()` rolls the day over at 01:00 in Lagos.
+
+    A user opening the app at 00:30 had the visit counted against *yesterday*,
+    which could break a streak they had not actually broken. This caught itself
+    honestly: the suite began failing at 00:08 local, because the tests said
+    `date.today()` and the code said UTC.
+    """
+    import inspect
+
+    from app.gamification import services
+
+    src = inspect.getsource(services.advance_streak)
+    assert "market_today()" in src
+    assert "utcnow().date()" not in src
+
+
+def test_market_day_is_ahead_of_utc_in_the_first_hour():
+    from datetime import datetime, timedelta, timezone
+
+    from app.libs.market_time import MARKET_UTC_OFFSET, market_today
+
+    # 00:30 WAT on the 11th is 23:30 UTC on the 10th.
+    assert MARKET_UTC_OFFSET == timedelta(hours=1)
+    midnight_ish = datetime(2026, 9, 10, 23, 30, tzinfo=timezone.utc)
+    assert (midnight_ish + MARKET_UTC_OFFSET).date().day == 11
+    assert midnight_ish.date().day == 10
+    # And the helper agrees with itself.
+    assert market_today() == (datetime.now(timezone.utc) + MARKET_UTC_OFFSET).date()

@@ -8,7 +8,7 @@ Three branches were cut from the same revision and merged independently, so
 the chain forked again:
 
     c8e4b1f7a903 --> d5b82f1c04a7  (tier colours onto the brand ramp)
-                 \-> f2c9a7e14b06  (browse locations + seller coord index)
+                 -> f2c9a7e14b06  (browse locations + seller coord index)
 
 Structural only: no schema change, nothing to do in either direction. The two
 touch disjoint tables (`gam_tier_config` versus `browse_locations` / `sellers`),
