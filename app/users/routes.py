@@ -19,6 +19,7 @@ from app.libs.errors import (
 )
 from app.libs.auth_tokens import generate_auth_token
 from .oauth import verify_google, verify_apple, OAuthError
+from .verification import VerificationThrottled
 from app.libs.pagination import Paginator
 from app.libs.schemas import PaginationQueryArgs
 from app.media.schemas import MediaSchema
@@ -413,6 +414,11 @@ class SendEmailVerification(MethodView):
         try:
             AuthService.send_email_verification(data["email"])
             return {"message": "Verification email sent"}
+        except VerificationThrottled as e:
+            # A rate limit is 429, not 500. A 500 tells the app we broke
+            # when what we mean is "slow down", and the client has no way
+            # to tell the difference or know when to retry.
+            abort(429, message=e.message, errors={"retry_after": e.retry_after})
         except AuthError as e:
             abort(e.status_code, message=e.message)
         except Exception as e:
@@ -428,6 +434,11 @@ class VerifyEmail(MethodView):
         try:
             AuthService.verify_email(data["email"], data["verification_code"])
             return {"message": "Email verified successfully"}
+        except VerificationThrottled as e:
+            # A rate limit is 429, not 500. A 500 tells the app we broke
+            # when what we mean is "slow down", and the client has no way
+            # to tell the difference or know when to retry.
+            abort(429, message=e.message, errors={"retry_after": e.retry_after})
         except AuthError as e:
             abort(e.status_code, message=e.message)
         except Exception as e:
