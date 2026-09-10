@@ -146,6 +146,43 @@ class Config:
             "SETTLEMENT_HOLD_HOURS", default=12, cast=int
         )
 
+        # --- Social sign-in -------------------------------------------------
+        # Every one of these is an *audience* we accept identity tokens for.
+        # A token is only trusted if its `aud` matches one of them, which is
+        # what stops a token minted for another app being replayed at us.
+        #
+        # Google issues a separate client id per platform, and the id in the
+        # token's `aud` is the one belonging to the platform that signed in --
+        # so all three are accepted here, not just the web one. The web client
+        # id is also what the mobile app passes as `webClientId` to get an
+        # idToken at all.
+        self.GOOGLE_WEB_CLIENT_ID = config("GOOGLE_WEB_CLIENT_ID", default="")
+        self.GOOGLE_IOS_CLIENT_ID = config("GOOGLE_IOS_CLIENT_ID", default="")
+        self.GOOGLE_ANDROID_CLIENT_ID = config("GOOGLE_ANDROID_CLIENT_ID", default="")
+
+        # Apple's `aud` is the app's bundle identifier for a native iOS
+        # sign-in, and the Services ID for a web/Android one. Both accepted.
+        self.APPLE_BUNDLE_ID = config("APPLE_BUNDLE_ID", default="")
+        self.APPLE_SERVICES_ID = config("APPLE_SERVICES_ID", default="")
+
+    @property
+    def GOOGLE_AUDIENCES(self) -> list:
+        """Client ids we accept a Google token for. Empty entries dropped so an
+        unset variable can never widen the check to 'any audience'."""
+        return [
+            c
+            for c in (
+                self.GOOGLE_WEB_CLIENT_ID,
+                self.GOOGLE_IOS_CLIENT_ID,
+                self.GOOGLE_ANDROID_CLIENT_ID,
+            )
+            if c
+        ]
+
+    @property
+    def APPLE_AUDIENCES(self) -> list:
+        return [c for c in (self.APPLE_BUNDLE_ID, self.APPLE_SERVICES_ID) if c]
+
     @property
     def SQLALCHEMY_DATABASE_URI(self):
         return f"postgresql+psycopg2://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
