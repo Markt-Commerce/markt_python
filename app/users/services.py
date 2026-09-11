@@ -49,21 +49,82 @@ from .constants import (
 logger = logging.getLogger(__name__)
 
 
+def unique_username(session, seed: Optional[str]) -> str:
+    """A free username derived from a display name or an email address.
+
+    `username` is unique NOT NULL, but neither an OAuth provider nor the new
+    first-screen registration gives us one -- so one has to be minted.
+    Suffixed and retried on collision rather than trusting a single attempt:
+    two people called "Ada Obi" will collide, and so will two ada@ addresses
+    at different domains.
+    """
+    base = re.sub(r"[^a-zA-Z0-9_]", "", (seed or "").split("@")[0]) or "markt"
+    base = base[:14].lower() or "markt"
+    if len(base) < 3:
+        base = f"{base}user"
+
+    for _ in range(12):
+        candidate = f"{base}{random.randint(1000, 9999)}"
+        if not session.query(User).filter(User.username == candidate).first():
+            return candidate
+
+    # Vanishingly unlikely; a uuid tail is still better than raising at
+    # someone mid sign-in.
+    return f"{base}{uuid.uuid4().hex[:8]}"
+
+
+def shop_slug_for(session, shop_name: str, seller_id=None) -> str:
+    """A unique URL slug for a shop name.
+
+    `shop_slug` is a unique column that nothing ever wrote -- registration
+    left it NULL for every seller ever created, so no shop had a canonical
+    URL. Postgres allows many NULLs in a unique column, which is why this
+    never surfaced as an error.
+    """
+    base = re.sub(r"[^a-z0-9]+", "-", (shop_name or "").lower()).strip("-")[:90]
+    if len(base) < 2:
+        base = "shop"
+
+    for attempt in range(12):
+        candidate = base if attempt == 0 else f"{base}-{random.randint(100, 9999)}"
+        clash = session.query(Seller).filter(Seller.shop_slug == candidate).first()
+        if not clash or (seller_id is not None and clash.id == seller_id):
+            return candidate
+
+    return f"{base}-{uuid.uuid4().hex[:8]}"
+
+
 class AuthService:
     @staticmethod
     def register_user(data):
-        with session_scope() as session:
-            # Check existing user
-            if session.query(User).filter(User.email == data["email"]).first():
-                raise AuthError("Email already registered")
+        """Create the account from whatever the first screen collected.
 
-            if session.query(User).filter(User.username == data["username"]).first():
-                raise AuthError("Username already taken")
+        Everything except email, password and role is optional now. The
+        profile is filled in afterwards through the authenticated PATCH
+        endpoints -- see app/users/onboarding.py for why the order changed.
+        """
+        with session_scope() as session:
+            # ConflictError (409), not AuthError (401). Taking an address
+            # that exists is not an authentication failure, and 401 is the
+            # status every client treats as "your session died, sign out" --
+            # so a typo'd email on the signup screen used to read to the app
+            # as an expired session. The route already documented 409.
+            if session.query(User).filter(User.email == data["email"]).first():
+                raise ConflictError("Email already registered")
+
+            # A client that chose a username must still get it, and must still
+            # be told when it is taken. One that sent none gets a minted one.
+            username = (data.get("username") or "").strip()
+            if username:
+                if session.query(User).filter(User.username == username).first():
+                    raise ConflictError("Username already taken")
+            else:
+                username = unique_username(session, data["email"])
 
             # Create user
             user = User(
                 email=data["email"],
-                username=data["username"],
+                username=username,
                 phone_number=data.get("phone_number"),
                 is_buyer=(data["account_type"] == "buyer"),
                 is_seller=(data["account_type"] == "seller"),
@@ -77,29 +138,37 @@ class AuthService:
                 address = UserAddress(user_id=user.id, **data["address"])
                 session.add(address)
 
-            # Create buyer/seller profile
+            # Create the role's profile row, empty if the details have not been
+            # asked for yet. The row has to exist either way: `is_buyer` with
+            # no Buyer row is the state every "Buyer account not found" bug
+            # comes from, and the PATCH endpoints need something to update.
+            buyer_data = data.get("buyer_data") or {}
+            seller_data = data.get("seller_data") or {}
+
             if data["account_type"] == "buyer":
                 buyer = Buyer(
                     user_id=user.id,
-                    buyername=data["buyer_data"]["buyername"],
-                    shipping_address=data["buyer_data"].get("shipping_address"),
+                    buyername=buyer_data.get("buyername"),
+                    shipping_address=buyer_data.get("shipping_address"),
                 )
                 session.add(buyer)
             else:
+                shop_name = seller_data.get("shop_name")
                 seller = Seller(
                     user_id=user.id,
-                    shop_name=data["seller_data"]["shop_name"],
-                    description=data["seller_data"]["description"],
-                    policies=data["seller_data"].get("policies", {}),
+                    shop_name=shop_name,
+                    description=seller_data.get("description"),
+                    policies=seller_data.get("policies", {}),
+                    # Only once there is a name to derive it from; the shop
+                    # screen sets it later otherwise.
+                    shop_slug=shop_slug_for(session, shop_name) if shop_name else None,
                 )
                 session.add(seller)
                 session.flush()  # Get the seller ID
 
                 # Handle category relationships
-                if "category_ids" in data["seller_data"]:
-                    for idx, category_id in enumerate(
-                        data["seller_data"]["category_ids"]
-                    ):
+                if seller_data.get("category_ids"):
+                    for idx, category_id in enumerate(seller_data["category_ids"]):
                         # Verify category exists
                         category = session.query(Category).get(category_id)
                         if not category:
@@ -118,7 +187,29 @@ class AuthService:
             UserService._cache_current_role(user.id, user.current_role)
 
             session.commit()
-            return user
+
+            email = user.email
+
+        # Outside the transaction, and deliberately best-effort: the code is
+        # sent here so it is waiting when the verification screen opens, but a
+        # mail outage must not destroy an account that is already committed.
+        # The verification screen can always resend.
+        AuthService.try_send_email_verification(email)
+        return user
+
+    @staticmethod
+    def try_send_email_verification(email: str) -> bool:
+        """send_email_verification, but a failure is logged rather than raised.
+
+        For the paths where the code is a convenience -- sent alongside
+        something else that has already succeeded -- rather than the thing the
+        caller asked for.
+        """
+        try:
+            return AuthService.send_email_verification(email)
+        except Exception as e:  # noqa: BLE001 - deliberately swallowed
+            logger.warning("Could not send verification code to %s: %s", email, e)
+            return False
 
     @staticmethod
     def login_user(email, password, account_type=None):
@@ -363,25 +454,9 @@ class SocialAuthService:
 
     @staticmethod
     def _unique_username(session, seed: Optional[str]) -> str:
-        """A free username derived from the provider's name or email.
-
-        `username` is unique NOT NULL, and the provider gives us no say in it,
-        so one has to be minted. Suffixed and retried on collision rather than
-        trusting a single attempt -- two people called "Ada Obi" will collide.
-        """
-        base = re.sub(r"[^a-zA-Z0-9_]", "", (seed or "").split("@")[0]) or "markt"
-        base = base[:14].lower() or "markt"
-        if len(base) < 3:
-            base = f"{base}user"
-
-        for _ in range(12):
-            candidate = f"{base}{random.randint(1000, 9999)}"
-            if not session.query(User).filter(User.username == candidate).first():
-                return candidate
-
-        # Vanishingly unlikely; a uuid tail is still better than raising at
-        # someone mid sign-in.
-        return f"{base}{uuid.uuid4().hex[:8]}"
+        """Kept as an alias: this was a SocialAuthService detail until email
+        registration needed the same thing."""
+        return unique_username(session, seed)
 
     @staticmethod
     def authenticate(identity: Dict[str, Any], *, name_hint: Optional[str] = None):
@@ -618,6 +693,14 @@ class UserService:
 
             if "shop_name" in data:
                 seller.shop_name = data["shop_name"]
+                # Registration no longer has a shop name to derive this from,
+                # so the shop screen is where a slug first becomes possible.
+                # Only minted once: a shop that renames keeps its URL, because
+                # changing it silently breaks every link already shared.
+                if not seller.shop_slug:
+                    seller.shop_slug = shop_slug_for(
+                        session, data["shop_name"], seller_id=seller.id
+                    )
             if "description" in data:
                 seller.description = data["description"]
             if "policies" in data:
@@ -1015,6 +1098,7 @@ class AccountService:
                 shop_name=data["shop_name"],
                 description=data["description"],
                 policies=data.get("policies", {}),
+                shop_slug=shop_slug_for(session, data["shop_name"]),
             )
             session.add(seller)
             session.flush()  # Get the seller ID

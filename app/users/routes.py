@@ -89,6 +89,8 @@ class UserRegister(MethodView):
             login_user(user)
             user.access_token = generate_auth_token(user.id)
             return user
+        except ConflictError as e:
+            abort(e.status_code, message=e.message)
         except AuthError as e:
             abort(e.status_code, message=e.message)
         except ValueError as e:

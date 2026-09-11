@@ -111,6 +111,7 @@ jobs:
           pytest tests/ -v --tb=short
           --ignore=tests/test_inventory_concurrency.py
           --ignore=tests/test_delivery_run_capacity_concurrency.py
+          --ignore=tests/test_registration_verify_first.py
 
   db-integration-tests:
     name: Database integration tests
@@ -132,12 +133,30 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+      # The registration tests drive the real verification flow, and the
+      # codes and their rate-limit counters live in Redis. Without it the
+      # limiter fails closed (deliberately -- see app/users/verification.py)
+      # and no code is ever issued, so the verify step would have nothing to
+      # submit.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     env:
       DB_HOST: localhost
       DB_PORT: 5432
       DB_USER: markt
       DB_PASSWORD: markt123
       DB_NAME: markt_db
+      REDIS_HOST: localhost
+      REDIS_PORT: "6379"
+      REDIS_DB: "0"
       # Only set here: this job's Postgres is a fresh, disposable service
       # container, destroyed with the job. Tests gated on this must never
       # run against a real developer's configured database -- see
@@ -161,6 +180,24 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements/dev-requirements.txt
+
+      # The registration and discovery tests run against the migrated
+      # schema, so the migrations have to have been applied. This also
+      # exercises `flask db upgrade` from an empty database on every push,
+      # which is the thing the deploy job does first.
+      - name: Apply migrations
+        env:
+          FLASK_APP: main.setup:create_flask_app
+        run: flask db upgrade
+
+      # Separate step, and before the concurrency tests, on purpose: those
+      # call db.drop_all() in their teardown, which removes the tables these
+      # need. Running them in one pytest process leaves whichever goes second
+      # against a schema the other destroyed.
+      - name: Run real-database endpoint tests
+        run: >-
+          pytest tests/test_registration_verify_first.py
+          -v --tb=short
 
       # Only the tests that actually need a real database -- the two
       # real-connection concurrency tests. Everything else already ran in

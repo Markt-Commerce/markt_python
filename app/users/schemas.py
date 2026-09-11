@@ -89,6 +89,24 @@ class UserRegisterSchema(UserSchema):
     account_type = fields.Str(
         required=True, validate=validate.OneOf(["buyer", "seller"])
     )
+
+    # Overrides UserSchema's `required=True`. Registration now happens on the
+    # first screen, which asks for an email and a password and nothing else --
+    # so there is no username to send, and the server mints one. A client that
+    # does have one (the old flow, or a "pick your handle" screen later) can
+    # still supply it and it is honoured.
+    username = fields.Str(
+        required=False,
+        validate=[
+            validate.Length(min=3, max=20),
+            validate.Regexp(r"^[a-zA-Z0-9_]+$"),
+        ],
+    )
+
+    # Likewise optional. The profile is filled in afterwards, through
+    # PATCH /users/profile/buyer and /users/profile/seller, by which point the
+    # account exists and the request is authenticated. Still accepted here so
+    # a caller that has the data up front is not forced into two round trips.
     buyer_data = fields.Nested(BuyerCreateSchema)
     seller_data = fields.Nested(SellerCreateSchema)
 
@@ -180,10 +198,26 @@ class UserPaginationSchema(Schema):
     pagination = fields.Nested(PaginationSchema)
 
 
+class OnboardingStateSchema(Schema):
+    """Where this account stands in signup, so the client knows where to
+    resume after an interruption instead of inferring it from blank fields."""
+
+    email_verified = fields.Bool(dump_only=True)
+    profile_complete = fields.Bool(dump_only=True)
+    next_step = fields.Str(dump_only=True, allow_none=True)
+
+
 class UserProfileSchema(UserSchema):
     address = fields.Nested(lambda: AddressSchema(), dump_only=True)
     buyer_account = fields.Nested(lambda: BuyerProfileSchema(), dump_only=True)
     seller_account = fields.Nested(lambda: SellerProfileSchema(), dump_only=True)
+    onboarding = fields.Method("get_onboarding", dump_only=True)
+
+    def get_onboarding(self, obj):
+        from .onboarding import state
+
+        return state(obj)
+
     # media_uploads = fields.List(fields.Nested("MediaSchema"), dump_only=True)
 
 
