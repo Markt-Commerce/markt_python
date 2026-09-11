@@ -1973,6 +1973,10 @@ class ShopService:
                 shop_data = {
                     "id": shop.id,
                     "shop_name": shop.shop_name,
+                    # The shop page used to blow the seller's avatar up to
+                    # full width for its cover, so every shop showed the same
+                    # picture twice.
+                    "banner_url": shop.banner_url,
                     "shop_slug": shop.shop_slug,
                     "description": shop.description,
                     "categories": [
