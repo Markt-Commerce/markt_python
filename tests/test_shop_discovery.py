@@ -127,12 +127,19 @@ class SimpleCategory:
 
 
 def _search(app, shops, **args):
-    """Run a search and keep only the shops this test created."""
+    """Run a search scoped to the shops this test created.
+
+    Scoped in the *query*, via the marker in each shop name, not by filtering
+    the result afterwards. Filtering afterwards was not isolation: the radius
+    ladder still saw every other shop in the database, so a rung could fill up
+    with rows belonging to nobody and stop widening — which made these tests
+    pass against an empty database and fail against a populated one. That is
+    the worst possible way round.
+    """
     args.setdefault("per_page", 50)
+    args.setdefault("search", shops.marker)
     with app.app_context():
-        result = ShopService.search_shops(args)
-    result["shops"] = [s for s in result["shops"] if shops.marker in s["shop_name"]]
-    return result
+        return ShopService.search_shops(args)
 
 
 def _names(result):

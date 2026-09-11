@@ -74,6 +74,12 @@ class UserStats(BaseModel):
     streak_days = db.Column(db.Integer, nullable=False, default=0)
     longest_streak = db.Column(db.Integer, nullable=False, default=0)
     last_active_date = db.Column(db.Date, nullable=True)
+    # The last milestone actually shown to the user, so a streak celebration
+    # survives the socket the way a tier-up does. Without it the streak event
+    # is emitted during the login request -- before the app has a user id, and
+    # therefore before it has connected its socket -- so it is always lost on
+    # the one occasion it matters most.
+    celebrated_streak = db.Column(db.Integer, nullable=True)
 
 
 class SellerStats(BaseModel):

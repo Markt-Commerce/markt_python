@@ -32,6 +32,7 @@ def _stats(**kw):
     s.last_active_date = kw.get("last_active_date")
     s.current_tier = kw.get("current_tier", "newcomer")
     s.celebrated_tier = kw.get("celebrated_tier")
+    s.celebrated_streak = kw.get("celebrated_streak")
     return s
 
 
@@ -217,3 +218,88 @@ def test_market_day_is_ahead_of_utc_in_the_first_hour():
     assert midnight_ish.date().day == 10
     # And the helper agrees with itself.
     assert market_today() == (datetime.now(timezone.utc) + MARKET_UTC_OFFSET).date()
+
+
+# ---------------------------------------------------------------------------
+# The streak has to survive the socket
+# ---------------------------------------------------------------------------
+
+
+def test_a_missed_milestone_is_offered_on_next_open():
+    """The bug these exist for.
+
+    `daily_login` fires inside the login request, so `emit_streak` runs before
+    the client has a user id -- and the client only connects its gamification
+    socket once it has one. The realtime event is therefore guaranteed to be
+    lost on sign-in, which is the exact moment it exists for. Badges and tiers
+    already survived this because the server records what it has acknowledged;
+    the streak did not.
+    """
+    stats = _stats(streak_days=7, longest_streak=7, celebrated_streak=3)
+    result = _unseen(stats)
+
+    assert result["streak"] is not None
+    assert result["streak"]["streak_days"] == 7
+    assert result["streak"]["is_milestone"] is True
+
+
+def test_first_sight_of_a_user_records_the_streak_without_celebrating():
+    """Same reasoning as the tier: NULL means "never celebrated", and treating
+    it as "owes a celebration" would fire at everyone mid-streak on deploy."""
+    stats = _stats(streak_days=7, celebrated_streak=None)
+    result = _unseen(stats)
+
+    assert result["streak"] is None
+    assert stats.celebrated_streak == 7
+
+
+def test_an_already_celebrated_milestone_is_not_offered_again():
+    stats = _stats(streak_days=7, celebrated_streak=7)
+    assert _unseen(stats)["streak"] is None
+
+
+def test_a_day_that_is_not_a_milestone_is_not_offered():
+    """Only 3, 7, 14, 30... get the overlay. A celebration every single day is
+    not a celebration."""
+    day = 5
+    assert day not in STREAK_MILESTONES
+    stats = _stats(streak_days=day, celebrated_streak=3)
+    assert _unseen(stats)["streak"] is None
+
+
+def test_acknowledging_a_streak_records_it():
+    session = MagicMock()
+    stats = _stats(streak_days=7, celebrated_streak=3)
+    session.query.return_value.filter_by.return_value.first.return_value = stats
+
+    with patch.object(services, "session_scope", return_value=_scope(session)):
+        result = services.mark_achievements_seen("USR_1", streak=7)
+
+    assert result["streak_marked"] is True
+    assert stats.celebrated_streak == 7
+
+
+def test_a_streak_that_moved_mid_celebration_is_still_marked():
+    """The overlay is acknowledged after the animation, which takes long
+    enough that the count could advance underneath it. Requiring an exact
+    match would leave the milestone unmarked and replay it on next open."""
+    session = MagicMock()
+    stats = _stats(streak_days=8, celebrated_streak=3)
+    session.query.return_value.filter_by.return_value.first.return_value = stats
+
+    with patch.object(services, "session_scope", return_value=_scope(session)):
+        result = services.mark_achievements_seen("USR_1", streak=7)
+
+    assert result["streak_marked"] is True
+    assert stats.celebrated_streak == 7
+
+
+def test_acknowledging_a_streak_never_moves_the_marker_backwards():
+    session = MagicMock()
+    stats = _stats(streak_days=30, celebrated_streak=14)
+    session.query.return_value.filter_by.return_value.first.return_value = stats
+
+    with patch.object(services, "session_scope", return_value=_scope(session)):
+        services.mark_achievements_seen("USR_1", streak=7)
+
+    assert stats.celebrated_streak == 14

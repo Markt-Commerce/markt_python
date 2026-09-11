@@ -110,6 +110,7 @@ class MarkAchievementsSeen(MethodView):
             current_user.id,
             badge_slugs=data.get("badge_slugs"),
             tier=data.get("tier"),
+            streak=data.get("streak"),
         )
 
 
