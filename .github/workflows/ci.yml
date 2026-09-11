@@ -182,31 +182,29 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements/dev-requirements.txt
 
-      # The registration and discovery tests run against the migrated
-      # schema, so the migrations have to have been applied. This also
-      # exercises `flask db upgrade` from an empty database on every push,
-      # which is the thing the deploy job does first.
+      # Order matters, and these have to be separate pytest processes.
+      #
+      # The concurrency tests build their own schema with db.create_all() and
+      # tear it down with db.drop_all(), so they need a database they own.
+      # They run first, against the empty service container, and hand it back
+      # empty. Migrations then build the real schema for the tests that need
+      # it. Doing it the other way round leaves drop_all() trying to remove
+      # tables that migrated tables still hold foreign keys into.
+      - name: Run real-database concurrency/integration tests
+        run: >-
+          pytest tests/test_inventory_concurrency.py
+          tests/test_delivery_run_capacity_concurrency.py
+          -v --tb=short
+
+      # Also exercises `flask db upgrade` from an empty database on every
+      # push, which is the first thing the deploy job does.
       - name: Apply migrations
         env:
           FLASK_APP: main.setup:create_flask_app
         run: flask db upgrade
 
-      # Separate step, and before the concurrency tests, on purpose: those
-      # call db.drop_all() in their teardown, which removes the tables these
-      # need. Running them in one pytest process leaves whichever goes second
-      # against a schema the other destroyed.
       - name: Run real-database endpoint tests
         run: >-
           pytest tests/test_registration_verify_first.py
           tests/test_shop_discovery.py
-          -v --tb=short
-
-      # Only the tests that actually need a real database -- the two
-      # real-connection concurrency tests. Everything else already ran in
-      # the test job above; re-running the full suite here would just
-      # duplicate that signal against a slower, service-container job.
-      - name: Run real-database concurrency/integration tests
-        run: >-
-          pytest tests/test_inventory_concurrency.py
-          tests/test_delivery_run_capacity_concurrency.py
           -v --tb=short

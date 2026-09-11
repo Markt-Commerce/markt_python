@@ -88,6 +88,30 @@ class Database:
                 DeliveryFailure,
             )
 
+            # These three had drifted off the list. It works anyway at runtime
+            # -- registering a blueprint imports its models on the way -- but
+            # that is import order doing by accident what this list exists to
+            # do on purpose, and anything that builds metadata *without* the
+            # blueprints (db.create_all in a test, an autogenerate run) simply
+            # does not see them. browse_locations has a foreign key to users,
+            # so its absence made db.drop_all() unable to drop `users` at all.
+            from app.gamification.models import (
+                PointsLedger,
+                UserStats,
+                SellerStats,
+                Badge,
+                UserBadge,
+                TierConfig,
+                LeaderboardSnapshot,
+            )
+            from app.wallet.models import (
+                WalletAccount,
+                WalletEntry,
+                WithdrawalRequest,
+                WalletTopUp,
+            )
+            from app.location.models import BrowseLocation
+
         # Import other models as needed
 
 
