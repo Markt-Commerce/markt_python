@@ -11,12 +11,35 @@ def validate_nigerian_phone(value):
         raise ValidationError("Invalid Nigerian phone format. Use +234 or local format")
 
 
+class NormalisedEmail(fields.Email):
+    """An email address, lowercased on the way in.
+
+    `users.email` is unique, but uniqueness is over the *string* -- so
+    "Ada@example.com" and "ada@example.com" are two different rows and the
+    duplicate check in register_user never fires. Signing up twice with what
+    anyone would call the same address produced two unrelated accounts, and
+    then signing in with the other capitalisation silently landed on the wrong
+    one.
+
+    Normalising here rather than in each service means every entry point gets
+    it: register, login, both verification endpoints and both password-reset
+    endpoints. The local part of an address is technically case-sensitive per
+    RFC 5321, but no mail provider anyone uses treats it that way, and a
+    marketplace that lets one person hold two accounts on one inbox is a
+    worse problem than that edge case.
+    """
+
+    def _deserialize(self, value, attr, data, **kwargs):
+        value = super()._deserialize(value, attr, data, **kwargs)
+        return value.strip().lower() if isinstance(value, str) else value
+
+
 class UserSchema(Schema):
     class Meta:
         unknown = EXCLUDE
 
     id = fields.Str(dump_only=True)
-    email = fields.Email(required=True)
+    email = NormalisedEmail(required=True)
     phone_number = fields.Str(validate=validate_nigerian_phone)
     username = fields.Str(
         required=True,
@@ -151,7 +174,7 @@ class SellerUpdateSchema(Schema):
 
 
 class UserLoginSchema(Schema):
-    email = fields.Email(required=True)
+    email = NormalisedEmail(required=True)
     password = fields.Str(required=True, load_only=True)
     account_type = fields.Str(
         required=False,
@@ -161,11 +184,11 @@ class UserLoginSchema(Schema):
 
 
 class PasswordResetSchema(Schema):
-    email = fields.Email(required=True)
+    email = NormalisedEmail(required=True)
 
 
 class PasswordResetConfirmSchema(Schema):
-    email = fields.Email(required=True)
+    email = NormalisedEmail(required=True)
     code = fields.Str(required=True, validate=validate.Length(equal=6))
     new_password = fields.Str(
         required=True,
@@ -188,11 +211,11 @@ class PasswordResetResponseSchema(Schema):
 
 
 class EmailVerificationSendSchema(Schema):
-    email = fields.Email(required=True)
+    email = NormalisedEmail(required=True)
 
 
 class EmailVerificationSchema(Schema):
-    email = fields.Email(required=True)
+    email = NormalisedEmail(required=True)
     verification_code = fields.Str(required=True, validate=validate.Length(equal=6))
 
 
