@@ -486,7 +486,10 @@ class AuthService:
             # Counters cleared so a later email change starts fresh.
             verification.clear(user.email)
 
-            return True
+            # Returned rather than True: the route issues this account's
+            # credentials off the back of it, because this is the moment the
+            # account becomes usable.
+            return user
 
 
 class SocialAuthService:

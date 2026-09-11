@@ -108,6 +108,21 @@ def _email():
     return f"test-{uuid.uuid4().hex[:10]}@markt.test"
 
 
+def _complete(client, sent, email):
+    """Register's follow-through: submit the code, which is what signs you in.
+
+    Register hands back no credentials, so anything authenticated has to go
+    through here first — which is the flow the app follows too.
+    """
+    code = [m for m in sent if m["email"] == email][-1]["code"]
+    resp = client.post(
+        f"{API}/email-verification/verify",
+        json={"email": email, "verification_code": code},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    return resp
+
+
 def _verify(app, email):
     """Mark an account verified directly.
 
@@ -148,7 +163,10 @@ def test_email_and_password_alone_create_an_account(client, created, sent):
     body = resp.get_json()
     assert body["email"] == email
     assert body["username"], "a username should have been minted"
-    assert body.get("access_token"), "the client needs a token to finish signup"
+    # Deliberately no token. Creating the account and handing over
+    # credentials in the same breath is what let an unverified account into
+    # the marketplace; the verify endpoint issues them instead.
+    assert not body.get("access_token"), "register must not hand over credentials"
 
 
 def test_the_account_is_reachable_and_unverified(client, created, sent, app):
@@ -307,9 +325,11 @@ def test_an_unverified_account_still_knows_where_to_resume(client, created, sent
     email, resp = _register(client, created)
     assert resp.status_code == 201
 
-    profile = client.get(f"{API}/profile")
-    assert profile.status_code == 200
-    assert profile.get_json()["onboarding"]["next_step"] == "verify_email"
+    # No session yet, so /profile is not reachable -- which is the point.
+    assert client.get(f"{API}/profile").status_code == 401
+
+    # The register response itself carries where to resume.
+    assert resp.get_json()["onboarding"]["next_step"] == "verify_email"
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +344,7 @@ def test_the_minted_username_can_be_changed(client, created, sent):
     meant to stop repeating."""
     email, resp = _register(client, created)
     minted = resp.get_json()["username"]
+    _complete(client, sent, email)
 
     handle = f"ada{uuid.uuid4().hex[:8]}"
     changed = client.patch(f"{API}/profile", json={"username": handle})
@@ -336,14 +357,16 @@ def test_a_taken_username_is_refused_rather_than_swapped(client, created, sent):
     first_email, first = _register(client, created)
     taken = first.get_json()["username"]
 
-    _register(client, created)  # logs the client in as the second account
+    second_email, _ = _register(client, created)
+    _complete(client, sent, second_email)  # now signed in as the second account
     clash = client.patch(f"{API}/profile", json={"username": taken})
 
     assert clash.status_code == 409, clash.get_data(as_text=True)
 
 
 def test_a_reserved_username_is_refused(client, created, sent):
-    _register(client, created)
+    email, _ = _register(client, created)
+    _complete(client, sent, email)
     resp = client.patch(f"{API}/profile", json={"username": "admin"})
     assert resp.status_code == 409, resp.get_data(as_text=True)
 
@@ -352,6 +375,7 @@ def test_keeping_your_own_username_is_not_a_conflict(client, created, sent):
     """Re-submitting an unchanged form must not collide with itself."""
     email, resp = _register(client, created)
     mine = resp.get_json()["username"]
+    _complete(client, sent, email)
 
     again = client.patch(f"{API}/profile", json={"username": mine})
     assert again.status_code == 200, again.get_data(as_text=True)

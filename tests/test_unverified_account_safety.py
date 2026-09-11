@@ -76,13 +76,24 @@ def created(app):
 
 
 @pytest.fixture(autouse=True)
-def _no_mail():
-    """Never reach Resend from a test run."""
+def sent():
+    """Captures verification emails instead of sending them.
+
+    Never reaches Resend -- settings.ini carries a live key. Capturing also
+    gives the tests the code, which is the only way to drive verification
+    honestly.
+    """
+    outbox = []
+
+    def fake_send(email, verification_code, username=None, **kw):
+        outbox.append({"email": email, "code": verification_code})
+        return True
+
     with patch(
         "app.libs.email_service.email_service.send_verification_email",
-        return_value=True,
+        side_effect=fake_send,
     ):
-        yield
+        yield outbox
 
 
 def _email():
@@ -213,12 +224,44 @@ def test_a_verified_account_passes(decorator, app):
         assert _decorated(decorator)() == "reached"
 
 
-def test_finishing_the_profile_still_works_while_unverified(client, created):
-    """The gate must not lock someone out of the signup they are standing in.
-    The onboarding endpoints deliberately do not use the role decorators."""
+def test_register_hands_over_no_credentials(client, created):
+    """The strongest form of "an unverified account cannot do anything".
+
+    It used to be enforced by decorators, which meant the account held a
+    working token and was trusted not to use it anywhere that mattered. Now
+    it holds nothing at all: the verify endpoint is what issues credentials,
+    so proving you own the address is the thing that buys access rather than
+    a step the client is trusted to honour.
+
+    (This replaces a test asserting the profile could still be filled in
+    while unverified. That ordering no longer exists -- verification now
+    comes before the profile step, on the client and on the server.)
+    """
+    email = _email()
+    resp = _register(client, created, email)
+    assert resp.status_code == 201
+    assert not resp.get_json().get("access_token")
+
+    # And nothing authenticated is reachable with what register handed back.
+    assert client.get(f"{API}/profile").status_code == 401
+
+
+def test_verifying_is_what_signs_you_in(client, created, sent):
+    """Register sends the code, so this uses the one it actually sent rather
+    than asking for another -- a resend inside 60 seconds is refused, which is
+    the rate limit doing its job."""
     email = _email()
     assert _register(client, created, email).status_code == 201
 
-    named = client.patch(f"{API}/profile/buyer", json={"buyername": "Amaka Obi"})
-    assert named.status_code == 200, named.get_data(as_text=True)
-    assert named.get_json()["onboarding"]["next_step"] == "verify_email"
+    code = [m for m in sent if m["email"] == email][-1]["code"]
+    verified = client.post(
+        f"{API}/email-verification/verify",
+        json={"email": email, "verification_code": code},
+    )
+    assert verified.status_code == 200, verified.get_data(as_text=True)
+    body = verified.get_json()
+    assert body["access_token"], "verifying is what issues the token"
+    assert body["onboarding"]["email_verified"] is True
+
+    # And the session it opened actually works.
+    assert client.get(f"{API}/profile").status_code == 200
