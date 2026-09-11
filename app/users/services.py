@@ -22,7 +22,12 @@ from app.libs.errors import (
     UnverifiedEmailError,
 )
 from app.libs.pagination import Paginator
-from app.libs.geo import is_valid_coordinate
+from app.libs.geo import (
+    RADIUS_LADDER_KM,
+    bounding_box,
+    haversine_km,
+    is_valid_coordinate,
+)
 from app.libs.email_service import email_service
 
 from app.products.models import Product
@@ -916,6 +921,63 @@ class UserService:
             raise AuthError(f"Failed to upload profile picture: {str(e)}")
 
     @staticmethod
+    def upload_shop_banner(user_id: str, file_stream, filename: str):
+        """Upload and set a shop's cover image (idempotent: replaces the old).
+
+        Deliberately a near-twin of upload_profile_picture rather than a
+        shared generic: the two differ in where the URL lands and what the
+        old-media cleanup keys off, and folding them together would mean a
+        branch on "which kind of image is this" inside every step.
+        """
+        from io import BytesIO
+        from urllib.parse import urlparse
+
+        if not isinstance(file_stream, BytesIO):
+            file_stream = BytesIO(file_stream.read())
+
+        with session_scope() as session:
+            seller = session.query(Seller).filter_by(user_id=user_id).first()
+            if not seller:
+                raise AuthError("Seller account not found")
+
+            # Drop the previous banner first so replacing one does not leak a
+            # file in S3 and a row in media for every re-upload.
+            if seller.banner_url:
+                storage_key = urlparse(seller.banner_url).path.lstrip("/")
+                old_media = (
+                    session.query(Media).filter_by(storage_key=storage_key).first()
+                )
+                if old_media:
+                    try:
+                        media_service.delete_media(old_media)
+                    except Exception as e:  # noqa: BLE001
+                        # A stale object in S3 is not worth failing the
+                        # upload the user is waiting on.
+                        logger.warning("Could not delete old shop banner: %s", e)
+                    session.query(MediaVariant).filter_by(
+                        media_id=old_media.id
+                    ).delete()
+                    session.delete(old_media)
+                seller.banner_url = None
+
+        media = media_service.upload_image(
+            file_stream=file_stream,
+            filename=filename,
+            user_id=user_id,
+            alt_text="Shop banner",
+            caption="Shop banner",
+        )
+
+        with session_scope() as session:
+            seller = session.query(Seller).filter_by(user_id=user_id).first()
+            if not seller:
+                raise AuthError("Seller account not found")
+            seller.banner_url = media.get_url()
+            banner_url = seller.banner_url
+
+        return {"success": True, "media": media, "banner_url": banner_url}
+
+    @staticmethod
     def upsert_user_address(user_id: str, address_data: Dict[str, Any]) -> UserAddress:
         """Create or update the current user's address (used for logistics pickup locations)."""
         with session_scope() as session:
@@ -1493,6 +1555,84 @@ class AccountDeletionService:
 class ShopService:
     """Service for shop/seller discovery and search"""
 
+    # How many shops inside the radius are ranked by true distance before
+    # paginating. Distance ordering happens in Python, so this is the ceiling
+    # on how much one browse request can read. 500 is far past what any
+    # Nigerian city currently holds within 10 km, and the ladder only widens
+    # when the narrower rungs came back empty.
+    NEARBY_RANK_CAP = 500
+
+    @staticmethod
+    def _within_ladder(query, lat, lng, per_page):
+        """Shops around a point, ranked by true distance, or (None, None).
+
+        Two passes, and both are load-bearing:
+
+        1. A bounding box, which a B-tree composite index can answer. This is
+           the only part the database can do -- Haversine is not an indexable
+           expression.
+        2. The circle, in Python. A box is a *superset* of the circle it
+           encloses: at the corners it reaches radius*sqrt(2), about 41%
+           further. Skipping this pass reports a shop 12 km away as being
+           "within 10 km", which is the kind of wrong that looks right.
+
+        The ladder widens when a rung is too thin to fill a page, rather than
+        stopping at the first rung that returns anything at all. One shop
+        within 10 km and twenty more at 12 km should not render as a
+        one-shop marketplace. It reports the rung it settled on so the UI can
+        say which area it is showing instead of implying everything is close.
+        """
+        located = query.filter(
+            Seller.shop_latitude.isnot(None),
+            Seller.shop_longitude.isnot(None),
+        )
+
+        widest = None
+        for rung in RADIUS_LADDER_KM:
+            min_lat, max_lat, min_lng, max_lng = bounding_box(lat, lng, rung)
+            rows = (
+                located.filter(
+                    Seller.shop_latitude.between(min_lat, max_lat),
+                    Seller.shop_longitude.between(min_lng, max_lng),
+                )
+                .limit(ShopService.NEARBY_RANK_CAP)
+                .all()
+            )
+
+            inside = [
+                shop
+                for shop in rows
+                if haversine_km(lat, lng, shop.shop_latitude, shop.shop_longitude)
+                <= rung
+            ]
+            if inside:
+                widest = (inside, rung)
+                if len(inside) >= per_page:
+                    break
+
+        if not widest:
+            return None, None
+
+        rows, _searched = widest
+        rows.sort(
+            key=lambda shop: haversine_km(
+                lat, lng, shop.shop_latitude, shop.shop_longitude
+            )
+        )
+
+        # The rung reported is the tightest one that actually contains every
+        # row, not the widest one searched. Two shops at 3 km and 30 km found
+        # while widening to 200 km are "within 50 km" -- saying 200 would be
+        # true of the search and misleading about the results.
+        furthest = haversine_km(
+            lat, lng, rows[-1].shop_latitude, rows[-1].shop_longitude
+        )
+        radius_km = next(
+            (rung for rung in RADIUS_LADDER_KM if furthest <= rung),
+            RADIUS_LADDER_KM[-1],
+        )
+        return rows, radius_km
+
     @staticmethod
     def search_shops(args, user_id=None, market_id=None):
         """Search for shops with filters and pagination"""
@@ -1531,7 +1671,23 @@ class ShopService:
                     )
 
                 if args.get("category"):
-                    query = query.filter(Seller.category == args["category"])
+                    # `Seller.category` does not exist and never has -- the
+                    # link is the seller_categories junction table. Every
+                    # request that passed this filter raised AttributeError,
+                    # which the broad `except` below turned into a 500 reading
+                    # "Failed to search shops". Matched on slug or name so the
+                    # chips in the UI can send either.
+                    wanted = args["category"]
+                    query = query.filter(
+                        Seller.categories.any(
+                            SellerCategory.category.has(
+                                db.or_(
+                                    Category.slug == wanted,
+                                    Category.name == wanted,
+                                )
+                            )
+                        )
+                    )
 
                 if args.get("verified_only"):
                     query = query.filter(
@@ -1541,8 +1697,38 @@ class ShopService:
                 if args.get("active_only"):
                     query = query.filter(Seller.is_active == True)
 
-                # Apply sorting
+                # --- Proximity ---------------------------------------
+                # Only when the client actually sent a usable pair.
+                # `sort_by=nearby` with a denied location permission falls
+                # back to rating rather than erroring: a browse screen that
+                # breaks on a permission dialog is worse than one that is
+                # merely not sorted the way you asked.
+                lat, lng = args.get("latitude"), args.get("longitude")
+                near = is_valid_coordinate(lat, lng)
+                radius_km = None
+
+                page = args.get("page", 1)
+                per_page = min(args.get("per_page", 20), 100)
+                offset = (page - 1) * per_page
+
                 sort_by = args.get("sort_by", "rating")
+                if sort_by == "nearby" and not near:
+                    sort_by = "rating"
+
+                nearby_rows = None
+                if near:
+                    nearby_rows, radius_km = ShopService._within_ladder(
+                        query, lat, lng, per_page
+                    )
+                    if nearby_rows is None:
+                        # Nobody within even the widest rung. The list stops
+                        # being distance-restricted and says so, rather than
+                        # rendering an empty screen.
+                        near = False
+                        if sort_by == "nearby":
+                            sort_by = "rating"
+
+                # Apply sorting
                 if sort_by == "rating":
                     query = query.order_by(Seller.total_rating.desc())
                 elif sort_by == "name":
@@ -1553,15 +1739,21 @@ class ShopService:
                     # This would need a join with follows table
                     query = query.order_by(Seller.created_at.desc())  # Fallback
 
-                # Get total count
-                total = query.count()
-
-                # Apply pagination
-                page = args.get("page", 1)
-                per_page = min(args.get("per_page", 20), 100)
-                offset = (page - 1) * per_page
-
-                shops = query.offset(offset).limit(per_page).all()
+                if sort_by == "nearby":
+                    # Already ranked by true distance across the whole radius
+                    # (see _within_ladder) -- slicing here rather than in SQL
+                    # is the whole point: ordering a SQL page by distance
+                    # afterwards would sort each page correctly and the list
+                    # as a whole wrongly.
+                    total = len(nearby_rows)
+                    # Bound named rather than sliced inline: black formats a
+                    # slice with an expression in it as `[offset : offset + n]`
+                    # and flake8 then flags E203 on the space it just added.
+                    page_end = offset + per_page
+                    shops = nearby_rows[offset:page_end]
+                else:
+                    total = query.count()
+                    shops = query.offset(offset).limit(per_page).all()
 
                 # Batched before the loop: _get_shop_stats was 4 queries per
                 # shop and _is_followed_by_user 1 more, so a 20-shop page cost
@@ -1574,11 +1766,22 @@ class ShopService:
                 # Enhance with additional data
                 enhanced_shops = []
                 for shop in shops:
+                    distance_km = None
+                    if near and shop.shop_latitude and shop.shop_longitude:
+                        distance_km = round(
+                            haversine_km(
+                                lat, lng, shop.shop_latitude, shop.shop_longitude
+                            ),
+                            1,
+                        )
+
                     shop_data = {
                         "id": shop.id,
                         "shop_name": shop.shop_name,
                         "shop_slug": shop.shop_slug,
                         "description": shop.description,
+                        "banner_url": shop.banner_url,
+                        "distance_km": distance_km,
                         "categories": [
                             {
                                 "id": sc.category.id,
@@ -1619,6 +1822,10 @@ class ShopService:
 
                 return {
                     "shops": enhanced_shops,
+                    "location": {
+                        "applied": near,
+                        "radius_km": radius_km,
+                    },
                     "pagination": {
                         "page": page,
                         "per_page": per_page,

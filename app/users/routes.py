@@ -59,6 +59,7 @@ from .schemas import (
     AccountDeletionRequestSchema,
     AccountDeletionResponseSchema,
     OAuthSignInSchema,
+    ShopSearchArgs,
 )
 from .services import (
     AuthService,
@@ -528,6 +529,46 @@ class ProfilePictureUpload(MethodView):
             abort(500, message="Internal server error")
 
 
+@bp.route("/profile/seller/banner", methods=["POST"])
+class ShopBannerUpload(MethodView):
+    @login_required
+    @bp.response(200, MediaSchema)
+    def post(self):
+        """Upload the shop's cover image."""
+        try:
+            from flask import request
+            from werkzeug.utils import secure_filename
+            from io import BytesIO
+
+            if not current_user.is_seller:
+                abort(400, message="Seller account not found")
+
+            if "file" not in request.files:
+                abort(400, message="No file provided")
+
+            file = request.files["file"]
+            if file.filename == "":
+                abort(400, message="No file selected")
+
+            filename = secure_filename(file.filename)
+            if not filename:
+                abort(400, message="Invalid filename")
+
+            file_stream = BytesIO(file.read())
+            file_stream.seek(0)
+
+            result = UserService.upload_shop_banner(
+                user_id=current_user.id, file_stream=file_stream, filename=filename
+            )
+            return result["media"]
+
+        except AuthError as e:
+            abort(e.status_code, message=e.message)
+        except Exception as e:
+            logger.error(f"Unexpected error in shop banner upload: {e}")
+            abort(500, message="Internal server error")
+
+
 @bp.route("/<user_id>/public")
 class PublicProfile(MethodView):
     @bp.response(200, PublicProfileSchema)
@@ -552,10 +593,15 @@ class PublicProfile(MethodView):
 
 @bp.route("/shops")
 class ShopList(MethodView):
-    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.arguments(ShopSearchArgs, location="query")
     @bp.response(200, description="List of shops")
     def get(self, args):
-        """Search and discover shops"""
+        """Search and discover shops.
+
+        Pass `latitude`/`longitude` with `sort_by=nearby` to rank by distance;
+        each shop then carries `distance_km`, and `location.radius_km` says
+        which rung of the fallback ladder answered.
+        """
         try:
             from .services import ShopService
 

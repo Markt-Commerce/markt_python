@@ -112,6 +112,7 @@ jobs:
           --ignore=tests/test_inventory_concurrency.py
           --ignore=tests/test_delivery_run_capacity_concurrency.py
           --ignore=tests/test_registration_verify_first.py
+          --ignore=tests/test_shop_discovery.py
 
   db-integration-tests:
     name: Database integration tests
@@ -197,6 +198,7 @@ jobs:
       - name: Run real-database endpoint tests
         run: >-
           pytest tests/test_registration_verify_first.py
+          tests/test_shop_discovery.py
           -v --tb=short
 
       # Only the tests that actually need a real database -- the two

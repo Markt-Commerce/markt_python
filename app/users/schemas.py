@@ -235,6 +235,7 @@ class SellerProfileSchema(Schema):
     shop_name = fields.Str()
     shop_slug = fields.Str(dump_only=True)
     description = fields.Str()
+    banner_url = fields.Str(dump_only=True, allow_none=True)
     verification_status = fields.Enum(
         SellerVerificationStatus, by_value=True, dump_only=True
     )
@@ -368,6 +369,40 @@ class SellerSimpleSchema(Schema):
         elif hasattr(obj, "user") and obj.user and obj.user.profile_picture:
             return obj.user.profile_picture
         return "/static/images/default-avatar.jpg"
+
+
+class ShopSearchArgs(Schema):
+    """Query arguments for GET /users/shops.
+
+    The route was declared with the generic PaginationQueryArgs, which knows
+    about page/per_page/search/sort/filters and nothing else -- while the
+    service reads `category`, `verified_only`, `active_only` and `sort_by`.
+    Marshmallow's default for unknown fields is RAISE, so every one of those
+    was a 422 waiting to happen the moment a client actually sent it.
+
+    This is the real contract, including the two that make proximity work.
+    """
+
+    class Meta:
+        unknown = EXCLUDE
+
+    page = fields.Int(load_default=1, validate=validate.Range(min=1))
+    per_page = fields.Int(load_default=20, validate=validate.Range(min=1, max=100))
+    search = fields.Str()
+    category = fields.Str()
+    verified_only = fields.Bool(load_default=False)
+    active_only = fields.Bool(load_default=False)
+    sort_by = fields.Str(
+        load_default="rating",
+        validate=validate.OneOf(["rating", "name", "recent", "followers", "nearby"]),
+    )
+
+    # Where the shopper is. Sent as a pair or not at all -- a lone latitude is
+    # not a location. `sort_by=nearby` without them falls back to rating
+    # rather than erroring: a denied location permission must not break
+    # browsing.
+    latitude = fields.Float(validate=validate.Range(-90, 90))
+    longitude = fields.Float(validate=validate.Range(-180, 180))
 
 
 class SettingsSchema(Schema):
