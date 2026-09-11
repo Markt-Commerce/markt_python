@@ -54,6 +54,43 @@ from .constants import (
 logger = logging.getLogger(__name__)
 
 
+def _release_unverified_account(session, user) -> None:
+    """Free an address held by an account that never proved it owns it.
+
+    Only ever called for an account with `email_verified` false, which cannot
+    sign in and cannot transact -- so there is nothing here worth preserving
+    and nobody to ask. The profile rows go first because they hold foreign
+    keys into users.
+
+    Kept narrow on purpose: it deletes the identity and the two profile rows
+    and nothing else. If an unverified account ever manages to acquire orders
+    or a wallet, this raises rather than cascading, because deleting those is
+    not a decision this function should be making.
+    """
+    from app.orders.models import Order
+
+    if user.is_buyer:
+        buyer = session.query(Buyer).filter_by(user_id=user.id).first()
+        if buyer:
+            has_orders = (
+                session.query(Order).filter(Order.buyer_id == buyer.id).first()
+                is not None
+            )
+            if has_orders:
+                raise ConflictError("Email already registered")
+            session.delete(buyer)
+
+    if user.is_seller:
+        seller = session.query(Seller).filter_by(user_id=user.id).first()
+        if seller:
+            session.query(SellerCategory).filter_by(seller_id=seller.id).delete()
+            session.delete(seller)
+
+    session.query(UserAddress).filter_by(user_id=user.id).delete()
+    session.delete(user)
+    session.flush()
+
+
 def unique_username(session, seed: Optional[str]) -> str:
     """A free username derived from a display name or an email address.
 
@@ -109,13 +146,31 @@ class AuthService:
         endpoints -- see app/users/onboarding.py for why the order changed.
         """
         with session_scope() as session:
-            # ConflictError (409), not AuthError (401). Taking an address
-            # that exists is not an authentication failure, and 401 is the
-            # status every client treats as "your session died, sign out" --
-            # so a typo'd email on the signup screen used to read to the app
-            # as an expired session. The route already documented 409.
-            if session.query(User).filter(User.email == data["email"]).first():
-                raise ConflictError("Email already registered")
+            # An address is only *taken* once someone has proved they own it.
+            #
+            # Creating the account before verification is the standard shape --
+            # the code has to attach to something, and holding a half-finished
+            # signup only in memory is what made closing the app lose
+            # everything. The risk it introduces is squatting: sign up with
+            # someone else's address and they can never register.
+            #
+            # This closes that. An existing account that never verified has no
+            # claim on the address, so the person arriving now takes it. They
+            # lose nothing either way: an unverified account cannot sign in
+            # (login refuses it) and cannot transact (see verified_required).
+            #
+            # A verified account is untouchable, which is the case that
+            # matters.
+            existing = session.query(User).filter(User.email == data["email"]).first()
+            if existing:
+                if existing.email_verified or existing.deleted_at is not None:
+                    raise ConflictError("Email already registered")
+                logger.info(
+                    "Reclaiming unverified account %s for %s",
+                    existing.id,
+                    data["email"],
+                )
+                _release_unverified_account(session, existing)
 
             # A client that chose a username must still get it, and must still
             # be told when it is taken. One that sent none gets a minted one.
