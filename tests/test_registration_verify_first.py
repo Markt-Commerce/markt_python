@@ -108,6 +108,20 @@ def _email():
     return f"test-{uuid.uuid4().hex[:10]}@markt.test"
 
 
+def _verify(app, email):
+    """Mark an account verified directly.
+
+    Registering the same address twice only conflicts once somebody has
+    proved they own it -- an account that never verified is reclaimable, on
+    purpose (see tests/test_unverified_account_safety.py). So a test about
+    duplicates has to establish ownership first.
+    """
+    with app.app_context():
+        user = db.session.query(User).filter(User.email == email).first()
+        user.email_verified = True
+        db.session.commit()
+
+
 def _register(client, created, email=None, account_type="buyer", **extra):
     email = email or _email()
     created.append(email)
@@ -176,7 +190,7 @@ def test_the_response_says_to_verify_next(client, created, sent):
 # ---------------------------------------------------------------------------
 
 
-def test_a_duplicate_email_fails_on_the_first_screen(client, created, sent):
+def test_a_duplicate_email_fails_on_the_first_screen(client, created, sent, app):
     """The bug this reordering exists to kill.
 
     The address was only checked once registration ran, which was after name,
@@ -186,6 +200,7 @@ def test_a_duplicate_email_fails_on_the_first_screen(client, created, sent):
     """
     email, first = _register(client, created)
     assert first.status_code == 201
+    _verify(app, email)
 
     _, second = _register(client, created, email=email)
     assert second.status_code in (400, 409), second.get_data(as_text=True)
@@ -347,7 +362,9 @@ def test_keeping_your_own_username_is_not_a_conflict(client, created, sent):
 # ---------------------------------------------------------------------------
 
 
-def test_the_same_address_in_different_case_is_the_same_account(client, created, sent):
+def test_the_same_address_in_different_case_is_the_same_account(
+    client, created, sent, app
+):
     """Reported from a device: signing up twice with the same address produced
     two unrelated accounts — one buyer, one seller — because the second time
     it was typed with a capital letter.
@@ -358,6 +375,7 @@ def test_the_same_address_in_different_case_is_the_same_account(client, created,
     email = _email()
     _, first = _register(client, created, email=email)
     assert first.status_code == 201
+    _verify(app, email)
 
     shouty = email.upper()
     created.append(shouty.lower())
@@ -417,11 +435,12 @@ def test_signing_in_with_a_different_case_reaches_the_same_account(
     assert signed_in.get_json()["email"] == email
 
 
-def test_surrounding_whitespace_is_not_a_different_address(client, created, sent):
+def test_surrounding_whitespace_is_not_a_different_address(client, created, sent, app):
     """A pasted address often carries a trailing space."""
     email = _email()
     _, first = _register(client, created, email=email)
     assert first.status_code == 201
+    _verify(app, email)
 
     second = client.post(
         f"{API}/register",
