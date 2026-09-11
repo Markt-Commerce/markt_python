@@ -47,6 +47,16 @@ LEEWAY_SECONDS = 10
 _jwk_clients: Dict[str, PyJWKClient] = {}
 
 
+def _normalise_email(value):
+    """Same rule as the schema layer (see NormalisedEmail in schemas.py).
+
+    Provider claims do not pass through a marshmallow schema, so without this
+    a Google identity asserting "Ada@example.com" would fail to match the
+    account stored as "ada@example.com" and create a second one.
+    """
+    return value.strip().lower() if isinstance(value, str) else value
+
+
 class OAuthError(APIError):
     """A provider token we could not verify, or chose not to trust."""
 
@@ -143,7 +153,7 @@ def verify_google(
     return {
         "provider": "google",
         "sub": claims["sub"],
-        "email": claims.get("email"),
+        "email": _normalise_email(claims.get("email")),
         # Google sends this as a real bool or the string "true" depending on
         # the endpoint. Normalised here so callers get one type.
         "email_verified": claims.get("email_verified") in (True, "true"),
@@ -166,7 +176,7 @@ def verify_apple(
         audiences=audiences,
         nonce=nonce,
     )
-    email = claims.get("email")
+    email = _normalise_email(claims.get("email"))
     return {
         "provider": "apple",
         "sub": claims["sub"],

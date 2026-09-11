@@ -20,7 +20,8 @@ from unittest.mock import patch
 
 import pytest
 
-from app.users.models import Buyer, Seller, User
+from app.gamification.models import PointsLedger, UserStats
+from app.users.models import Buyer, Seller, User, UserAddress
 from external.database import db
 from main.setup import create_flask_app
 
@@ -59,8 +60,20 @@ def created(app):
             user = db.session.query(User).filter(User.email == email).first()
             if not user:
                 continue
-            db.session.query(Buyer).filter(Buyer.user_id == user.id).delete()
-            db.session.query(Seller).filter(Seller.user_id == user.id).delete()
+            # Everything that holds a foreign key into users and gets written
+            # during these flows. Signing in awards points, which creates
+            # ledger and stats rows -- so a test that logs in could not be
+            # torn down until those were included here.
+            for model, column in (
+                (PointsLedger, PointsLedger.user_id),
+                (UserStats, UserStats.user_id),
+                (UserAddress, UserAddress.user_id),
+                (Buyer, Buyer.user_id),
+                (Seller, Seller.user_id),
+            ):
+                db.session.query(model).filter(column == user.id).delete(
+                    synchronize_session=False
+                )
             db.session.delete(user)
         db.session.commit()
 
@@ -327,3 +340,177 @@ def test_keeping_your_own_username_is_not_a_conflict(client, created, sent):
 
     again = client.patch(f"{API}/profile", json={"username": mine})
     assert again.status_code == 200, again.get_data(as_text=True)
+
+
+# ---------------------------------------------------------------------------
+# One inbox, one account
+# ---------------------------------------------------------------------------
+
+
+def test_the_same_address_in_different_case_is_the_same_account(client, created, sent):
+    """Reported from a device: signing up twice with the same address produced
+    two unrelated accounts — one buyer, one seller — because the second time
+    it was typed with a capital letter.
+
+    `users.email` is unique over the *string*, so "Ada@x.com" and "ada@x.com"
+    were two different rows and the duplicate check never fired.
+    """
+    email = _email()
+    _, first = _register(client, created, email=email)
+    assert first.status_code == 201
+
+    shouty = email.upper()
+    created.append(shouty.lower())
+    second = client.post(
+        f"{API}/register",
+        json={
+            "email": shouty,
+            "password": "Passw0rdy",
+            "account_type": "seller",
+        },
+    )
+    assert second.status_code == 409, second.get_data(as_text=True)
+
+
+def test_the_stored_address_is_lowercased(client, created, sent, app):
+    email = _email()
+    created.append(email)
+    resp = client.post(
+        f"{API}/register",
+        json={
+            "email": email.upper(),
+            "password": "Passw0rdy",
+            "account_type": "buyer",
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.get_json()["email"] == email
+
+    with app.app_context():
+        assert db.session.query(User).filter(User.email == email).first() is not None
+
+
+def test_signing_in_with_a_different_case_reaches_the_same_account(
+    client, created, sent
+):
+    """The other half of the bug: an account made in lower case had to be
+    signed into in lower case, or it looked like it did not exist."""
+    email = _email()
+    _, resp = _register(client, created, email=email)
+    assert resp.status_code == 201
+
+    code = [m for m in sent if m["email"] == email][-1]["code"]
+    client.post(
+        f"{API}/email-verification/verify",
+        json={"email": email, "verification_code": code},
+    )
+
+    signed_in = client.post(
+        f"{API}/login",
+        json={
+            "email": email.upper(),
+            "password": "Passw0rdy",
+            "account_type": "buyer",
+        },
+    )
+    assert signed_in.status_code == 200, signed_in.get_data(as_text=True)
+    assert signed_in.get_json()["email"] == email
+
+
+def test_surrounding_whitespace_is_not_a_different_address(client, created, sent):
+    """A pasted address often carries a trailing space."""
+    email = _email()
+    _, first = _register(client, created, email=email)
+    assert first.status_code == 201
+
+    second = client.post(
+        f"{API}/register",
+        json={
+            "email": f"  {email} ",
+            "password": "Passw0rdy",
+            "account_type": "buyer",
+        },
+    )
+    assert second.status_code == 409, second.get_data(as_text=True)
+
+
+# ---------------------------------------------------------------------------
+# Opening a shop from an account that is already a buyer
+# ---------------------------------------------------------------------------
+
+
+def test_a_new_shop_inherits_the_address_the_user_already_gave(
+    client, created, sent, app
+):
+    """The Create Seller sheet asks for a name, a description and categories —
+    and nothing about where the shop is. A shop with no coordinates never
+    appears in a proximity search, so every shop opened that way would have
+    been invisible on the Nearest tab.
+
+    The buyer already typed an address during signup; reusing it beats asking
+    twice for something we know.
+    """
+    email, resp = _register(client, created)
+    assert resp.status_code == 201
+
+    code = [m for m in sent if m["email"] == email][-1]["code"]
+    client.post(
+        f"{API}/email-verification/verify",
+        json={"email": email, "verification_code": code},
+    )
+    client.patch(f"{API}/profile/buyer", json={"buyername": "Amaka Obi"})
+    client.patch(
+        f"{API}/address",
+        json={
+            "street": "12 Allen Avenue",
+            "city": "Ikeja",
+            "state": "Lagos",
+            "country": "Nigeria",
+            "latitude": 6.6018,
+            "longitude": 3.3515,
+        },
+    )
+
+    made = client.post(
+        f"{API}/create-seller",
+        json={
+            "shop_name": "Amaka Fabrics",
+            "description": "Ankara and lace.",
+            "category_ids": [],
+        },
+    )
+    assert made.status_code == 201, made.get_data(as_text=True)
+
+    with app.app_context():
+        user = db.session.query(User).filter(User.email == email).first()
+        seller = db.session.query(Seller).filter(Seller.user_id == user.id).first()
+        assert seller.shop_latitude == pytest.approx(6.6018)
+        assert seller.shop_longitude == pytest.approx(3.3515)
+        assert seller.shop_slug, "a shop opened this way still needs a slug"
+
+
+def test_a_shop_is_not_given_a_location_we_do_not_have(client, created, sent, app):
+    """No address, no coordinates — rather than (0, 0), which would place every
+    such shop in the Gulf of Guinea and rank it as equidistant from Lagos."""
+    email, resp = _register(client, created)
+    code = [m for m in sent if m["email"] == email][-1]["code"]
+    client.post(
+        f"{API}/email-verification/verify",
+        json={"email": email, "verification_code": code},
+    )
+
+    made = client.post(
+        f"{API}/create-seller",
+        json={
+            "shop_name": "Unlocated Shop",
+            "description": "No address given.",
+            "category_ids": [],
+        },
+    )
+    assert made.status_code == 201, made.get_data(as_text=True)
+
+    with app.app_context():
+        user = db.session.query(User).filter(User.email == email).first()
+        seller = db.session.query(Seller).filter(Seller.user_id == user.id).first()
+        assert seller.shop_latitude is None
+        assert seller.shop_longitude is None

@@ -1174,12 +1174,26 @@ class AccountService:
             if user.is_seller:
                 raise AuthError("Seller account already exists")
 
+            # Seed the shop's location from the address the user already gave
+            # us. A shop with no coordinates never appears in a proximity
+            # search at all -- it only shows on the widest rungs -- and asking
+            # a buyer who has already typed their address to type it again
+            # just to open a shop is the kind of second ask that makes people
+            # abandon. Editable afterwards in shop settings, and only used
+            # when the stored pair is actually usable.
+            address = session.query(UserAddress).filter_by(user_id=user.id).first()
+            lat = getattr(address, "latitude", None)
+            lng = getattr(address, "longitude", None)
+            located = is_valid_coordinate(lat, lng)
+
             seller = Seller(
                 user_id=user.id,
                 shop_name=data["shop_name"],
                 description=data["description"],
                 policies=data.get("policies", {}),
                 shop_slug=shop_slug_for(session, data["shop_name"]),
+                shop_latitude=lat if located else None,
+                shop_longitude=lng if located else None,
             )
             session.add(seller)
             session.flush()  # Get the seller ID
