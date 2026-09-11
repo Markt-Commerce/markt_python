@@ -2734,6 +2734,15 @@ class FeedService:
                                     "name": product.name,
                                     "description": product.description,
                                     "price": float(product.price),
+                                    # The was-price, so a discount can be shown
+                                    # on the card rather than only on the
+                                    # product page. Nullable: most products are
+                                    # not on sale.
+                                    "compare_at_price": (
+                                        float(product.compare_at_price)
+                                        if product.compare_at_price is not None
+                                        else None
+                                    ),
                                     "seller": seller_payload,
                                     "images": [
                                         {

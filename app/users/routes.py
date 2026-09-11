@@ -86,10 +86,17 @@ class UserRegister(MethodView):
     @bp.alt_response(409, description="Email/username already exists")
     def post(self, user_data):
         try:
-            user = AuthService.register_user(user_data)
-            login_user(user)
-            user.access_token = generate_auth_token(user.id)
-            return user
+            # No token, and no login_user, on purpose.
+            #
+            # The account is created here -- it has to be, or the code has
+            # nothing to attach to and closing the app loses the whole signup.
+            # But creating it and handing over credentials in the same breath
+            # is what let an unverified account into the marketplace at all.
+            #
+            # Credentials are issued by the verify endpoint instead, so
+            # "prove you own this address" is the thing that actually buys
+            # access rather than a step the client is trusted to honour.
+            return AuthService.register_user(user_data)
         except ConflictError as e:
             abort(e.status_code, message=e.message)
         except AuthError as e:
@@ -433,12 +440,19 @@ class SendEmailVerification(MethodView):
 @bp.route("/email-verification/verify")
 class VerifyEmail(MethodView):
     @bp.arguments(EmailVerificationSchema)
-    @bp.response(200, PasswordResetResponseSchema)
+    @bp.response(200, UserProfileSchema)
     def post(self, data):
-        """Verify email with code"""
+        """Verify an email address, and issue the credentials for it.
+
+        This is where signing up actually completes. Register creates the
+        account but hands back nothing to act with; proving you own the
+        address is what buys access.
+        """
         try:
-            AuthService.verify_email(data["email"], data["verification_code"])
-            return {"message": "Email verified successfully"}
+            user = AuthService.verify_email(data["email"], data["verification_code"])
+            login_user(user)
+            user.access_token = generate_auth_token(user.id)
+            return user
         except VerificationThrottled as e:
             # A rate limit is 429, not 500. A 500 tells the app we broke
             # when what we mean is "slow down", and the client has no way
