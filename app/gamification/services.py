@@ -686,6 +686,26 @@ def get_unseen_achievements(user_id: str) -> dict:
         ]
 
         stats = session.query(UserStats).filter_by(user_id=user_id).first()
+
+        # The streak, for the same reason as the tier below -- except the
+        # streak needs it more. Its event is emitted inside the login request,
+        # before the client has a user id and therefore before it has
+        # connected its socket, so the realtime path is guaranteed to miss it
+        # on sign-in: the one moment it exists for.
+        streak_payload = None
+        if stats and stats.streak_days in STREAK_MILESTONES:
+            if stats.celebrated_streak is None:
+                # First sight of this user. Recorded silently, so shipping
+                # this does not fire a celebration at everyone who happens to
+                # be mid-streak.
+                stats.celebrated_streak = stats.streak_days
+            elif stats.streak_days > stats.celebrated_streak:
+                streak_payload = {
+                    "streak_days": stats.streak_days,
+                    "longest_streak": stats.longest_streak,
+                    "is_milestone": True,
+                }
+
         tier_payload = None
         if stats and stats.current_tier != (stats.celebrated_tier or ""):
             # celebrated_tier is NULL for every existing user. Treating that as
@@ -702,11 +722,11 @@ def get_unseen_achievements(user_id: str) -> dict:
                     "tier": _tier_payload(prog),
                 }
 
-    return {"badges": badges, "tier_up": tier_payload}
+    return {"badges": badges, "tier_up": tier_payload, "streak": streak_payload}
 
 
 def mark_achievements_seen(
-    user_id: str, badge_slugs: list = None, tier: str = None
+    user_id: str, badge_slugs: list = None, tier: str = None, streak: int = None
 ) -> dict:
     """Acknowledge celebrations the client has actually shown.
 
@@ -733,13 +753,24 @@ def mark_achievements_seen(
                 )
 
         tier_marked = False
-        if tier:
+        streak_marked = False
+        if tier or streak is not None:
             stats = session.query(UserStats).filter_by(user_id=user_id).first()
-            if stats and stats.current_tier == tier:
+            if stats and tier and stats.current_tier == tier:
                 stats.celebrated_tier = tier
                 tier_marked = True
+            # `>=` rather than `==`: a streak that advanced between the
+            # celebration being shown and acknowledged must not leave the
+            # milestone unmarked and replay it on the next open.
+            if stats and streak is not None and stats.streak_days >= streak:
+                stats.celebrated_streak = max(stats.celebrated_streak or 0, streak)
+                streak_marked = True
 
-    return {"badges_marked": marked, "tier_marked": tier_marked}
+    return {
+        "badges_marked": marked,
+        "tier_marked": tier_marked,
+        "streak_marked": streak_marked,
+    }
 
 
 def get_public_profile(user_id: str) -> dict:

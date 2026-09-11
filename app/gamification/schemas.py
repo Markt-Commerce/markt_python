@@ -67,20 +67,30 @@ class UnseenTierUpSchema(Schema):
     tier = fields.Nested(TierSchema)
 
 
+class UnseenStreakSchema(Schema):
+    streak_days = fields.Int()
+    longest_streak = fields.Int()
+    is_milestone = fields.Bool()
+
+
 class UnseenAchievementsSchema(Schema):
     badges = fields.List(fields.Nested(UnseenBadgeSchema))
     tier_up = fields.Nested(UnseenTierUpSchema, allow_none=True)
+    # Same shape the socket event carries, so the client has one handler.
+    streak = fields.Nested(UnseenStreakSchema, allow_none=True)
 
 
 # --- POST /me/achievements/seen ----------------------------------------------
 class MarkSeenSchema(Schema):
     badge_slugs = fields.List(fields.Str(), load_default=None)
     tier = fields.Str(load_default=None)
+    streak = fields.Int(load_default=None)
 
 
 class MarkSeenResponseSchema(Schema):
     badges_marked = fields.Int()
     tier_marked = fields.Bool()
+    streak_marked = fields.Bool()
 
 
 # --- GET /users/{id}/profile --------------------------------------------------

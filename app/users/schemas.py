@@ -89,6 +89,24 @@ class UserRegisterSchema(UserSchema):
     account_type = fields.Str(
         required=True, validate=validate.OneOf(["buyer", "seller"])
     )
+
+    # Overrides UserSchema's `required=True`. Registration now happens on the
+    # first screen, which asks for an email and a password and nothing else --
+    # so there is no username to send, and the server mints one. A client that
+    # does have one (the old flow, or a "pick your handle" screen later) can
+    # still supply it and it is honoured.
+    username = fields.Str(
+        required=False,
+        validate=[
+            validate.Length(min=3, max=20),
+            validate.Regexp(r"^[a-zA-Z0-9_]+$"),
+        ],
+    )
+
+    # Likewise optional. The profile is filled in afterwards, through
+    # PATCH /users/profile/buyer and /users/profile/seller, by which point the
+    # account exists and the request is authenticated. Still accepted here so
+    # a caller that has the data up front is not forced into two round trips.
     buyer_data = fields.Nested(BuyerCreateSchema)
     seller_data = fields.Nested(SellerCreateSchema)
 
@@ -96,6 +114,17 @@ class UserRegisterSchema(UserSchema):
 class UserUpdateSchema(Schema):
     phone_number = fields.Str(validate=validate_nigerian_phone)
     profile_picture = fields.Str()  # URL or media ID
+
+    # Registration mints a handle when the client does not send one, and the
+    # signup screen that asks for one now runs *after* the account exists --
+    # so without this the field would be collected and dropped. It also means
+    # a handle is finally changeable at all, which it never was.
+    username = fields.Str(
+        validate=[
+            validate.Length(min=3, max=20),
+            validate.Regexp(r"^[a-zA-Z0-9_]+$"),
+        ]
+    )
 
 
 class BuyerUpdateSchema(Schema):
@@ -180,10 +209,26 @@ class UserPaginationSchema(Schema):
     pagination = fields.Nested(PaginationSchema)
 
 
+class OnboardingStateSchema(Schema):
+    """Where this account stands in signup, so the client knows where to
+    resume after an interruption instead of inferring it from blank fields."""
+
+    email_verified = fields.Bool(dump_only=True)
+    profile_complete = fields.Bool(dump_only=True)
+    next_step = fields.Str(dump_only=True, allow_none=True)
+
+
 class UserProfileSchema(UserSchema):
     address = fields.Nested(lambda: AddressSchema(), dump_only=True)
     buyer_account = fields.Nested(lambda: BuyerProfileSchema(), dump_only=True)
     seller_account = fields.Nested(lambda: SellerProfileSchema(), dump_only=True)
+    onboarding = fields.Method("get_onboarding", dump_only=True)
+
+    def get_onboarding(self, obj):
+        from .onboarding import state
+
+        return state(obj)
+
     # media_uploads = fields.List(fields.Nested("MediaSchema"), dump_only=True)
 
 
@@ -201,6 +246,7 @@ class SellerProfileSchema(Schema):
     shop_name = fields.Str()
     shop_slug = fields.Str(dump_only=True)
     description = fields.Str()
+    banner_url = fields.Str(dump_only=True, allow_none=True)
     verification_status = fields.Enum(
         SellerVerificationStatus, by_value=True, dump_only=True
     )
@@ -334,6 +380,40 @@ class SellerSimpleSchema(Schema):
         elif hasattr(obj, "user") and obj.user and obj.user.profile_picture:
             return obj.user.profile_picture
         return "/static/images/default-avatar.jpg"
+
+
+class ShopSearchArgs(Schema):
+    """Query arguments for GET /users/shops.
+
+    The route was declared with the generic PaginationQueryArgs, which knows
+    about page/per_page/search/sort/filters and nothing else -- while the
+    service reads `category`, `verified_only`, `active_only` and `sort_by`.
+    Marshmallow's default for unknown fields is RAISE, so every one of those
+    was a 422 waiting to happen the moment a client actually sent it.
+
+    This is the real contract, including the two that make proximity work.
+    """
+
+    class Meta:
+        unknown = EXCLUDE
+
+    page = fields.Int(load_default=1, validate=validate.Range(min=1))
+    per_page = fields.Int(load_default=20, validate=validate.Range(min=1, max=100))
+    search = fields.Str()
+    category = fields.Str()
+    verified_only = fields.Bool(load_default=False)
+    active_only = fields.Bool(load_default=False)
+    sort_by = fields.Str(
+        load_default="rating",
+        validate=validate.OneOf(["rating", "name", "recent", "followers", "nearby"]),
+    )
+
+    # Where the shopper is. Sent as a pair or not at all -- a lone latitude is
+    # not a location. `sort_by=nearby` without them falls back to rating
+    # rather than erroring: a denied location permission must not break
+    # browsing.
+    latitude = fields.Float(validate=validate.Range(-90, 90))
+    longitude = fields.Float(validate=validate.Range(-180, 180))
 
 
 class SettingsSchema(Schema):

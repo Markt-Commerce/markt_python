@@ -22,7 +22,12 @@ from app.libs.errors import (
     UnverifiedEmailError,
 )
 from app.libs.pagination import Paginator
-from app.libs.geo import is_valid_coordinate
+from app.libs.geo import (
+    RADIUS_LADDER_KM,
+    bounding_box,
+    haversine_km,
+    is_valid_coordinate,
+)
 from app.libs.email_service import email_service
 
 from app.products.models import Product
@@ -49,21 +54,82 @@ from .constants import (
 logger = logging.getLogger(__name__)
 
 
+def unique_username(session, seed: Optional[str]) -> str:
+    """A free username derived from a display name or an email address.
+
+    `username` is unique NOT NULL, but neither an OAuth provider nor the new
+    first-screen registration gives us one -- so one has to be minted.
+    Suffixed and retried on collision rather than trusting a single attempt:
+    two people called "Ada Obi" will collide, and so will two ada@ addresses
+    at different domains.
+    """
+    base = re.sub(r"[^a-zA-Z0-9_]", "", (seed or "").split("@")[0]) or "markt"
+    base = base[:14].lower() or "markt"
+    if len(base) < 3:
+        base = f"{base}user"
+
+    for _ in range(12):
+        candidate = f"{base}{random.randint(1000, 9999)}"
+        if not session.query(User).filter(User.username == candidate).first():
+            return candidate
+
+    # Vanishingly unlikely; a uuid tail is still better than raising at
+    # someone mid sign-in.
+    return f"{base}{uuid.uuid4().hex[:8]}"
+
+
+def shop_slug_for(session, shop_name: str, seller_id=None) -> str:
+    """A unique URL slug for a shop name.
+
+    `shop_slug` is a unique column that nothing ever wrote -- registration
+    left it NULL for every seller ever created, so no shop had a canonical
+    URL. Postgres allows many NULLs in a unique column, which is why this
+    never surfaced as an error.
+    """
+    base = re.sub(r"[^a-z0-9]+", "-", (shop_name or "").lower()).strip("-")[:90]
+    if len(base) < 2:
+        base = "shop"
+
+    for attempt in range(12):
+        candidate = base if attempt == 0 else f"{base}-{random.randint(100, 9999)}"
+        clash = session.query(Seller).filter(Seller.shop_slug == candidate).first()
+        if not clash or (seller_id is not None and clash.id == seller_id):
+            return candidate
+
+    return f"{base}-{uuid.uuid4().hex[:8]}"
+
+
 class AuthService:
     @staticmethod
     def register_user(data):
-        with session_scope() as session:
-            # Check existing user
-            if session.query(User).filter(User.email == data["email"]).first():
-                raise AuthError("Email already registered")
+        """Create the account from whatever the first screen collected.
 
-            if session.query(User).filter(User.username == data["username"]).first():
-                raise AuthError("Username already taken")
+        Everything except email, password and role is optional now. The
+        profile is filled in afterwards through the authenticated PATCH
+        endpoints -- see app/users/onboarding.py for why the order changed.
+        """
+        with session_scope() as session:
+            # ConflictError (409), not AuthError (401). Taking an address
+            # that exists is not an authentication failure, and 401 is the
+            # status every client treats as "your session died, sign out" --
+            # so a typo'd email on the signup screen used to read to the app
+            # as an expired session. The route already documented 409.
+            if session.query(User).filter(User.email == data["email"]).first():
+                raise ConflictError("Email already registered")
+
+            # A client that chose a username must still get it, and must still
+            # be told when it is taken. One that sent none gets a minted one.
+            username = (data.get("username") or "").strip()
+            if username:
+                if session.query(User).filter(User.username == username).first():
+                    raise ConflictError("Username already taken")
+            else:
+                username = unique_username(session, data["email"])
 
             # Create user
             user = User(
                 email=data["email"],
-                username=data["username"],
+                username=username,
                 phone_number=data.get("phone_number"),
                 is_buyer=(data["account_type"] == "buyer"),
                 is_seller=(data["account_type"] == "seller"),
@@ -77,29 +143,37 @@ class AuthService:
                 address = UserAddress(user_id=user.id, **data["address"])
                 session.add(address)
 
-            # Create buyer/seller profile
+            # Create the role's profile row, empty if the details have not been
+            # asked for yet. The row has to exist either way: `is_buyer` with
+            # no Buyer row is the state every "Buyer account not found" bug
+            # comes from, and the PATCH endpoints need something to update.
+            buyer_data = data.get("buyer_data") or {}
+            seller_data = data.get("seller_data") or {}
+
             if data["account_type"] == "buyer":
                 buyer = Buyer(
                     user_id=user.id,
-                    buyername=data["buyer_data"]["buyername"],
-                    shipping_address=data["buyer_data"].get("shipping_address"),
+                    buyername=buyer_data.get("buyername"),
+                    shipping_address=buyer_data.get("shipping_address"),
                 )
                 session.add(buyer)
             else:
+                shop_name = seller_data.get("shop_name")
                 seller = Seller(
                     user_id=user.id,
-                    shop_name=data["seller_data"]["shop_name"],
-                    description=data["seller_data"]["description"],
-                    policies=data["seller_data"].get("policies", {}),
+                    shop_name=shop_name,
+                    description=seller_data.get("description"),
+                    policies=seller_data.get("policies", {}),
+                    # Only once there is a name to derive it from; the shop
+                    # screen sets it later otherwise.
+                    shop_slug=shop_slug_for(session, shop_name) if shop_name else None,
                 )
                 session.add(seller)
                 session.flush()  # Get the seller ID
 
                 # Handle category relationships
-                if "category_ids" in data["seller_data"]:
-                    for idx, category_id in enumerate(
-                        data["seller_data"]["category_ids"]
-                    ):
+                if seller_data.get("category_ids"):
+                    for idx, category_id in enumerate(seller_data["category_ids"]):
                         # Verify category exists
                         category = session.query(Category).get(category_id)
                         if not category:
@@ -118,7 +192,29 @@ class AuthService:
             UserService._cache_current_role(user.id, user.current_role)
 
             session.commit()
-            return user
+
+            email = user.email
+
+        # Outside the transaction, and deliberately best-effort: the code is
+        # sent here so it is waiting when the verification screen opens, but a
+        # mail outage must not destroy an account that is already committed.
+        # The verification screen can always resend.
+        AuthService.try_send_email_verification(email)
+        return user
+
+    @staticmethod
+    def try_send_email_verification(email: str) -> bool:
+        """send_email_verification, but a failure is logged rather than raised.
+
+        For the paths where the code is a convenience -- sent alongside
+        something else that has already succeeded -- rather than the thing the
+        caller asked for.
+        """
+        try:
+            return AuthService.send_email_verification(email)
+        except Exception as e:  # noqa: BLE001 - deliberately swallowed
+            logger.warning("Could not send verification code to %s: %s", email, e)
+            return False
 
     @staticmethod
     def login_user(email, password, account_type=None):
@@ -363,25 +459,9 @@ class SocialAuthService:
 
     @staticmethod
     def _unique_username(session, seed: Optional[str]) -> str:
-        """A free username derived from the provider's name or email.
-
-        `username` is unique NOT NULL, and the provider gives us no say in it,
-        so one has to be minted. Suffixed and retried on collision rather than
-        trusting a single attempt -- two people called "Ada Obi" will collide.
-        """
-        base = re.sub(r"[^a-zA-Z0-9_]", "", (seed or "").split("@")[0]) or "markt"
-        base = base[:14].lower() or "markt"
-        if len(base) < 3:
-            base = f"{base}user"
-
-        for _ in range(12):
-            candidate = f"{base}{random.randint(1000, 9999)}"
-            if not session.query(User).filter(User.username == candidate).first():
-                return candidate
-
-        # Vanishingly unlikely; a uuid tail is still better than raising at
-        # someone mid sign-in.
-        return f"{base}{uuid.uuid4().hex[:8]}"
+        """Kept as an alias: this was a SocialAuthService detail until email
+        registration needed the same thing."""
+        return unique_username(session, seed)
 
     @staticmethod
     def authenticate(identity: Dict[str, Any], *, name_hint: Optional[str] = None):
@@ -551,6 +631,25 @@ class UserService:
             if not user:
                 raise AuthError("User not found")
 
+            if "username" in data:
+                wanted = data["username"].strip()
+                if wanted.lower() != (user.username or "").lower():
+                    # Case-insensitive, and reserved names refused, so this
+                    # cannot become a back door around check-username.
+                    if wanted.lower() in {n.lower() for n in RESERVED_USERNAMES}:
+                        raise ConflictError("This username is reserved")
+                    taken = (
+                        session.query(User)
+                        .filter(
+                            func.lower(User.username) == wanted.lower(),
+                            User.id != user.id,
+                        )
+                        .first()
+                    )
+                    if taken:
+                        raise ConflictError("Username already taken")
+                    user.username = wanted
+
             if "phone_number" in data:
                 user.phone_number = data["phone_number"]
             if "profile_picture" in data:
@@ -618,6 +717,14 @@ class UserService:
 
             if "shop_name" in data:
                 seller.shop_name = data["shop_name"]
+                # Registration no longer has a shop name to derive this from,
+                # so the shop screen is where a slug first becomes possible.
+                # Only minted once: a shop that renames keeps its URL, because
+                # changing it silently breaks every link already shared.
+                if not seller.shop_slug:
+                    seller.shop_slug = shop_slug_for(
+                        session, data["shop_name"], seller_id=seller.id
+                    )
             if "description" in data:
                 seller.description = data["description"]
             if "policies" in data:
@@ -833,6 +940,63 @@ class UserService:
             raise AuthError(f"Failed to upload profile picture: {str(e)}")
 
     @staticmethod
+    def upload_shop_banner(user_id: str, file_stream, filename: str):
+        """Upload and set a shop's cover image (idempotent: replaces the old).
+
+        Deliberately a near-twin of upload_profile_picture rather than a
+        shared generic: the two differ in where the URL lands and what the
+        old-media cleanup keys off, and folding them together would mean a
+        branch on "which kind of image is this" inside every step.
+        """
+        from io import BytesIO
+        from urllib.parse import urlparse
+
+        if not isinstance(file_stream, BytesIO):
+            file_stream = BytesIO(file_stream.read())
+
+        with session_scope() as session:
+            seller = session.query(Seller).filter_by(user_id=user_id).first()
+            if not seller:
+                raise AuthError("Seller account not found")
+
+            # Drop the previous banner first so replacing one does not leak a
+            # file in S3 and a row in media for every re-upload.
+            if seller.banner_url:
+                storage_key = urlparse(seller.banner_url).path.lstrip("/")
+                old_media = (
+                    session.query(Media).filter_by(storage_key=storage_key).first()
+                )
+                if old_media:
+                    try:
+                        media_service.delete_media(old_media)
+                    except Exception as e:  # noqa: BLE001
+                        # A stale object in S3 is not worth failing the
+                        # upload the user is waiting on.
+                        logger.warning("Could not delete old shop banner: %s", e)
+                    session.query(MediaVariant).filter_by(
+                        media_id=old_media.id
+                    ).delete()
+                    session.delete(old_media)
+                seller.banner_url = None
+
+        media = media_service.upload_image(
+            file_stream=file_stream,
+            filename=filename,
+            user_id=user_id,
+            alt_text="Shop banner",
+            caption="Shop banner",
+        )
+
+        with session_scope() as session:
+            seller = session.query(Seller).filter_by(user_id=user_id).first()
+            if not seller:
+                raise AuthError("Seller account not found")
+            seller.banner_url = media.get_url()
+            banner_url = seller.banner_url
+
+        return {"success": True, "media": media, "banner_url": banner_url}
+
+    @staticmethod
     def upsert_user_address(user_id: str, address_data: Dict[str, Any]) -> UserAddress:
         """Create or update the current user's address (used for logistics pickup locations)."""
         with session_scope() as session:
@@ -1015,6 +1179,7 @@ class AccountService:
                 shop_name=data["shop_name"],
                 description=data["description"],
                 policies=data.get("policies", {}),
+                shop_slug=shop_slug_for(session, data["shop_name"]),
             )
             session.add(seller)
             session.flush()  # Get the seller ID
@@ -1409,6 +1574,84 @@ class AccountDeletionService:
 class ShopService:
     """Service for shop/seller discovery and search"""
 
+    # How many shops inside the radius are ranked by true distance before
+    # paginating. Distance ordering happens in Python, so this is the ceiling
+    # on how much one browse request can read. 500 is far past what any
+    # Nigerian city currently holds within 10 km, and the ladder only widens
+    # when the narrower rungs came back empty.
+    NEARBY_RANK_CAP = 500
+
+    @staticmethod
+    def _within_ladder(query, lat, lng, per_page):
+        """Shops around a point, ranked by true distance, or (None, None).
+
+        Two passes, and both are load-bearing:
+
+        1. A bounding box, which a B-tree composite index can answer. This is
+           the only part the database can do -- Haversine is not an indexable
+           expression.
+        2. The circle, in Python. A box is a *superset* of the circle it
+           encloses: at the corners it reaches radius*sqrt(2), about 41%
+           further. Skipping this pass reports a shop 12 km away as being
+           "within 10 km", which is the kind of wrong that looks right.
+
+        The ladder widens when a rung is too thin to fill a page, rather than
+        stopping at the first rung that returns anything at all. One shop
+        within 10 km and twenty more at 12 km should not render as a
+        one-shop marketplace. It reports the rung it settled on so the UI can
+        say which area it is showing instead of implying everything is close.
+        """
+        located = query.filter(
+            Seller.shop_latitude.isnot(None),
+            Seller.shop_longitude.isnot(None),
+        )
+
+        widest = None
+        for rung in RADIUS_LADDER_KM:
+            min_lat, max_lat, min_lng, max_lng = bounding_box(lat, lng, rung)
+            rows = (
+                located.filter(
+                    Seller.shop_latitude.between(min_lat, max_lat),
+                    Seller.shop_longitude.between(min_lng, max_lng),
+                )
+                .limit(ShopService.NEARBY_RANK_CAP)
+                .all()
+            )
+
+            inside = [
+                shop
+                for shop in rows
+                if haversine_km(lat, lng, shop.shop_latitude, shop.shop_longitude)
+                <= rung
+            ]
+            if inside:
+                widest = (inside, rung)
+                if len(inside) >= per_page:
+                    break
+
+        if not widest:
+            return None, None
+
+        rows, _searched = widest
+        rows.sort(
+            key=lambda shop: haversine_km(
+                lat, lng, shop.shop_latitude, shop.shop_longitude
+            )
+        )
+
+        # The rung reported is the tightest one that actually contains every
+        # row, not the widest one searched. Two shops at 3 km and 30 km found
+        # while widening to 200 km are "within 50 km" -- saying 200 would be
+        # true of the search and misleading about the results.
+        furthest = haversine_km(
+            lat, lng, rows[-1].shop_latitude, rows[-1].shop_longitude
+        )
+        radius_km = next(
+            (rung for rung in RADIUS_LADDER_KM if furthest <= rung),
+            RADIUS_LADDER_KM[-1],
+        )
+        return rows, radius_km
+
     @staticmethod
     def search_shops(args, user_id=None, market_id=None):
         """Search for shops with filters and pagination"""
@@ -1447,7 +1690,23 @@ class ShopService:
                     )
 
                 if args.get("category"):
-                    query = query.filter(Seller.category == args["category"])
+                    # `Seller.category` does not exist and never has -- the
+                    # link is the seller_categories junction table. Every
+                    # request that passed this filter raised AttributeError,
+                    # which the broad `except` below turned into a 500 reading
+                    # "Failed to search shops". Matched on slug or name so the
+                    # chips in the UI can send either.
+                    wanted = args["category"]
+                    query = query.filter(
+                        Seller.categories.any(
+                            SellerCategory.category.has(
+                                db.or_(
+                                    Category.slug == wanted,
+                                    Category.name == wanted,
+                                )
+                            )
+                        )
+                    )
 
                 if args.get("verified_only"):
                     query = query.filter(
@@ -1457,8 +1716,38 @@ class ShopService:
                 if args.get("active_only"):
                     query = query.filter(Seller.is_active == True)
 
-                # Apply sorting
+                # --- Proximity ---------------------------------------
+                # Only when the client actually sent a usable pair.
+                # `sort_by=nearby` with a denied location permission falls
+                # back to rating rather than erroring: a browse screen that
+                # breaks on a permission dialog is worse than one that is
+                # merely not sorted the way you asked.
+                lat, lng = args.get("latitude"), args.get("longitude")
+                near = is_valid_coordinate(lat, lng)
+                radius_km = None
+
+                page = args.get("page", 1)
+                per_page = min(args.get("per_page", 20), 100)
+                offset = (page - 1) * per_page
+
                 sort_by = args.get("sort_by", "rating")
+                if sort_by == "nearby" and not near:
+                    sort_by = "rating"
+
+                nearby_rows = None
+                if near:
+                    nearby_rows, radius_km = ShopService._within_ladder(
+                        query, lat, lng, per_page
+                    )
+                    if nearby_rows is None:
+                        # Nobody within even the widest rung. The list stops
+                        # being distance-restricted and says so, rather than
+                        # rendering an empty screen.
+                        near = False
+                        if sort_by == "nearby":
+                            sort_by = "rating"
+
+                # Apply sorting
                 if sort_by == "rating":
                     query = query.order_by(Seller.total_rating.desc())
                 elif sort_by == "name":
@@ -1469,15 +1758,21 @@ class ShopService:
                     # This would need a join with follows table
                     query = query.order_by(Seller.created_at.desc())  # Fallback
 
-                # Get total count
-                total = query.count()
-
-                # Apply pagination
-                page = args.get("page", 1)
-                per_page = min(args.get("per_page", 20), 100)
-                offset = (page - 1) * per_page
-
-                shops = query.offset(offset).limit(per_page).all()
+                if sort_by == "nearby":
+                    # Already ranked by true distance across the whole radius
+                    # (see _within_ladder) -- slicing here rather than in SQL
+                    # is the whole point: ordering a SQL page by distance
+                    # afterwards would sort each page correctly and the list
+                    # as a whole wrongly.
+                    total = len(nearby_rows)
+                    # Bound named rather than sliced inline: black formats a
+                    # slice with an expression in it as `[offset : offset + n]`
+                    # and flake8 then flags E203 on the space it just added.
+                    page_end = offset + per_page
+                    shops = nearby_rows[offset:page_end]
+                else:
+                    total = query.count()
+                    shops = query.offset(offset).limit(per_page).all()
 
                 # Batched before the loop: _get_shop_stats was 4 queries per
                 # shop and _is_followed_by_user 1 more, so a 20-shop page cost
@@ -1490,11 +1785,22 @@ class ShopService:
                 # Enhance with additional data
                 enhanced_shops = []
                 for shop in shops:
+                    distance_km = None
+                    if near and shop.shop_latitude and shop.shop_longitude:
+                        distance_km = round(
+                            haversine_km(
+                                lat, lng, shop.shop_latitude, shop.shop_longitude
+                            ),
+                            1,
+                        )
+
                     shop_data = {
                         "id": shop.id,
                         "shop_name": shop.shop_name,
                         "shop_slug": shop.shop_slug,
                         "description": shop.description,
+                        "banner_url": shop.banner_url,
+                        "distance_km": distance_km,
                         "categories": [
                             {
                                 "id": sc.category.id,
@@ -1535,6 +1841,10 @@ class ShopService:
 
                 return {
                     "shops": enhanced_shops,
+                    "location": {
+                        "applied": near,
+                        "radius_km": radius_km,
+                    },
                     "pagination": {
                         "page": page,
                         "per_page": per_page,

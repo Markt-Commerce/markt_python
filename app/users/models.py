@@ -287,6 +287,11 @@ class Seller(BaseModel):
     shop_name = db.Column(db.String(100))
     shop_slug = db.Column(db.String(110), unique=True)
     description = db.Column(db.Text)
+    # Shop cover image. profile_picture on User is the shop's avatar; this is
+    # the wide image behind it on a shop card. Stored as a URL for the same
+    # reason User.profile_picture is: the media row is the source of truth,
+    # this is the denormalised read path so a shop list does not join media.
+    banner_url = db.Column(db.String(500), nullable=True)
     policies = db.Column(db.JSON)  # Return, shipping policies
     total_rating = db.Column(db.Integer, default=0)
     total_raters = db.Column(db.Integer, default=0)
