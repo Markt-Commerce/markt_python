@@ -282,3 +282,48 @@ def test_an_unverified_account_still_knows_where_to_resume(client, created, sent
     profile = client.get(f"{API}/profile")
     assert profile.status_code == 200
     assert profile.get_json()["onboarding"]["next_step"] == "verify_email"
+
+
+# ---------------------------------------------------------------------------
+# Choosing a handle after the fact
+# ---------------------------------------------------------------------------
+
+
+def test_the_minted_username_can_be_changed(client, created, sent):
+    """The signup screen that asks for a handle now runs after the account
+    exists, so PATCH /users/profile has to accept one -- otherwise the field
+    would be collected and dropped, which is the bug this whole reordering is
+    meant to stop repeating."""
+    email, resp = _register(client, created)
+    minted = resp.get_json()["username"]
+
+    handle = f"ada{uuid.uuid4().hex[:8]}"
+    changed = client.patch(f"{API}/profile", json={"username": handle})
+
+    assert changed.status_code == 200, changed.get_data(as_text=True)
+    assert changed.get_json()["username"] == handle != minted
+
+
+def test_a_taken_username_is_refused_rather_than_swapped(client, created, sent):
+    first_email, first = _register(client, created)
+    taken = first.get_json()["username"]
+
+    _register(client, created)  # logs the client in as the second account
+    clash = client.patch(f"{API}/profile", json={"username": taken})
+
+    assert clash.status_code == 409, clash.get_data(as_text=True)
+
+
+def test_a_reserved_username_is_refused(client, created, sent):
+    _register(client, created)
+    resp = client.patch(f"{API}/profile", json={"username": "admin"})
+    assert resp.status_code == 409, resp.get_data(as_text=True)
+
+
+def test_keeping_your_own_username_is_not_a_conflict(client, created, sent):
+    """Re-submitting an unchanged form must not collide with itself."""
+    email, resp = _register(client, created)
+    mine = resp.get_json()["username"]
+
+    again = client.patch(f"{API}/profile", json={"username": mine})
+    assert again.status_code == 200, again.get_data(as_text=True)

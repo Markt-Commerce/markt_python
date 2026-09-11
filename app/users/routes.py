@@ -277,6 +277,8 @@ class UserProfile(MethodView):
         try:
             updated_user = UserService.update_user_profile(current_user.id, data)
             return UserService.get_user_profile(updated_user.id)
+        except ConflictError as e:
+            abort(e.status_code, message=e.message)
         except AuthError as e:
             abort(e.status_code, message=e.message)
 

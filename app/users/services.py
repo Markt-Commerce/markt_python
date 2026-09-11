@@ -631,6 +631,25 @@ class UserService:
             if not user:
                 raise AuthError("User not found")
 
+            if "username" in data:
+                wanted = data["username"].strip()
+                if wanted.lower() != (user.username or "").lower():
+                    # Case-insensitive, and reserved names refused, so this
+                    # cannot become a back door around check-username.
+                    if wanted.lower() in {n.lower() for n in RESERVED_USERNAMES}:
+                        raise ConflictError("This username is reserved")
+                    taken = (
+                        session.query(User)
+                        .filter(
+                            func.lower(User.username) == wanted.lower(),
+                            User.id != user.id,
+                        )
+                        .first()
+                    )
+                    if taken:
+                        raise ConflictError("Username already taken")
+                    user.username = wanted
+
             if "phone_number" in data:
                 user.phone_number = data["phone_number"]
             if "profile_picture" in data:

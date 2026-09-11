@@ -115,6 +115,17 @@ class UserUpdateSchema(Schema):
     phone_number = fields.Str(validate=validate_nigerian_phone)
     profile_picture = fields.Str()  # URL or media ID
 
+    # Registration mints a handle when the client does not send one, and the
+    # signup screen that asks for one now runs *after* the account exists --
+    # so without this the field would be collected and dropped. It also means
+    # a handle is finally changeable at all, which it never was.
+    username = fields.Str(
+        validate=[
+            validate.Length(min=3, max=20),
+            validate.Regexp(r"^[a-zA-Z0-9_]+$"),
+        ]
+    )
+
 
 class BuyerUpdateSchema(Schema):
     buyername = fields.Str()
