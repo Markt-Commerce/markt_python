@@ -298,7 +298,15 @@ class ProductService:
                 if "stock" in update_data:
                     product.stock = update_data["stock"]
                 if "status" in update_data:
-                    product.status = update_data["status"]
+                    # Accepts the enum member the schema produces or a plain
+                    # string from any other caller, and normalises both to the
+                    # one enum the column is built from.
+                    raw = update_data["status"]
+                    product.status = (
+                        raw
+                        if isinstance(raw, ProductStatus)
+                        else ProductStatus(str(raw))
+                    )
 
                 # Update optional fields
                 for field in OPTIONAL_PRODUCT_FIELDS:

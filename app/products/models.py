@@ -22,12 +22,16 @@ class Product(BaseModel, StatusMixin, UniqueIdMixin):
     __tablename__ = "products"
     id_prefix = "PRD_"
 
-    class Status(Enum):
-        ACTIVE = "active"
-        DRAFT = "draft"
-        ARCHIVED = "archived"
-        OUT_OF_STOCK = "out_of_stock"
-        DELETED = "deleted"  # soft delete
+    # The same enum as the module-level ProductStatus, not a copy of it.
+    #
+    # It used to be a second class with identical members. StatusMixin builds
+    # the column from Product.Status, while the schemas deserialise into
+    # ProductStatus -- so an update carrying a status handed SQLAlchemy a
+    # member of a *foreign* enum class, which it could only fall back to
+    # str() on: "ProductStatus.ACTIVE", not a label the type has. Every
+    # product update that set a status died with LookupError, and because the
+    # inventory quick-edit always sends one, saving a price died with it.
+    Status = ProductStatus
 
     id = db.Column(
         db.String(12), primary_key=True, default=None
