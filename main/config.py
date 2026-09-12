@@ -59,6 +59,13 @@ class Config:
         )
 
         # Payment Gateway Configuration (Paystack for Nigeria)
+        # Proactive image moderation. Empty means uploads are not scanned,
+        # which is the current state -- app.moderation is reactive (someone
+        # reports, a human acts). Setting this to a provider name is the
+        # single switch, and app/media/moderation.py is where one gets
+        # implemented; it needs third-party credentials Markt does not have.
+        self.IMAGE_MODERATION_PROVIDER = config("IMAGE_MODERATION_PROVIDER", default="")
+
         self.PAYSTACK_SECRET_KEY = config("PAYSTACK_SECRET_KEY", default="")
         self.PAYSTACK_PUBLIC_KEY = config("PAYSTACK_PUBLIC_KEY", default="")
         self.PAYMENT_CURRENCY = config("PAYMENT_CURRENCY", default="NGN")
