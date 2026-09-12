@@ -299,6 +299,14 @@ class PostDetail(MethodView):
             if current_user.is_authenticated
             else False
         )
+        # Saving had the same gap, and the app has been reading is_saved off
+        # this response all along -- it was simply never sent, so the bookmark
+        # opened empty on a post the buyer had already saved.
+        post.is_saved = (
+            PostService.is_saved_by(post_id, current_user.id)
+            if current_user.is_authenticated
+            else False
+        )
         return post
 
     @login_required
