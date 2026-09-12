@@ -57,6 +57,14 @@ CITIES = [
             ("ibadan-sango", "Sango", 7.4237, 3.8993, 2.5),
             ("ibadan-mokola", "Mokola", 7.3988, 3.8883, 2.5),
             ("ibadan-ojoo", "Ojoo", 7.4710, 3.9182, 3.0),
+            # Akobo covers a real corridor rather than a point: the OSM
+            # landmark on Akobo-Olorunda Abba Road and the part of Akobo
+            # where shops and buyers actually are sit 3km apart, so the
+            # centroid is between them. Added after a staging check found
+            # two shops, a buyer and a saved address all sitting 4.5km
+            # outside the nearest zone -- a hole big enough that nobody in
+            # Akobo could order anything.
+            ("ibadan-akobo", "Akobo", 7.4430, 3.9500, 3.5),
         ],
     },
     {
