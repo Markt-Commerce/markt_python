@@ -118,6 +118,7 @@ class Checkout(MethodView):
                 "subtotal": order.subtotal,
                 "shipping_fee": order.shipping_fee,
                 "tax": order.tax,
+                "service_fee": order.service_fee,
                 "discount": order.discount,
                 "total": order.total,
                 "shipping_address": order.shipping_address_dict,

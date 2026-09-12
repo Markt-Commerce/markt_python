@@ -13,6 +13,7 @@ from external.redis import redis_client
 from external.database import db
 from app.libs.session import session_scope
 from app.libs.money import to_money, from_subunit
+from app.orders.fees import calculate_service_fee
 from app.products.models import Product
 from app.libs.errors import (
     NotFoundError,
@@ -426,7 +427,6 @@ class CartService:
                 shipping_fee = CartService._calculate_shipping_fee(
                     cart, shipping_normalized
                 )
-            tax = CartService._calculate_tax(subtotal, shipping_normalized)
             # A discount the seller offered in chat, if the buyer chose to use
             # one. Validated and spent inside this transaction: checked
             # anywhere else, the same offer could be used twice, and spent
@@ -439,7 +439,18 @@ class CartService:
                 subtotal=subtotal,
                 coupon_code=cart.coupon_code,
             )
-            total = subtotal + shipping_fee + tax - discount
+            # Phase 0 defers VAT, and this flow was charging 5% of it --
+            # which meant the same basket cost 5% more here than through the
+            # payment-first flow, and Markt was collecting a tax line it does
+            # not remit. Zero rather than NULL: the column means "no tax was
+            # charged", and a NULL would read as "nobody worked it out".
+            tax = to_money(0)
+            # 11.3: the Service Fee this flow never charged, on what the
+            # buyer actually pays for goods. Charging a percentage of a
+            # discount the seller gave away would quietly claw part of it
+            # back -- the floor still covers the small-order case.
+            service_fee = calculate_service_fee(subtotal - discount)
+            total = subtotal + shipping_fee + tax + service_fee - discount
 
             # Create order
             order = Order()
@@ -450,6 +461,7 @@ class CartService:
             order.subtotal = subtotal
             order.shipping_fee = shipping_fee
             order.tax = tax
+            order.service_fee = service_fee
             order.discount = discount
             order.total = total
 
@@ -480,7 +492,7 @@ class CartService:
                     batch_opt_in=bool(checkout_data.get("batch_opt_in", False)),
                 )
                 order.shipping_fee = shipping_fee
-                order.total = subtotal + shipping_fee + tax - discount
+                order.total = subtotal + shipping_fee + tax + service_fee - discount
 
             # The order exists now, so the discount is genuinely spent. Same
             # transaction: if anything below fails, the use rolls back with it.
@@ -839,18 +851,6 @@ class CartService:
                 unresolved_sellers = True
 
         return max(len(market_ids) + (1 if unresolved_sellers else 0), 1)
-
-    @staticmethod
-    def _calculate_tax(subtotal: float, shipping_address: Optional[Dict]) -> float:
-        """Calculate tax based on subtotal and shipping address"""
-        # TODO: Implement actual tax calculation logic
-        # For now, return a simple percentage (e.g., 5% VAT for Nigeria)
-        if not shipping_address:
-            return to_money(0)
-
-        # Basic tax calculation: 5% VAT (can be enhanced with location-based tax)
-        tax_rate = Decimal("0.05")  # 5%
-        return to_money(to_money(subtotal) * tax_rate)
 
     @staticmethod
     def _resolve_chat_discount(

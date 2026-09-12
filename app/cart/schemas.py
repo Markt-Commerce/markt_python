@@ -83,7 +83,11 @@ class CheckoutResponseSchema(Schema):
     status = fields.Str(required=True)
     subtotal = fields.Float(required=True)
     shipping_fee = fields.Float(required=True)
+    #: Always 0 -- Phase 0 defers VAT. Kept on the response because orders
+    #: created before that decision carry a real figure.
     tax = fields.Float(required=True)
+    #: 11.3. Null on orders created before this flow charged it.
+    service_fee = fields.Float(allow_none=True)
     discount = fields.Float(required=True)
     total = fields.Float(required=True)
     shipping_address = fields.Dict(required=True)
