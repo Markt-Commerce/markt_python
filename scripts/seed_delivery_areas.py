@@ -70,6 +70,38 @@ CITIES = [
             ("ogbomoso-buth", "Bowen Teaching Hospital", 8.1336, 4.2336, 2.5),
         ],
     },
+    {
+        "name": "Lagos",
+        "slug": "lagos",
+        # Mainland only, around UNILAG. These areas sit on top of each other
+        # -- Iwaya is 800m from the campus gate -- so the radii are tighter
+        # here than upcountry. Anywhere across the lagoon (the Island, Lekki)
+        # is deliberately absent until there is a reason to price a bridge
+        # crossing, which the distance bands cannot currently express.
+        "zones": [
+            ("lagos-unilag", "University of Lagos", 6.5120, 3.3935, 2.5),
+            ("lagos-akoka", "Akoka", 6.5287, 3.3906, 2.0),
+            ("lagos-iwaya", "Iwaya", 6.5051, 3.3904, 2.0),
+            ("lagos-yaba", "Yaba", 6.5068, 3.3755, 2.0),
+            ("lagos-shomolu", "Shomolu", 6.5336, 3.3842, 2.0),
+            ("lagos-bariga", "Bariga", 6.5407, 3.3880, 2.0),
+        ],
+    },
+    {
+        "name": "Ile-Ife",
+        "slug": "ile-ife",
+        # The OAU campus is large and sits well outside the town -- nearly
+        # 6km from the centre -- so the campus zone is wider than most and
+        # there is real distance between it and town. That gap is honest:
+        # a delivery from Lagere to a hall of residence is a proper trip and
+        # should be priced as one.
+        "zones": [
+            ("ife-oau", "Obafemi Awolowo University", 7.5272, 4.5331, 3.5),
+            ("ife-oduduwa", "Oduduwa Hall", 7.5189, 4.5221, 2.0),
+            ("ife-mayfair", "Mayfair", 7.4910, 4.5339, 2.5),
+            ("ife-town", "Ile-Ife town", 7.4828, 4.5604, 3.0),
+        ],
+    },
 ]
 
 
