@@ -44,6 +44,8 @@ from app.categories.models import (
 # app imports
 from .models import (
     Post,
+    SavedItem,
+    SavedItemType,
     PostProduct,
     Follow,
     PostLike,
@@ -1186,6 +1188,30 @@ class PostService:
             return (
                 session.query(PostLike.post_id)
                 .filter_by(post_id=post_id, user_id=user_id)
+                .first()
+                is not None
+            )
+
+    @staticmethod
+    def is_saved_by(post_id: str, user_id: str) -> bool:
+        """Whether this user has saved the post.
+
+        The mirror of is_liked_by, and missing for the same reason it once
+        was: saving was write-only. The endpoints stored it and the saved list
+        read it back, but nothing told the post itself, so the bookmark opened
+        empty however many times you had saved it -- and the next tap unsaved
+        something the screen had just told you was not saved.
+        """
+        if not post_id or not user_id:
+            return False
+        with read_scope() as session:
+            return (
+                session.query(SavedItem.content_id)
+                .filter_by(
+                    user_id=user_id,
+                    content_type=SavedItemType.POST,
+                    content_id=post_id,
+                )
                 .first()
                 is not None
             )
@@ -2589,6 +2615,27 @@ class FeedService:
                     )
                     liked_post_ids = {r[0] for r in rows}
 
+            # And which has it saved (for is_saved).
+            #
+            # Saving was write-only: the endpoints stored it and the saved
+            # list read it back, but nothing ever told the feed or the post
+            # itself. So the bookmark drew empty on every load, however many
+            # times you had saved it -- the same gap liked_by_me had, left in
+            # place because a save is less noisy to get wrong than a like.
+            saved_post_ids = set()
+            if user_id and post_ids:
+                with read_scope() as session:
+                    rows = (
+                        session.query(SavedItem.content_id)
+                        .filter(
+                            SavedItem.user_id == user_id,
+                            SavedItem.content_type == SavedItemType.POST,
+                            SavedItem.content_id.in_(post_ids),
+                        )
+                        .all()
+                    )
+                    saved_post_ids = {r[0] for r in rows}
+
             # Batch: follower_count and is_followed per seller (by user id)
             seller_user_ids = list(
                 {
@@ -2673,6 +2720,7 @@ class FeedService:
                                     "likes_count": likes_counts.get(post.id, 0),
                                     "comments_count": comments_counts.get(post.id, 0),
                                     "liked_by_me": post.id in liked_post_ids,
+                                    "is_saved": post.id in saved_post_ids,
                                     "created_at": post.created_at.isoformat(),
                                     "score": score,
                                     "niche": (

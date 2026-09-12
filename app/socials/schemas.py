@@ -456,6 +456,10 @@ class PostDetailSchema(PostSchema):
     status = fields.Enum(PostStatus, by_value=True, dump_only=True)
     # Matches the feed's field of the same name. False for anonymous callers.
     liked_by_me = fields.Bool(dump_only=True, dump_default=False)
+    #: Whether the caller has saved this post. Same contract as liked_by_me,
+    #: and the same name the feed uses, so a client does not need to know
+    #: which endpoint answered.
+    is_saved = fields.Bool(dump_only=True, dump_default=False)
 
     # The feed serializes these counts as likes_count/comments_count while this
     # schema has always called them like_count/comment_count. Clients then have
