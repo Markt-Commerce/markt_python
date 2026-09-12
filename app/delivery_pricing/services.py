@@ -184,12 +184,36 @@ class ServiceabilityService:
             .first()
         )
         if lane is None:
+            # Name the cities when they differ. Markt serves several cities
+            # and has no lanes between them, so the common way to hit this is
+            # a shop in one city and an address in another -- and "we don't
+            # deliver between these two areas" reads like a bug to someone
+            # who can see both are areas we serve. Saying "from Lagos to
+            # Ibadan" makes it obviously a rule rather than a fault.
+            pickup_city = pickup_zone.city.name if pickup_zone.city else None
+            dropoff_city = dropoff_zone.city.name if dropoff_zone.city else None
+            if pickup_city and dropoff_city and pickup_city != dropoff_city:
+                message = (
+                    f"We don't deliver from {pickup_city} to {dropoff_city} "
+                    "yet -- only within a city for now."
+                )
+            else:
+                message = "We don't deliver between these two areas yet."
+
             raise NotServiceable(
                 "no_lane",
-                "We don't deliver between these two areas yet.",
+                message,
                 {
                     "pickup_zone": pickup_zone.name,
                     "dropoff_zone": dropoff_zone.name,
+                    "pickup_city": pickup_city,
+                    "dropoff_city": dropoff_city,
+                    #: True when both ends are served but not to each other.
+                    #: The client can then say "shop elsewhere" rather than
+                    #: "we don't reach you", which is not what happened.
+                    "cross_city": bool(
+                        pickup_city and dropoff_city and pickup_city != dropoff_city
+                    ),
                 },
             )
 
