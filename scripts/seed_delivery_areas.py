@@ -31,25 +31,48 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-# Ibadan, where Markt is starting. Centroid and a radius per zone: a circle is
-# a crude approximation of a neighbourhood, and ServiceZone documents itself as
-# replaceable by real polygons once there is a reason to draw them.
-CITY = {"name": "Ibadan", "slug": "ibadan"}
-
-ZONES = [
-    # (slug, name, lat, lng, radius_km)
-    ("ibadan-bodija", "Bodija", 7.4305, 3.9047, 3.0),
-    ("ibadan-ui", "University of Ibadan", 7.4441, 3.8964, 2.5),
-    ("ibadan-dugbe", "Dugbe", 7.3878, 3.8783, 2.5),
-    ("ibadan-challenge", "Challenge", 7.3547, 3.8703, 3.0),
-    ("ibadan-akobo", "Akobo", 7.4479, 3.9391, 3.5),
+# Where Markt delivers, one entry per city.
+#
+# Universities first: a campus and the student areas around it are dense,
+# walkable-adjacent, and full of people ordering small things -- which is the
+# only shape of demand a shared delivery run actually works for. Scaling up
+# means adding zones to these cities, or adding a city, not changing code.
+#
+# Every coordinate below is a real, looked-up location (OpenStreetMap), not an
+# approximation. Serviceability and pricing are both distance-based, so a
+# made-up centroid produces a made-up fee and hides real bugs.
+#
+# Radii are round numbers and deliberately overlap at the edges: zones resolve
+# by nearest centroid, so an overlap is answered deterministically rather than
+# leaving a gap between them that nobody can order from.
+CITIES = [
+    {
+        "name": "Ibadan",
+        "slug": "ibadan",
+        "zones": [
+            # (slug, name, lat, lng, radius_km)
+            ("ibadan-ui", "University of Ibadan", 7.4477, 3.8967, 3.0),
+            ("ibadan-agbowo", "Agbowo", 7.4467, 3.9137, 2.5),
+            ("ibadan-bodija", "Bodija", 7.4399, 3.9202, 3.0),
+            ("ibadan-sango", "Sango", 7.4237, 3.8993, 2.5),
+            ("ibadan-mokola", "Mokola", 7.3988, 3.8883, 2.5),
+            ("ibadan-ojoo", "Ojoo", 7.4710, 3.9182, 3.0),
+        ],
+    },
+    {
+        "name": "Ogbomoso",
+        "slug": "ogbomoso",
+        "zones": [
+            ("ogbomoso-lautech", "LAUTECH", 8.1673, 4.2670, 3.0),
+            ("ogbomoso-sabo", "Sabo", 8.1467, 4.2516, 2.5),
+            ("ogbomoso-takie", "Takie", 8.1364, 4.2376, 2.5),
+            ("ogbomoso-north", "Ogbomoso North", 8.1400, 4.2414, 2.5),
+            ("ogbomoso-buth", "Bowen Teaching Hospital", 8.1336, 4.2336, 2.5),
+        ],
+    },
 ]
 
-# Every zone pair, both directions, including a zone to itself (a delivery
-# within Bodija is a real delivery). No fee overrides: the zone-band strategy
-# prices these from distance, and an override is for a lane that genuinely
-# costs something the bands cannot express -- a bridge toll, a ferry -- not
-# for routine tuning.
+
 def _lane_pairs(slugs):
     return [(a, b) for a in slugs for b in slugs]
 
@@ -84,58 +107,63 @@ def main() -> int:
             return 1
 
         session = db.session
+        total_zones = total_lanes = 0
 
-        city = session.query(ServiceCity).filter_by(slug=CITY["slug"]).first()
-        if city is None:
-            city = ServiceCity(**CITY)
-            session.add(city)
-            print(f"  + city {CITY['slug']}")
-        else:
-            print(f"  = city {CITY['slug']} (exists)")
-        city.name = CITY["name"]
-        if args.activate:
-            city.is_active = True
-        session.flush()
-
-        zones = {}
-        for slug, name, lat, lng, radius in ZONES:
-            zone = session.query(ServiceZone).filter_by(slug=slug).first()
-            if zone is None:
-                zone = ServiceZone(slug=slug)
-                session.add(zone)
-                print(f"  + zone {slug}")
+        for spec in CITIES:
+            city = session.query(ServiceCity).filter_by(slug=spec["slug"]).first()
+            if city is None:
+                city = ServiceCity(slug=spec["slug"])
+                session.add(city)
+                print(f"  + city {spec['slug']}")
             else:
-                print(f"  = zone {slug} (exists)")
-            zone.city_id = city.id
-            zone.name = name
-            zone.centroid_lat = lat
-            zone.centroid_lng = lng
-            zone.radius_km = radius
-            zone.is_active = True
-            zones[slug] = zone
-        session.flush()
+                print(f"  = city {spec['slug']} (exists)")
+            city.name = spec["name"]
+            if args.activate:
+                city.is_active = True
+            session.flush()
 
-        created = existing = 0
-        for from_slug, to_slug in _lane_pairs(list(zones)):
-            from_id, to_id = zones[from_slug].id, zones[to_slug].id
-            lane = (
-                session.query(DeliveryLane)
-                .filter_by(from_zone_id=from_id, to_zone_id=to_id)
-                .first()
-            )
-            if lane is None:
-                lane = DeliveryLane(from_zone_id=from_id, to_zone_id=to_id)
-                session.add(lane)
-                created += 1
-            else:
-                existing += 1
-            lane.is_active = True
+            zones = {}
+            for slug, name, lat, lng, radius in spec["zones"]:
+                zone = session.query(ServiceZone).filter_by(slug=slug).first()
+                if zone is None:
+                    zone = ServiceZone(slug=slug)
+                    session.add(zone)
+                    print(f"      + zone {slug}")
+                else:
+                    print(f"      = zone {slug}")
+                zone.city_id = city.id
+                zone.name = name
+                zone.centroid_lat = lat
+                zone.centroid_lng = lng
+                zone.radius_km = radius
+                zone.is_active = True
+                zones[slug] = zone
+            session.flush()
+            total_zones += len(zones)
+
+            created = existing = 0
+            for from_slug, to_slug in _lane_pairs(list(zones)):
+                from_id, to_id = zones[from_slug].id, zones[to_slug].id
+                lane = (
+                    session.query(DeliveryLane)
+                    .filter_by(from_zone_id=from_id, to_zone_id=to_id)
+                    .first()
+                )
+                if lane is None:
+                    lane = DeliveryLane(from_zone_id=from_id, to_zone_id=to_id)
+                    session.add(lane)
+                    created += 1
+                else:
+                    existing += 1
+                lane.is_active = True
+            total_lanes += created + existing
+            print(f"      lanes: {created} new, {existing} already there")
 
         session.commit()
-        print(f"  lanes: {created} created, {existing} already present")
+        state = "live" if args.activate else "inactive -- pass --activate"
         print(
-            f"\nSeeded {len(ZONES)} zones in {CITY['name']}"
-            f"{' (live)' if args.activate else ' (inactive -- pass --activate)'}"
+            f"\n{total_zones} zones across {len(CITIES)} cities, "
+            f"{total_lanes} lanes ({state})."
         )
     return 0
 
