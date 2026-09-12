@@ -346,8 +346,43 @@ class CartService:
             if not cart or not cart.items:
                 raise ValidationError("Cart is empty")
 
+            # One shop at a time when asked. A delivery quote prices one
+            # pickup to one dropoff, so a basket spanning two shops is two
+            # orders -- the app shows it as one card per shop and sends the
+            # seller whose card was tapped. Without this, the only way out of
+            # a two-shop basket was deleting items one by one.
+            seller_id = checkout_data.get("seller_id")
+            if seller_id is not None:
+                checkout_items = [
+                    i
+                    for i in cart.items
+                    if i.product is not None and i.product.seller_id == seller_id
+                ]
+                if not checkout_items:
+                    raise ValidationError(
+                        "Nothing from that shop is in your cart any more."
+                    )
+            else:
+                checkout_items = list(cart.items)
+                # No seller named, so this is "check out everything" -- which
+                # only makes sense when everything is from one shop. A basket
+                # spanning two shops is two pickups and two deliveries, and
+                # letting it through built a single order that no one courier
+                # job could ever fulfil. The old guard only caught this when
+                # a delivery quote was attached, so an older client silently
+                # created exactly that order.
+                sellers = {
+                    i.product.seller_id for i in checkout_items if i.product is not None
+                }
+                if len(sellers) > 1:
+                    raise ValidationError(
+                        "Your cart has items from more than one shop. Check "
+                        "out one shop at a time -- they're delivered "
+                        "separately."
+                    )
+
             # Validate cart items (check availability, prices, etc.)
-            CartService._validate_cart_items(cart.items)
+            CartService._validate_cart_items(checkout_items)
 
             shipping_normalized = normalize_shipping_address(
                 checkout_data.get("shipping_address"),
@@ -355,8 +390,15 @@ class CartService:
                 use_saved_address=checkout_data.get("use_saved_address", False),
             )
 
-            # Calculate order totals
-            subtotal = cart.subtotal()
+            # Calculate order totals. Over the items being bought now, not
+            # the whole basket -- the rest is still in the cart and will be
+            # paid for separately.
+            subtotal = to_money(
+                sum(
+                    (to_money(i.product_price) or 0) * (i.quantity or 0)
+                    for i in checkout_items
+                )
+            )
             # A quote id means the buyer was shown a real, distance-based
             # price and accepted it. Without one we fall back to the flat
             # estimate, because existing clients do not send it yet and a
@@ -417,7 +459,7 @@ class CartService:
                 order.total = subtotal + shipping_fee + tax - discount
 
             # Create order items from cart items
-            for cart_item in cart.items:
+            for cart_item in checkout_items:
                 order_item = OrderItem()
                 order_item.order_id = order.id
                 order_item.product_id = cart_item.product_id

@@ -9,7 +9,10 @@ from app.libs.errors import APIError
 
 # app imports
 from .services import CartService
+from .grouping import group_cart_items
 from .schemas import (
+    CartGroupSchema,
+    GroupedCartSchema,
     CartSchema,
     CartItemSchema,
     AddToCartSchema,
@@ -122,6 +125,29 @@ class Checkout(MethodView):
             }
         except APIError as e:
             abort(e.status_code, message=e.message)
+
+
+@bp.route("/groups")
+class CartGroups(MethodView):
+    @login_required
+    @buyer_required
+    @bp.response(200, GroupedCartSchema)
+    def get(self):
+        """The basket split into the orders it will actually become.
+
+        A delivery quote prices one pickup to one dropoff, so a basket
+        spanning two shops is two deliveries and two orders. Presenting it as
+        one list made it possible to build a cart that could never be paid
+        for; this shows the truth, one card per shop, each checking out on
+        its own.
+        """
+        cart = CartService.get_cart(current_user.id)
+        groups = group_cart_items(cart.items if cart else [])
+        return {
+            "groups": groups,
+            "group_count": len(groups),
+            "total_items": sum(g.item_count for g in groups),
+        }
 
 
 @bp.route("/summary")
