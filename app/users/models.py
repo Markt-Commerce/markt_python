@@ -232,6 +232,19 @@ class SocialAccount(BaseModel):
     )
 
 
+class RefundPreference(Enum):
+    """Where a buyer wants money owed back to them to land.
+
+    CARD is the money genuinely returning -- to the card that paid, through
+    Paystack, over days. WALLET is instant and withdrawable, but it is Markt
+    holding the money until the buyer moves it, which is a real difference and
+    is why the buyer chooses rather than us.
+    """
+
+    CARD = "card"
+    WALLET = "wallet"
+
+
 class Buyer(BaseModel):
     __tablename__ = "buyers"
 
@@ -241,6 +254,17 @@ class Buyer(BaseModel):
     shipping_address = db.Column(db.JSON)
     is_active = db.Column(db.Boolean, default=True)
     deactivated_at = db.Column(db.DateTime)
+    # Where money owed back goes -- today only the saving from a shared
+    # delivery. Stored as a plain string rather than a native enum: adding a
+    # third destination later should be a deploy, not an ALTER TYPE that needs
+    # ownership of the type (see the local-database note in the runbook).
+    #
+    # Defaults to the card, deliberately. ADR-002 allows wallet credit only as
+    # an opt-in with the cash refund as default, because turning someone's
+    # money into store credit without asking is not Markt's decision to make.
+    refund_preference = db.Column(
+        db.String(10), nullable=False, default=RefundPreference.CARD.value
+    )
 
     # Relationships
     user = db.relationship("User", back_populates="buyer_account")

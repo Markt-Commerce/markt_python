@@ -358,10 +358,6 @@ class WalletService:
     @staticmethod
     def request_withdrawal(user_id: str, data: Dict[str, Any]) -> WithdrawalRequest:
         amount = to_money(data["amount"])
-        if amount < MIN_WITHDRAWAL_AMOUNT:
-            raise ValidationError(
-                f"Minimum withdrawal amount is {MIN_WITHDRAWAL_AMOUNT}"
-            )
 
         withdrawal_id = None
         currency = data.get("currency", "NGN")
@@ -370,6 +366,24 @@ class WalletService:
             account = WalletService._get_or_create_account(session, user_id, currency)
             if account.available_balance < amount:
                 raise ValidationError("Insufficient wallet balance for withdrawal")
+            # The minimum exists so a transfer fee is not spent moving a
+            # trivial amount. It must not become a reason money cannot be
+            # taken out at all: a shared-delivery saving is a couple of
+            # hundred naira, and a buyer who chose the wallet was promised
+            # they could withdraw whenever they wanted.
+            #
+            # So the floor is waived for exactly one case -- taking out
+            # everything that is there, when everything that is there is
+            # under the floor. Small balances can always be emptied; a large
+            # balance still cannot be drained a naira at a time.
+            if amount < MIN_WITHDRAWAL_AMOUNT and not (
+                amount == account.available_balance
+                and account.available_balance < MIN_WITHDRAWAL_AMOUNT
+            ):
+                raise ValidationError(
+                    f"Withdraw at least {MIN_WITHDRAWAL_AMOUNT}, or take out "
+                    "your whole balance at once."
+                )
 
             withdrawal = WithdrawalRequest(
                 user_id=user_id,

@@ -176,7 +176,19 @@ class ChatDiscount(BaseModel):
 
     def can_be_applied_to_order(self, order_amount: float) -> tuple[bool, str]:
         """Check if discount can be applied to an order with validation message"""
+        from app.libs.datetime_utils import ensure_timezone_aware, utcnow_aware
+
         if not self.is_valid():
+            # Ordered by what actually went wrong rather than by status
+            # alone. An offer spent down to its limit keeps whatever status
+            # it had, and an offer that simply ran out of time is rarely
+            # marked EXPIRED before someone looks at it -- both used to fall
+            # through to "Discount is not valid", which tells a buyer
+            # nothing they can act on.
+            if self.usage_count >= (self.usage_limit or 1):
+                return False, "Discount has already been used"
+            if ensure_timezone_aware(self.expires_at) <= utcnow_aware():
+                return False, "Discount has expired"
             if self.status == DiscountStatus.EXPIRED:
                 return False, "Discount has expired"
             elif self.status == DiscountStatus.USED:
@@ -189,7 +201,7 @@ class ChatDiscount(BaseModel):
         if self.minimum_order_amount and order_amount < self.minimum_order_amount:
             return (
                 False,
-                f"Minimum order amount of ${self.minimum_order_amount:.2f} required",
+                f"Minimum order of \u20a6{self.minimum_order_amount:,.2f} required",
             )
 
         if self.usage_count >= self.usage_limit:

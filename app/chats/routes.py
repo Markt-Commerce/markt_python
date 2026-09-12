@@ -225,6 +225,24 @@ class ChatMessageReactionDetail(MethodView):
 
 # Discount Routes for Chat
 # -----------------------------------------------
+@bp.route("/discounts/spendable")
+class SpendableDiscounts(MethodView):
+    @login_required
+    @bp.response(200)
+    def get(self):
+        """Offers this buyer can spend right now, tagged with the shop.
+
+        The cart screen needs this: a discount lives in a chat room, the
+        basket is grouped by shop, and only the server can join the two.
+        Expired, spent and withdrawn offers never appear -- an offer the
+        buyer can see is one they can take.
+        """
+        try:
+            return {"discounts": DiscountService.spendable_for_buyer(current_user.id)}
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
 @bp.route("/rooms/<int:room_id>/discounts")
 class ChatRoomDiscounts(MethodView):
     @login_required

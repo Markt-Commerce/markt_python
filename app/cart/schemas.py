@@ -69,6 +69,10 @@ class CheckoutSchema(Schema):
     # Only meaningful alongside a quote. The buyer asking to share a run with
     # other orders going the same way; never inferred on their behalf.
     batch_opt_in = fields.Bool(missing=False)
+    #: A discount this shop offered the buyer in chat. Scoped to the shop being
+    #: bought from and spent only if the order is actually created, so an
+    #: abandoned checkout leaves the offer usable.
+    discount_id = fields.Int(allow_none=True)
 
 
 class CheckoutResponseSchema(Schema):
@@ -79,7 +83,11 @@ class CheckoutResponseSchema(Schema):
     status = fields.Str(required=True)
     subtotal = fields.Float(required=True)
     shipping_fee = fields.Float(required=True)
+    #: Always 0 -- Phase 0 defers VAT. Kept on the response because orders
+    #: created before that decision carry a real figure.
     tax = fields.Float(required=True)
+    #: 11.3. Null on orders created before this flow charged it.
+    service_fee = fields.Float(allow_none=True)
     discount = fields.Float(required=True)
     total = fields.Float(required=True)
     shipping_address = fields.Dict(required=True)

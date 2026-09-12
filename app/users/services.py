@@ -770,6 +770,8 @@ class UserService:
                 buyer.buyername = data["buyername"]
             if "shipping_address" in data:
                 buyer.shipping_address = data["shipping_address"]
+            if "refund_preference" in data:
+                buyer.refund_preference = data["refund_preference"]
 
             session.commit()
 

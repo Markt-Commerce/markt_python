@@ -13,6 +13,7 @@ from external.redis import redis_client
 from external.database import db
 from app.libs.session import session_scope
 from app.libs.money import to_money, from_subunit
+from app.orders.fees import calculate_service_fee
 from app.products.models import Product
 from app.libs.errors import (
     NotFoundError,
@@ -426,9 +427,30 @@ class CartService:
                 shipping_fee = CartService._calculate_shipping_fee(
                     cart, shipping_normalized
                 )
-            tax = CartService._calculate_tax(subtotal, shipping_normalized)
-            discount = CartService._calculate_discount(subtotal, cart.coupon_code)
-            total = subtotal + shipping_fee + tax - discount
+            # A discount the seller offered in chat, if the buyer chose to use
+            # one. Validated and spent inside this transaction: checked
+            # anywhere else, the same offer could be used twice, and spent
+            # anywhere else it would be gone even if the order never existed.
+            discount, chat_discount = CartService._resolve_chat_discount(
+                session,
+                user=user,
+                discount_id=checkout_data.get("discount_id"),
+                items=checkout_items,
+                subtotal=subtotal,
+                coupon_code=cart.coupon_code,
+            )
+            # Phase 0 defers VAT, and this flow was charging 5% of it --
+            # which meant the same basket cost 5% more here than through the
+            # payment-first flow, and Markt was collecting a tax line it does
+            # not remit. Zero rather than NULL: the column means "no tax was
+            # charged", and a NULL would read as "nobody worked it out".
+            tax = to_money(0)
+            # 11.3: the Service Fee this flow never charged, on what the
+            # buyer actually pays for goods. Charging a percentage of a
+            # discount the seller gave away would quietly claw part of it
+            # back -- the floor still covers the small-order case.
+            service_fee = calculate_service_fee(subtotal - discount)
+            total = subtotal + shipping_fee + tax + service_fee - discount
 
             # Create order
             order = Order()
@@ -439,6 +461,7 @@ class CartService:
             order.subtotal = subtotal
             order.shipping_fee = shipping_fee
             order.tax = tax
+            order.service_fee = service_fee
             order.discount = discount
             order.total = total
 
@@ -469,7 +492,14 @@ class CartService:
                     batch_opt_in=bool(checkout_data.get("batch_opt_in", False)),
                 )
                 order.shipping_fee = shipping_fee
-                order.total = subtotal + shipping_fee + tax - discount
+                order.total = subtotal + shipping_fee + tax + service_fee - discount
+
+            # The order exists now, so the discount is genuinely spent. Same
+            # transaction: if anything below fails, the use rolls back with it.
+            if chat_discount is not None:
+                from app.chats.services import DiscountService
+
+                DiscountService.consume(session, chat_discount)
 
             # Create order items from cart items
             for cart_item in checkout_items:
@@ -823,16 +853,63 @@ class CartService:
         return max(len(market_ids) + (1 if unresolved_sellers else 0), 1)
 
     @staticmethod
-    def _calculate_tax(subtotal: float, shipping_address: Optional[Dict]) -> float:
-        """Calculate tax based on subtotal and shipping address"""
-        # TODO: Implement actual tax calculation logic
-        # For now, return a simple percentage (e.g., 5% VAT for Nigeria)
-        if not shipping_address:
-            return to_money(0)
+    def _resolve_chat_discount(
+        session,
+        *,
+        user,
+        discount_id,
+        items,
+        subtotal,
+        coupon_code,
+    ):
+        """How much comes off, and which offer to spend for it.
 
-        # Basic tax calculation: 5% VAT (can be enhanced with location-based tax)
-        tax_rate = Decimal("0.05")  # 5%
-        return to_money(to_money(subtotal) * tax_rate)
+        Returns (amount, discount_or_None). The offer is not spent here --
+        the caller does that once the order exists.
+
+        A discount is offered by one seller in one chat room, and an order is
+        now one shop's worth of basket, so the offer is scoped to the shop
+        being bought from -- otherwise a generous offer from one seller would
+        discount every other seller's goods. The shop is taken from the items
+        actually being bought rather than from the seller_id the client sent,
+        because that is the shop whose money is at stake and it is true even
+        when the client sent no seller_id at all.
+
+        The chat recorded the seller by *user* id and the cart knows them by
+        seller account id, so the two are joined here rather than hoped to
+        match.
+        """
+        if not discount_id:
+            return CartService._calculate_discount(subtotal, coupon_code), None
+
+        from app.chats.services import DiscountService
+        from app.users.models import Seller
+
+        seller_ids = {i.product.seller_id for i in items if i.product is not None}
+        seller_user_id = None
+        if len(seller_ids) == 1:
+            seller = session.get(Seller, seller_ids.pop())
+            seller_user_id = getattr(seller, "user_id", None)
+        if not seller_user_id:
+            # Rather than fall through unscoped. Not being able to name the
+            # shop means not being able to check the offer came from it, and
+            # an unscoped check is exactly the hole this argument closes.
+            raise ValidationError("We couldn't match that offer to this shop.")
+
+        discount, amount, message = DiscountService.validate_for_order(
+            session,
+            buyer_user_id=user.id,
+            discount_id=discount_id,
+            order_amount=float(subtotal),
+            seller_user_id=seller_user_id,
+        )
+        if discount is None:
+            # Refused rather than quietly ignored. A buyer who chose an offer
+            # and is charged full price without being told has been
+            # overcharged as far as they are concerned.
+            raise ValidationError(message)
+
+        return to_money(amount), discount
 
     @staticmethod
     def _calculate_discount(subtotal: float, coupon_code: Optional[str]) -> float:

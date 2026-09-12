@@ -69,6 +69,34 @@ The wallet exists, so it is tempting. But "you saved ₦200, here is store credi
 is not a discount, it is a lock-in, and selling it as a saving is dishonest. If
 we ever offer it, it must be an opt-in choice with the cash refund as default.
 
+> **Amended 2026-09-12 — the wallet is now offered, on the terms above.**
+>
+> The rejection stands as written: crediting a wallet *instead of* refunding is
+> still not something Markt decides. What ships is the escape clause — the
+> buyer chooses, in settings, and the card remains the default for everyone who
+> never touches it (`Buyer.refund_preference`, default `card`).
+>
+> Two things had to be true before the choice was honest to offer:
+>
+> 1. **"Withdraw whenever" had to be true.** `MIN_WITHDRAWAL_AMOUNT` is ₦1,000
+>    and a batch saving is ₦150–₦350, so wallet credit would have been stuck
+>    until a buyer accumulated three to six of them — the lock-in this ADR
+>    refused, wearing a different hat. The floor is now waived when a buyer
+>    takes out their whole balance and that balance is under it. Small balances
+>    can always be emptied; a large one still cannot be drained a naira at a
+>    time, because each transfer costs us a fee.
+> 2. **It had to be disclosed before paying, not discovered after.** The batch
+>    toggle at checkout says where the saving will go and links to the setting,
+>    which is the same rule this ADR already applies to hold-vs-charge.
+>
+> The incentive is worth naming: wallet credit is *cheaper for Markt* — Paystack
+> charges a fee on every refund, and refunds need a retry queue. That is a real
+> saving and precisely why the default stays on the card. The buyer is offered
+> the faster option; they are never moved to it.
+>
+> A wallet credit that fails falls back to the card. The preference is about
+> which is nicer, not about whether the buyer gets paid.
+
 ### Selection
 
 `PaymentCapability.supports_preauth(payment_method)` decides, per payment, at
@@ -148,6 +176,7 @@ flow must be shippable and correct with batch entirely dark.
 | Buyer joins then leaves pre-cutoff | Others recomputed, each capped at their own solo quote |
 | Batch closes mid-join | Row lock; the late joiner goes to the next open run |
 | Method can't preauth | Charge-max-refund, disclosed before paying |
+| Buyer chose the wallet | Saving credited instantly, withdrawable at any amount |
 | Preauth expires before cutoff | Capture at solo; never let a hold lapse |
 | Capture fails after cutoff | Retry queue + alert; order flagged, not silently completed |
 | Run cancelled after capture | Full refund of the delivery line only; items unaffected |

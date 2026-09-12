@@ -869,7 +869,7 @@ class ChatService:
                 chat_message = ChatMessage(
                     room_id=room_id,
                     sender_id=user_id,
-                    content=f"Offered ${amount:.2f} for {product.name}",
+                    content=f"Offered \u20a6{amount:,.2f} for {product.name}",
                     message_type="offer",
                     message_data=message_data,
                 )
@@ -1758,76 +1758,152 @@ class DiscountService:
             raise APIError("Failed to get active discounts")
 
     @staticmethod
+    def spendable_for_buyer(buyer_user_id: str) -> List[Dict[str, Any]]:
+        """Offers this buyer could actually spend, tagged with the shop.
+
+        The basket is grouped by seller *account*, and a chat discount records
+        the seller by *user* id, so the join happens here -- once, on the
+        server -- rather than leaving the app to guess which offer belongs to
+        which card.
+
+        Only offers with a shop attached come back: one that cannot be matched
+        to a group could never be applied, and showing it would be an offer
+        the buyer cannot take.
+        """
+        from app.users.models import Seller
+
+        with read_scope() as session:
+            rows = (
+                session.query(ChatDiscount, Seller.id)
+                .join(Seller, Seller.user_id == ChatDiscount.created_by_id)
+                .filter(
+                    ChatDiscount.offered_to_id == buyer_user_id,
+                    ChatDiscount.status.in_(
+                        [
+                            DiscountStatus.PENDING,
+                            DiscountStatus.ACTIVE,
+                            DiscountStatus.ACCEPTED,
+                        ]
+                    ),
+                    ChatDiscount.expires_at > datetime.utcnow(),
+                    ChatDiscount.usage_count < ChatDiscount.usage_limit,
+                )
+                .order_by(ChatDiscount.created_at.desc())
+                .all()
+            )
+
+            return [
+                {
+                    "id": discount.id,
+                    "seller_id": seller_id,
+                    "room_id": discount.room_id,
+                    "discount_type": discount.discount_type,
+                    "discount_value": discount.discount_value,
+                    "minimum_order_amount": discount.minimum_order_amount,
+                    "maximum_discount_amount": discount.maximum_discount_amount,
+                    "expires_at": discount.expires_at.isoformat(),
+                    "discount_message": discount.discount_message,
+                    "product_id": discount.product_id,
+                }
+                for discount, seller_id in rows
+            ]
+
+    @staticmethod
+    def validate_for_order(
+        session,
+        *,
+        buyer_user_id: str,
+        discount_id: int,
+        order_amount: float,
+        seller_user_id: Optional[str] = None,
+    ) -> Tuple[Optional["ChatDiscount"], float, str]:
+        """Can this buyer use this discount on this order, and for how much?
+
+        Pure: reads, checks, returns. No writes, no usage burned, no events.
+        That separation is the point -- previewing a total and committing to
+        one are different acts, and the old single method did both, so asking
+        "what would this cost?" consumed a single-use offer.
+
+        Runs inside the caller's session so the answer and the order it feeds
+        are decided in one transaction. Checked between the two, a discount
+        can be used twice.
+
+        `seller_user_id` scopes it to one shop. A discount is offered in a
+        room by one seller; the cart is now one order per shop, and without
+        this an offer from shop A would quietly reduce the bill at shop B.
+        """
+        discount = (
+            session.query(ChatDiscount)
+            .filter(
+                ChatDiscount.id == discount_id,
+                ChatDiscount.offered_to_id == buyer_user_id,
+            )
+            .with_for_update()
+            .first()
+        )
+        if discount is None:
+            # Not "forbidden": whether a discount id exists is not something
+            # a stranger needs to learn.
+            return None, 0.0, "Discount not found"
+
+        if seller_user_id and discount.created_by_id != seller_user_id:
+            return None, 0.0, "That offer is from a different shop."
+
+        can_apply, message = discount.can_be_applied_to_order(order_amount)
+        if not can_apply:
+            return None, 0.0, message
+
+        amount = discount.calculate_discount_amount(order_amount)
+        # Never more than the order. A fixed-amount offer larger than the
+        # basket would otherwise make the total negative and Markt would be
+        # paying the buyer to shop.
+        amount = min(float(amount), float(order_amount))
+        return discount, amount, "Discount can be applied"
+
+    @staticmethod
+    def consume(session, discount: "ChatDiscount") -> None:
+        """Spend one use, inside the caller's transaction.
+
+        Called only once an order actually exists. If that transaction rolls
+        back the use rolls back with it, which is the whole reason this is
+        not a separate call.
+        """
+        discount.usage_count += 1
+        if discount.usage_count >= discount.usage_limit:
+            discount.status = DiscountStatus.USED
+            discount.used_at = datetime.utcnow()
+
+    @staticmethod
     def apply_discount_to_order(
         user_id: str, discount_id: int, order_amount: float
     ) -> Tuple[bool, float, str]:
-        """
-        Apply a discount to an order (validate and calculate discount amount)
+        """What this discount would take off an order. A preview, nothing more.
 
-        Args:
-            user_id: ID of the user applying the discount
-            discount_id: ID of the discount to apply
-            order_amount: Amount of the order
+        It used to increment usage_count and mark the offer USED -- so asking
+        "what would this cost?" spent a single-use discount, with no order
+        anywhere. A client showing a running total would have burned every
+        offer it displayed.
 
-        Returns:
-            Tuple of (success, discount_amount, message)
+        The spending now happens in checkout, inside the transaction that
+        creates the order, so a discount is only used if something was
+        actually bought.
         """
         try:
-            with session_scope() as session:
-                # Get discount
-                discount = (
-                    session.query(ChatDiscount)
-                    .filter(
-                        ChatDiscount.id == discount_id,
-                        ChatDiscount.offered_to_id == user_id,
-                    )
-                    .first()
+            with read_scope() as session:
+                _, amount, message = DiscountService.validate_for_order(
+                    session,
+                    buyer_user_id=user_id,
+                    discount_id=discount_id,
+                    order_amount=order_amount,
                 )
-
-                if not discount:
-                    return False, 0.0, "Discount not found"
-
-                # Validate discount can be applied
-                can_apply, message = discount.can_be_applied_to_order(order_amount)
-                if not can_apply:
-                    return False, 0.0, message
-
-                # Calculate discount amount
-                discount_amount = discount.calculate_discount_amount(order_amount)
-
-                # Update usage count
-                discount.usage_count += 1
-                if discount.usage_count >= discount.usage_limit:
-                    discount.status = DiscountStatus.USED
-                    discount.used_at = datetime.utcnow()
-
-                session.commit()
-
-                # Update cache
-                DiscountService._cache_discount(discount)
-
-                # Emit real-time event for discount usage
-                from app.realtime.event_manager import EventManager
-
-                EventManager.emit_event(
-                    event="discount_applied",
-                    data={
-                        "discount_id": discount_id,
-                        "user_id": user_id,
-                        "order_amount": order_amount,
-                        "discount_amount": discount_amount,
-                        "remaining_usage": discount.usage_limit - discount.usage_count,
-                    },
-                    room=f"room_{discount.room_id}",
-                    namespace="/chat",
-                    use_async=True,
+                return (
+                    (amount > 0 or message == "Discount can be applied"),
+                    amount,
+                    message,
                 )
-
-                return True, discount_amount, "Discount applied successfully"
-
         except Exception as e:
-            logger.error(f"Failed to apply discount: {str(e)}")
-            return False, 0.0, "Failed to apply discount"
+            logger.error(f"Failed to preview discount {discount_id}: {e}")
+            return False, 0.0, "Could not check that discount right now."
 
     @staticmethod
     def cancel_discount(seller_id: str, discount_id: int) -> Dict[str, Any]:
@@ -1962,12 +2038,12 @@ class DiscountService:
         if discount.discount_type == DiscountType.PERCENTAGE:
             discount_text = f"{discount.discount_value}% off"
         else:
-            discount_text = f"${discount.discount_value:.2f} off"
+            discount_text = f"\u20a6{discount.discount_value:,.2f} off"
 
         message = f"🎉 Special discount offer: {discount_text} on {product_name}!"
 
         if discount.minimum_order_amount:
-            message += f" (Minimum order: ${discount.minimum_order_amount:.2f})"
+            message += f" (Minimum order: \u20a6{discount.minimum_order_amount:,.2f})"
 
         if discount.discount_message:
             message += f"\n\n{discount.discount_message}"
