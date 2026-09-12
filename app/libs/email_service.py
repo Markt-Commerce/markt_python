@@ -95,7 +95,7 @@ class EmailService:
             html_content=html_content,
             text_content=text_content,
         )
-    
+
     def send_otp_email(self, email: str, otp_code: str) -> bool:
         """Send OTP code for delivery partner login"""
         subject = "Your OTP Code for Markt Delivery Login"

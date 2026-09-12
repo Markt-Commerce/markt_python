@@ -56,4 +56,73 @@ CELERYBEAT_SCHEDULE = {
         "schedule": crontab(hour="*/4"),  # Every 4 hours
         "options": {"queue": "analytics"},
     },
+    "expire-unpaid-orders": {
+        "task": "app.orders.tasks.expire_unpaid_orders",
+        "schedule": crontab(hour="*/1"),  # Hourly
+        "options": {"queue": "default"},
+    },
+    "expire-stale-inventory-reservations": {
+        "task": "app.inventory.tasks.expire_stale_reservations",
+        "schedule": crontab(minute="*/2"),  # Every 2 minutes (10-min reservation TTL)
+        "options": {"queue": "default"},
+    },
+    "expire-abandoned-checkout-payments": {
+        "task": "app.payments.tasks.expire_abandoned_checkout_payments",
+        "schedule": crontab(minute="*/5"),  # Every 5 min -- 15-min abandonment window
+        "options": {"queue": "default"},
+    },
+    "recompute-inventory-confidence-scores": {
+        "task": "app.inventory.tasks.recompute_confidence_scores",
+        "schedule": crontab(hour="*/6"),  # Every 6 hours -- recency decays over days
+        "options": {"queue": "default"},
+    },
+    "settle-eligible-order-items": {
+        "task": "app.wallet.tasks.settle_eligible_order_items",
+        "schedule": crontab(hour="*/1"),  # Hourly -- settlement hold is 12h
+        "options": {"queue": "default"},
+    },
+    "expire-stale-fulfilment-allocations": {
+        "task": "app.fulfilment.tasks.expire_stale_allocations",
+        "schedule": crontab(minute="*/1"),  # Every minute -- 3-min response window
+        "options": {"queue": "default"},
+    },
+    "expire-stale-buyer-approvals": {
+        "task": "app.fulfilment.tasks.expire_stale_buyer_approvals",
+        "schedule": crontab(minute="*/1"),  # Every minute -- 5-min 9.1 window
+        "options": {"queue": "default"},
+    },
+    "recompute-seller-reliability-scores": {
+        "task": "app.fulfilment.tasks.recompute_seller_reliability_scores",
+        "schedule": crontab(hour="*/6"),  # Every 6 hours, same cadence as confidence
+        "options": {"queue": "default"},
+    },
+    "recover-stuck-fulfilment-allocations": {
+        "task": "app.fulfilment.tasks.recover_stuck_fulfilment_allocations",
+        "schedule": crontab(minute="*/3"),  # Backstop sweep, 10-min deadline (14.3)
+        "options": {"queue": "default"},
+    },
+    "recover-stuck-orders": {
+        "task": "app.ops.tasks.recover_stuck_orders",
+        # Generic 14.3 backstop over every worker above -- coarser than any
+        # of their own tight intervals on purpose (it exists for when one
+        # of those didn't run, not to duplicate them every cycle), while
+        # still well inside the tightest real deadline (10 min).
+        "schedule": crontab(minute="*/15"),
+        "options": {"queue": "default"},
+    },
+    "attach-eligible-orders-to-delivery-runs": {
+        "task": "app.deliveries.tasks.attach_eligible_orders",
+        "schedule": crontab(minute="*/5"),  # 10.1
+        "options": {"queue": "default"},
+    },
+    "close-delivery-runs-past-cutoff": {
+        "task": "app.deliveries.tasks.close_runs_past_cutoff",
+        "schedule": crontab(minute="*/10"),  # 10.2/10.3 -- cadence itself is ~2h
+        "options": {"queue": "default"},
+    },
+    "notify-thin-volume-delivery-orders": {
+        "task": "app.deliveries.tasks.notify_thin_volume_orders",
+        "schedule": crontab(minute="*/10"),  # 10.3
+        "options": {"queue": "default"},
+    },
 }

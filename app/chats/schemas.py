@@ -165,13 +165,17 @@ class ChatMessageReactionSchema(Schema):
     id = fields.Int(dump_only=True)
     message_id = fields.Int(dump_only=True)
     user_id = fields.Str(dump_only=True)
-    reaction_type = fields.Str(dump_only=True)
-    emoji = fields.Str(dump_only=True)
+    reaction_type = fields.Method("get_reaction_type", dump_only=True)
+    emoji = fields.Method("get_emoji", dump_only=True)
     created_at = fields.DateTime(dump_only=True)
 
+    def get_reaction_type(self, obj):
+        rt = obj.reaction_type
+        return rt.value if hasattr(rt, "value") else rt
+
     def get_emoji(self, obj):
-        """Get emoji for reaction type"""
-        return REACTION_EMOJIS.get(obj.reaction_type.value, "👍")
+        key = self.get_reaction_type(obj)
+        return REACTION_EMOJIS.get(key, "👍")
 
 
 class ChatMessageReactionCreateSchema(Schema):
@@ -193,3 +197,52 @@ class ChatMessageReactionSummarySchema(Schema):
     def get_emoji(self, obj):
         """Get emoji for reaction type"""
         return REACTION_EMOJIS.get(obj.reaction_type, "👍")
+
+
+# Discounts
+# ---------------------------------------------------------------------------
+# These were raw dicts passed to @bp.arguments. flask-smorest wants a Schema,
+# so every dict became a schema with no fields at all -- and marshmallow
+# rejected every field that was sent as "Unknown field.". Nothing could create
+# a discount, respond to one, or price one; the endpoints returned 422 for any
+# well-formed request. Nowhere else in the codebase passes a dict here.
+
+
+class CreateDiscountSchema(Schema):
+    """A seller offering a buyer a discount inside a chat room."""
+
+    discount_type = fields.Str(
+        required=True, validate=validate.OneOf(["percentage", "fixed_amount"])
+    )
+    discount_value = fields.Float(required=True, validate=validate.Range(min=0.01))
+    #: Required: an offer with no end is a price change the seller has
+    #: forgotten they made.
+    expires_at = fields.DateTime(required=True)
+    minimum_order_amount = fields.Float(allow_none=True, validate=validate.Range(min=0))
+    maximum_discount_amount = fields.Float(
+        allow_none=True, validate=validate.Range(min=0)
+    )
+    usage_limit = fields.Int(load_default=1, validate=validate.Range(min=1))
+    product_id = fields.Str(allow_none=True)
+    discount_message = fields.Str(allow_none=True)
+    discount_code = fields.Str(allow_none=True)
+    metadata = fields.Dict(allow_none=True)
+
+
+class DiscountResponseSchema(Schema):
+    """A buyer accepting or declining an offer."""
+
+    response = fields.Str(
+        required=True, validate=validate.OneOf(["accepted", "rejected"])
+    )
+    response_message = fields.Str(allow_none=True)
+
+
+class ApplyDiscountSchema(Schema):
+    """What an offer would be worth against a given order total.
+
+    A price check only -- see DiscountService.apply_discount_to_order. The
+    offer is spent at checkout, not here.
+    """
+
+    order_amount = fields.Float(required=True, validate=validate.Range(min=0.01))

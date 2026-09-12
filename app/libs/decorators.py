@@ -10,9 +10,51 @@ from functools import wraps
 
 # project imports
 from external.redis import redis_client
-from .errors import ForbiddenError, ValidationError
+from .errors import ForbiddenError, UnverifiedEmailError, ValidationError
 
 logger = current_app.logger if current_app else None
+
+
+def _require_verified_email():
+    """Refuse an account that has not proved it owns its address.
+
+    The account is created before the code is entered -- it has to be, or the
+    code attaches to nothing and closing the app loses the whole signup. The
+    protection that makes that shape safe is that an unverified account is
+    *weightless*: it cannot sign in (login refuses it), its address can be
+    reclaimed by whoever actually owns the inbox (see register_user), and it
+    cannot do anything here.
+
+    Folded into the two role decorators rather than sprinkled over 55 routes,
+    because every endpoint that buys, sells, lists or messages already passes
+    through one of them -- and a gate you have to remember to apply is a gate
+    that eventually gets forgotten. The onboarding endpoints deliberately do
+    not use these decorators, so filling in a profile still works.
+
+    Raises the same UnverifiedEmailError login already uses, so the client has
+    one shape to recognise rather than two. 403 with `error_type`, not 401:
+    the session is perfectly valid, the account just is not allowed yet, and
+    401 is what clients treat as "sign out".
+    """
+    if not getattr(current_user, "email_verified", False):
+        raise UnverifiedEmailError(
+            "Verify your email address to use this feature.",
+            payload={"email": current_user.email},
+        )
+
+
+def verified_required(f):
+    """Standalone form of the check above, for endpoints outside the two
+    role decorators."""
+
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not current_user.is_authenticated:
+            abort(401, message="Authentication required")
+        _require_verified_email()
+        return f(*args, **kwargs)
+
+    return decorated_function
 
 
 def buyer_required(f):
@@ -25,6 +67,8 @@ def buyer_required(f):
 
         if not current_user.is_buyer:
             raise ForbiddenError(message="Only buyers can access this endpoint")
+
+        _require_verified_email()
 
         return f(*args, **kwargs)
 
@@ -45,21 +89,28 @@ def seller_required(f):
         if not current_user.seller_account or not current_user.seller_account.is_active:
             abort(403, message="Active seller account required")
 
+        _require_verified_email()
+
         return f(*args, **kwargs)
 
     return decorated_function
 
 
 def admin_required(f):
-    """Decorator to require admin role"""
+    """Decorator to require admin role. Was a stub that unconditionally
+    rejected every caller (including a real admin) -- see
+    Unfinished-Tasks.md item 1. Now checks User.is_admin, which has no
+    self-serve path to set: an admin flips it directly, same treatment
+    as MarketVerificationStatus.FLAGGED / gaming_flagged elsewhere in
+    this codebase."""
 
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if not current_user.is_authenticated:
             abort(401, message="Authentication required")
 
-        # TODO: Implement proper admin check
-        raise ForbiddenError(message="Admin access required")
+        if not current_user.is_admin:
+            raise ForbiddenError(message="Admin access required")
 
         return f(*args, **kwargs)
 

@@ -37,12 +37,16 @@ from app.socials.models import (
 )
 
 # app imports
-from .models import Product, ProductVariant, ProductInventory
+from .models import Product, ProductStatus, ProductVariant, ProductInventory
+
+# Matches LOW_STOCK_THRESHOLD in the seller dashboard. Defined here too
+# because the filter has to run against the whole inventory, not the page
+# the client happens to be holding.
+LOW_STOCK_THRESHOLD = 5
 from .constants import PRODUCT_FILTER_KEYS, OPTIONAL_PRODUCT_FIELDS
 from app.orders.models import OrderItem
 from app.media.services import media_service
 from app.media.models import Media, ProductImage, MediaVariantType
-
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +65,36 @@ class ProductService:
         except SQLAlchemyError as e:
             logger.error(f"Database error fetching products: {str(e)}")
             raise APIError("Failed to fetch products", 500)
+
+    @staticmethod
+    def build_share_links(product_id: str) -> Dict[str, Any]:
+        """Canonical share links for a product.
+
+        Returns both a deep link and a web URL because a share sheet has no
+        idea whether the recipient has the app installed: the deep link opens
+        it directly, the web URL works for anyone.
+        """
+        from main.config import settings
+
+        with session_scope() as session:
+            product = session.query(Product).get(product_id)
+            if not product or product.status in (
+                Product.Status.DELETED,
+                Product.Status.DRAFT,
+            ):
+                raise NotFoundError("Product not found")
+            name = product.name
+
+        scheme = settings.MOBILE_APP_SCHEME or "markt://"
+        web_base = (settings.WEB_APP_BASE_URL or "").rstrip("/")
+
+        return {
+            "product_id": product_id,
+            "product_name": name,
+            "deep_link": f"{scheme}product/{product_id}",
+            "web_url": f"{web_base}/products/{product_id}",
+            "message": f"Check out {name} on Markt",
+        }
 
     @staticmethod
     def get_product(product_id):
@@ -88,7 +122,7 @@ class ProductService:
             raise APIError("Failed to fetch product", 500)
 
     @staticmethod
-    def search_products(args):
+    def search_products(args, market_id=None):
         with session_scope() as session:
             base_query = (
                 session.query(Product)
@@ -101,6 +135,14 @@ class ProductService:
                     joinedload(Product.categories).joinedload(ProductCategory.category),
                 )
             )
+
+            # Market browsing (markets feature): server-determined from the
+            # URL path, not a client-supplied filter, so it bypasses
+            # ProductSearchSchema entirely -- see app.markets.services.
+            if market_id is not None:
+                base_query = base_query.join(
+                    Seller, Product.seller_id == Seller.id
+                ).filter(Seller.market_id == market_id)
 
             # Initialize paginator
             paginator = Paginator(
@@ -256,7 +298,15 @@ class ProductService:
                 if "stock" in update_data:
                     product.stock = update_data["stock"]
                 if "status" in update_data:
-                    product.status = update_data["status"]
+                    # Accepts the enum member the schema produces or a plain
+                    # string from any other caller, and normalises both to the
+                    # one enum the column is built from.
+                    raw = update_data["status"]
+                    product.status = (
+                        raw
+                        if isinstance(raw, ProductStatus)
+                        else ProductStatus(str(raw))
+                    )
 
                 # Update optional fields
                 for field in OPTIONAL_PRODUCT_FIELDS:
@@ -278,6 +328,55 @@ class ProductService:
                             options=variant_data["options"],
                         )
                         session.add(variant)
+
+                # Handle media updates if provided.
+                #
+                # ProductUpdateSchema has always advertised media_ids -- it is
+                # in the OpenAPI docs -- and this function silently dropped it,
+                # so a seller could never add a photo to a listing after
+                # creating it. Adding and improving photos after launch is
+                # ordinary selling behaviour, not an edge case.
+                #
+                # Absent means "leave the images alone"; an empty list means
+                # "remove them all". Those have to differ, or a caller
+                # updating only the price would wipe the photos.
+                if "media_ids" in update_data:
+                    media_ids = update_data["media_ids"] or []
+
+                    # Media is owned by a User; this function is given a
+                    # Seller. The seller's own user is who must own the photo.
+                    owner_user_id = getattr(product.seller, "user_id", None)
+
+                    # Verified before anything is deleted, so a bad id cannot
+                    # leave the product with no images at all.
+                    verified = []
+                    for media_id in media_ids:
+                        media = session.query(Media).get(media_id)
+                        if not media:
+                            raise ValidationError(f"Media {media_id} not found")
+                        if media.user_id != owner_user_id:
+                            raise ValidationError(
+                                f"Media {media_id} does not belong to you"
+                            )
+                        verified.append(media)
+
+                    session.query(ProductImage).filter_by(
+                        product_id=product_id
+                    ).delete()
+
+                    for idx, media in enumerate(verified):
+                        session.add(
+                            ProductImage(
+                                product_id=product.id,
+                                media_id=media.id,
+                                sort_order=idx,
+                                # The order the seller sent them in is the
+                                # order they meant, and the first is the one
+                                # shown in listings.
+                                is_featured=(idx == 0),
+                                alt_text=media.alt_text or f"Product image {idx + 1}",
+                            )
+                        )
 
                 # Handle category updates if provided
                 if "category_ids" in update_data:
@@ -946,6 +1045,44 @@ class ProductService:
             raise APIError(f"Inventory reduction failed: {str(e)}", 500)
 
     @staticmethod
+    def restore_inventory_for_order(order_items: List[OrderItem]) -> bool:
+        """Restore inventory when a paid order is cancelled."""
+        try:
+            with session_scope() as session:
+                for item in order_items:
+                    if item.variant_id:
+                        inventory = (
+                            session.query(ProductInventory)
+                            .filter_by(
+                                product_id=item.product_id, variant_id=item.variant_id
+                            )
+                            .first()
+                        )
+                        if inventory:
+                            inventory.quantity += item.quantity
+                        else:
+                            inventory = ProductInventory(
+                                product_id=item.product_id,
+                                variant_id=item.variant_id,
+                                quantity=item.quantity,
+                            )
+                            session.add(inventory)
+                    else:
+                        product = session.query(Product).get(item.product_id)
+                        if not product:
+                            continue
+                        product.stock += item.quantity
+                        if product.status == Product.Status.OUT_OF_STOCK:
+                            product.status = Product.Status.ACTIVE
+
+                session.flush()
+                logger.info("Successfully restored inventory for cancelled order")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to restore inventory: {str(e)}")
+            raise APIError(f"Inventory restoration failed: {str(e)}", 500)
+
+    @staticmethod
     def check_inventory_availability(order_items: List[OrderItem]) -> bool:
         """Check if all order items have sufficient inventory"""
         try:
@@ -1056,8 +1193,24 @@ class ProductService:
             return True
 
     @staticmethod
-    def get_seller_products(seller_id: int, page: int = 1, per_page: int = 20):
-        """Get products for a specific seller with pagination"""
+    def get_seller_products(
+        seller_id: int,
+        page: int = 1,
+        per_page: int = 20,
+        search: str = None,
+        status: str = None,
+        low_stock: bool = False,
+        low_stock_threshold: int = LOW_STOCK_THRESHOLD,
+    ):
+        """Get products for a specific seller with pagination.
+
+        Search and the filters are applied here rather than in the client
+        because they have to see the whole inventory. The seller dashboard
+        filtered the page it happened to be holding, which was fine while it
+        asked for 50 products and pretended that was everything -- the moment
+        it pages properly, "search" that only looks at the current page finds
+        nothing and says so confidently.
+        """
         try:
             with session_scope() as session:
                 # Query products for the seller
@@ -1076,6 +1229,30 @@ class ProductService:
                     .order_by(Product.created_at.desc())
                 )
 
+                if search:
+                    term = f"%{search.strip()}%"
+                    # Name and SKU: the two things a seller actually types
+                    # when hunting for one of their own products.
+                    query = query.filter(
+                        db.or_(Product.name.ilike(term), Product.sku.ilike(term))
+                    )
+
+                if status:
+                    try:
+                        # `Product.Status`, not the module-level ProductStatus.
+                        # They have identical members and are different
+                        # classes, and the column is mapped to this one — the
+                        # other binds as 'ProductStatus.DRAFT' and Postgres
+                        # rejects it.
+                        query = query.filter(Product.status == Product.Status(status))
+                    except ValueError:
+                        # An unknown status is a client bug, not a reason to
+                        # return the whole catalogue as though nothing was asked.
+                        raise ValidationError(f"Unknown product status: {status}")
+
+                if low_stock:
+                    query = query.filter(Product.stock < low_stock_threshold)
+
                 # Apply pagination
                 total = query.count()
                 products = query.offset((page - 1) * per_page).limit(per_page).all()
@@ -1091,12 +1268,24 @@ class ProductService:
                         "page": page,
                         "per_page": per_page,
                         "total": total,
+                        # PaginationSchema declares `total_items`, so `total`
+                        # alone was dropped in serialisation and the client
+                        # never learned how many products matched — it could
+                        # count pages but not results. Both are sent: `total`
+                        # for anything already reading it, `total_items` for
+                        # the schema.
+                        "total_items": total,
                         "total_pages": total_pages,
                         "has_next": has_next,
                         "has_prev": has_prev,
                     },
                 }
 
+        except ValidationError:
+            # A bad filter is the caller's mistake, not ours. Folding it into
+            # the 500 below tells the client we broke when what we mean is
+            # "that is not a status", and gives them nothing to correct.
+            raise
         except Exception as e:
             logger.error(f"Failed to get seller products: {e}")
             raise APIError("Failed to get seller products", 500)

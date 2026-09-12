@@ -4,6 +4,9 @@ from typing import List, Dict, Any, Optional, Tuple
 from io import BytesIO
 from PIL import Image, ImageOps
 
+from .moderation import scan_image
+from .sanitize import strip_metadata
+
 from main.config import settings
 from app.libs.aws.s3 import s3_service
 from app.libs.session import session_scope
@@ -51,7 +54,7 @@ class MediaService:
         # Image size limits
         self.image_limits = {
             "max_size": 10 * 1024 * 1024,  # 10MB
-            "max_dimensions": (4000, 4000),
+            "max_dimensions": (5000, 5000),
             "allowed_formats": [".jpg", ".jpeg", ".png", ".webp", ".gif"],
         }
 
@@ -105,6 +108,25 @@ class MediaService:
                 raise MediaUploadError(f"Image validation failed: {str(e)}")
             finally:
                 validation_stream.close()
+
+            # Refused before it is stored, not after someone reports it.
+            # With no provider configured this allows everything and says so
+            # -- today's behaviour, made visible rather than implicit.
+            verdict = scan_image(file_data, filename, user_id)
+            if not verdict.allowed:
+                raise MediaUploadError(
+                    verdict.reason or "This image can't be uploaded."
+                )
+
+            # Strip EXIF -- which routinely carries the GPS coordinates the
+            # photo was taken at -- before the bytes reach storage. The
+            # display variants lose it by being re-encoded, but the original
+            # was uploaded exactly as received, and the original is what
+            # Media.get_url() serves.
+            file_data, stripped = strip_metadata(file_data)
+            if stripped:
+                info_stream = BytesIO(file_data)
+                upload_stream = BytesIO(file_data)
 
             # Get image info
             try:
@@ -281,9 +303,11 @@ class MediaService:
                         original_img = original_img.convert("RGBA")
                     background.paste(
                         original_img,
-                        mask=original_img.split()[-1]
-                        if original_img.mode == "RGBA"
-                        else None,
+                        mask=(
+                            original_img.split()[-1]
+                            if original_img.mode == "RGBA"
+                            else None
+                        ),
                     )
                     original_img = background
                 elif original_img.mode != "RGB":

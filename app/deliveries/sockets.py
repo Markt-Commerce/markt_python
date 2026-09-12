@@ -6,6 +6,7 @@ User identity is taken from the server session, not from client payloads.
 - Buyers (User): can join rooms for orders they bought; user_id = User.id.
 - Delivery partners (DeliveryUser): can send location updates for rooms they are assigned to.
 """
+
 import logging
 from datetime import datetime
 from flask import request

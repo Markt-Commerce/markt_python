@@ -8,11 +8,24 @@ from flask_login import login_user, logout_user, login_required, current_user
 from sqlalchemy import or_
 
 # project imports
-from app.libs.errors import AuthError, NotFoundError, UnverifiedEmailError
+from flask import jsonify, make_response, current_app
+
+from app.libs.errors import (
+    AuthError,
+    NotFoundError,
+    UnverifiedEmailError,
+    APIError,
+    ConflictError,
+)
+from app.libs.auth_tokens import generate_auth_token
+from .oauth import verify_google, verify_apple, OAuthError
+from .verification import VerificationThrottled
 from app.libs.pagination import Paginator
 from app.libs.schemas import PaginationQueryArgs
 from app.media.schemas import MediaSchema
 from app.libs.decorators import login_required, seller_required
+from app.libs.session import read_scope
+from .address_services import SavedAddressService
 
 # app imports
 from .schemas import (
@@ -44,13 +57,23 @@ from .schemas import (
     AnalyticsOverviewQuerySchema,
     AddressSchema,
     AddressUpdateSchema,
+    AccountDeletionPreviewSchema,
+    AccountDeletionRequestSchema,
+    AccountDeletionResponseSchema,
+    OAuthSignInSchema,
+    ShopSearchArgs,
+    SavedAddressSchema,
+    SavedAddressUpdateSchema,
 )
 from .services import (
     AuthService,
     UserService,
     AccountService,
+    PublicProfileService,
+    AccountDeletionService,
     SellerStartCardsService,
     SellerAnalyticsService,
+    SocialAuthService,
 )
 from .models import User
 
@@ -67,13 +90,82 @@ class UserRegister(MethodView):
     @bp.alt_response(409, description="Email/username already exists")
     def post(self, user_data):
         try:
-            user = AuthService.register_user(user_data)
-            login_user(user)
-            return user
+            # No token, and no login_user, on purpose.
+            #
+            # The account is created here -- it has to be, or the code has
+            # nothing to attach to and closing the app loses the whole signup.
+            # But creating it and handing over credentials in the same breath
+            # is what let an unverified account into the marketplace at all.
+            #
+            # Credentials are issued by the verify endpoint instead, so
+            # "prove you own this address" is the thing that actually buys
+            # access rather than a step the client is trusted to honour.
+            return AuthService.register_user(user_data)
+        except ConflictError as e:
+            abort(e.status_code, message=e.message)
         except AuthError as e:
             abort(e.status_code, message=e.message)
         except ValueError as e:
             abort(400, message=str(e))
+
+
+@bp.route("/auth/oauth")
+class OAuthSignIn(MethodView):
+    """Sign in (or sign up) with a verified Google or Apple identity.
+
+    One endpoint for both providers and for both new and returning users: the
+    app cannot know which of those it is until the token is verified, and
+    making it guess would mean a wrong guess becomes a dead end mid sign-in.
+
+    Returns the same bearer token the password path issues, so every existing
+    consumer of `access_token` is unchanged.
+    """
+
+    @bp.arguments(OAuthSignInSchema)
+    @bp.response(200, UserSchema)
+    @bp.alt_response(401, description="Token could not be verified")
+    @bp.alt_response(409, description="Email belongs to an existing account")
+    @bp.alt_response(503, description="Social sign-in not configured")
+    def post(self, data):
+        provider = data["provider"]
+        try:
+            if provider == "google":
+                identity = verify_google(
+                    data["identity_token"],
+                    audiences=current_app.config["GOOGLE_AUDIENCES"],
+                    nonce=data.get("nonce"),
+                )
+            else:
+                identity = verify_apple(
+                    data["identity_token"],
+                    audiences=current_app.config["APPLE_AUDIENCES"],
+                    nonce=data.get("nonce"),
+                )
+        except OAuthError as e:
+            abort(e.status_code, message=e.message, errors={"code": e.code})
+
+        try:
+            user, created = SocialAuthService.authenticate(
+                identity, name_hint=data.get("full_name")
+            )
+        except ConflictError as e:
+            # The app turns this into "sign in with your password once to
+            # connect Google", so the code matters as much as the message.
+            abort(409, message=e.message, errors={"code": "ACCOUNT_EXISTS"})
+        except (ValidationError, AuthError) as e:
+            abort(getattr(e, "status_code", 400), message=str(getattr(e, "message", e)))
+
+        login_user(user)
+        user.access_token = generate_auth_token(user.id)
+
+        try:
+            from app.signals import daily_login
+
+            daily_login.send("users", user_id=user.id)
+        except Exception as e:
+            logger.warning(f"gamification daily_login emit failed: {e}")
+
+        return user
 
 
 @bp.route("/login")
@@ -89,10 +181,42 @@ class UserLogin(MethodView):
                 credentials.get("account_type"),  # Use .get() to handle optional field
             )
             login_user(user)
+            user.access_token = generate_auth_token(user.id)
+            # Gamification: first login of the day (idempotent per day).
+            try:
+                from app.signals import daily_login
+
+                daily_login.send("users", user_id=user.id)
+            except Exception as e:
+                logger.warning(f"gamification daily_login emit failed: {e}")
             return user
         except UnverifiedEmailError as e:
-            # Return structured payload that frontend can detect easily
-            abort(e.status_code, **e.to_dict())
+            # An unfinished signup, not a failed one. Send a fresh code so the
+            # client can go straight to the code screen with something already
+            # on its way, rather than telling the user to do something no
+            # phone can do.
+            #
+            # Safe from an unauthenticated endpoint: login_user checks the
+            # password before it reaches this, so only someone who knows it
+            # can trigger a send, and verification.assert_can_send still
+            # applies its cooldown and hourly cap.
+            #
+            # `code_sent` reports what actually happened -- a rate limit or a
+            # mail outage means the code screen should offer "resend" rather
+            # than claim one is coming.
+            sent = AuthService.try_send_email_verification(
+                (e.payload or {}).get("email")
+            )
+            # Re-raised rather than aborted. flask-smorest's `abort` keeps
+            # only `message`/`errors` and silently drops everything else, so
+            # the "structured payload the frontend can detect" this used to
+            # pass never once reached a client -- which is why the app was
+            # reduced to substring-matching the message text. Raising lets it
+            # reach main.errors.handle_error, which serialises the payload.
+            raise UnverifiedEmailError(
+                e.message,
+                payload={**(e.payload or {}), "code_sent": bool(sent)},
+            )
         except AuthError as e:
             abort(e.status_code, message=e.message)
 
@@ -104,6 +228,68 @@ class UserLogout(MethodView):
     def post(self):
         logout_user()
         return None
+
+
+@bp.route("/account/deletion-check")
+class AccountDeletionCheck(MethodView):
+    @login_required
+    @bp.response(200, AccountDeletionPreviewSchema)
+    def get(self):
+        """Report whether this account can be deleted, and why not if it can't.
+
+        Lets the settings screen explain the problem (money still in the
+        wallet, orders in flight) up front instead of failing the delete.
+        """
+        try:
+            blockers = AccountDeletionService.check_blockers(current_user.id)
+            return {"can_delete": not blockers, "blockers": blockers}
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/account")
+class AccountDeletion(MethodView):
+    @login_required
+    @bp.arguments(AccountDeletionRequestSchema)
+    @bp.response(200, AccountDeletionResponseSchema)
+    def delete(self, data):
+        """Permanently delete the signed-in user's account.
+
+        Required by Apple App Store guideline 5.1.1(v): an account created in
+        the app has to be deletable from inside the app, and deactivation does
+        not satisfy it. Personal data is destroyed; posts, reviews and order
+        history survive attributed to a deleted user so other people's records
+        stay intact (see AccountDeletionService).
+        """
+        user_id = current_user.id
+        try:
+            result = AccountDeletionService.delete_account(user_id, data["password"])
+        except ConflictError as e:
+            # Built by hand rather than via abort(): flask-smorest's error
+            # handler renders only message/status/code and silently drops extra
+            # kwargs, so the blocker list never reached the client. The client
+            # needs the structured list to say *which* order or balance is in
+            # the way, not just a sentence.
+            blockers = (e.payload or {}).get("blockers") or []
+            return make_response(
+                jsonify(
+                    {
+                        "code": 409,
+                        "status": "Conflict",
+                        "message": e.message,
+                        "blockers": blockers,
+                    }
+                ),
+                409,
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+        # Drop the session cookie too. Bearer tokens are stateless, so they
+        # are refused by the loaders in main.setup on the strength of
+        # deleted_at rather than being revoked here.
+        logout_user()
+        return result
 
 
 @bp.route("/profile")
@@ -126,6 +312,8 @@ class UserProfile(MethodView):
         try:
             updated_user = UserService.update_user_profile(current_user.id, data)
             return UserService.get_user_profile(updated_user.id)
+        except ConflictError as e:
+            abort(e.status_code, message=e.message)
         except AuthError as e:
             abort(e.status_code, message=e.message)
 
@@ -266,6 +454,11 @@ class SendEmailVerification(MethodView):
         try:
             AuthService.send_email_verification(data["email"])
             return {"message": "Verification email sent"}
+        except VerificationThrottled as e:
+            # A rate limit is 429, not 500. A 500 tells the app we broke
+            # when what we mean is "slow down", and the client has no way
+            # to tell the difference or know when to retry.
+            abort(429, message=e.message, errors={"retry_after": e.retry_after})
         except AuthError as e:
             abort(e.status_code, message=e.message)
         except Exception as e:
@@ -275,12 +468,24 @@ class SendEmailVerification(MethodView):
 @bp.route("/email-verification/verify")
 class VerifyEmail(MethodView):
     @bp.arguments(EmailVerificationSchema)
-    @bp.response(200, PasswordResetResponseSchema)
+    @bp.response(200, UserProfileSchema)
     def post(self, data):
-        """Verify email with code"""
+        """Verify an email address, and issue the credentials for it.
+
+        This is where signing up actually completes. Register creates the
+        account but hands back nothing to act with; proving you own the
+        address is what buys access.
+        """
         try:
-            AuthService.verify_email(data["email"], data["verification_code"])
-            return {"message": "Email verified successfully"}
+            user = AuthService.verify_email(data["email"], data["verification_code"])
+            login_user(user)
+            user.access_token = generate_auth_token(user.id)
+            return user
+        except VerificationThrottled as e:
+            # A rate limit is 429, not 500. A 500 tells the app we broke
+            # when what we mean is "slow down", and the client has no way
+            # to tell the difference or know when to retry.
+            abort(429, message=e.message, errors={"retry_after": e.retry_after})
         except AuthError as e:
             abort(e.status_code, message=e.message)
         except Exception as e:
@@ -368,22 +573,79 @@ class ProfilePictureUpload(MethodView):
             abort(500, message="Internal server error")
 
 
+@bp.route("/profile/seller/banner", methods=["POST"])
+class ShopBannerUpload(MethodView):
+    @login_required
+    @bp.response(200, MediaSchema)
+    def post(self):
+        """Upload the shop's cover image."""
+        try:
+            from flask import request
+            from werkzeug.utils import secure_filename
+            from io import BytesIO
+
+            if not current_user.is_seller:
+                abort(400, message="Seller account not found")
+
+            if "file" not in request.files:
+                abort(400, message="No file provided")
+
+            file = request.files["file"]
+            if file.filename == "":
+                abort(400, message="No file selected")
+
+            filename = secure_filename(file.filename)
+            if not filename:
+                abort(400, message="Invalid filename")
+
+            file_stream = BytesIO(file.read())
+            file_stream.seek(0)
+
+            result = UserService.upload_shop_banner(
+                user_id=current_user.id, file_stream=file_stream, filename=filename
+            )
+            return result["media"]
+
+        except AuthError as e:
+            abort(e.status_code, message=e.message)
+        except Exception as e:
+            logger.error(f"Unexpected error in shop banner upload: {e}")
+            abort(500, message="Internal server error")
+
+
 @bp.route("/<user_id>/public")
 class PublicProfile(MethodView):
     @bp.response(200, PublicProfileSchema)
     def get(self, user_id):
-        """View public profile"""
-        # TODO: Show public profile info
-        # TODO: Include social stats (followers, products)
-        # TODO: Privacy controls
+        """Public view of another user.
+
+        Was a stub -- three TODOs, no return, and an empty schema -- so it
+        500'd for anyone who called it. Nothing did, which is why the feed's
+        post-author header still links nowhere.
+
+        Deliberately open to anonymous callers (a shared product link should
+        render its seller), which is exactly why the schema is narrow.
+        """
+        try:
+            return PublicProfileService.get_public_profile(
+                user_id,
+                viewer_id=current_user.id if current_user.is_authenticated else None,
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
 
 
 @bp.route("/shops")
 class ShopList(MethodView):
-    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.arguments(ShopSearchArgs, location="query")
     @bp.response(200, description="List of shops")
     def get(self, args):
-        """Search and discover shops"""
+        """Search and discover shops.
+
+        Pass `latitude`/`longitude` with `sort_by=nearby` to rank by distance;
+        each shop then carries `distance_km`, and `location.radius_km` says
+        which rung of the fallback ladder answered.
+        """
         try:
             from .services import ShopService
 
@@ -499,3 +761,45 @@ class SellerAnalyticsTimeseries(MethodView):
 
 
 # -----------------------------------------------
+
+
+@bp.route("/addresses")
+class SavedAddressList(MethodView):
+    @login_required
+    @bp.response(200, SavedAddressSchema(many=True))
+    def get(self):
+        """Every address this buyer has saved.
+
+        Default first, then most recently used. That ordering is the point:
+        the address someone wants is nearly always the one they used last.
+        """
+        with read_scope() as session:
+            return SavedAddressService.list_for_user(session, current_user.id)
+
+    @login_required
+    @bp.arguments(SavedAddressSchema)
+    @bp.response(201, SavedAddressSchema)
+    def post(self, data):
+        """Save a new address."""
+        try:
+            return SavedAddressService.create(current_user.id, data)
+        except APIError:
+            raise
+
+
+@bp.route("/addresses/<int:address_id>")
+class SavedAddressDetail(MethodView):
+    @login_required
+    @bp.arguments(SavedAddressUpdateSchema)
+    @bp.response(200, SavedAddressSchema)
+    def patch(self, data, address_id):
+        """Edit one. Sending only the fields that changed is fine."""
+        return SavedAddressService.update(current_user.id, address_id, data)
+
+    @login_required
+    @bp.response(204)
+    def delete(self, address_id):
+        """Remove one. If it was the default, another is promoted -- a buyer
+        with addresses but no default gets a checkout that looks broken."""
+        SavedAddressService.delete(current_user.id, address_id)
+        return None

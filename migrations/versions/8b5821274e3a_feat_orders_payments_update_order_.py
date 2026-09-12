@@ -7,6 +7,7 @@ Create Date: 2025-12-20 20:27:08.440965
 """
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 from sqlalchemy.dialects import postgresql
 
 
@@ -15,6 +16,12 @@ revision = '8b5821274e3a'
 down_revision = '337c904819ed'
 branch_labels = None
 depends_on = None
+
+
+def _column_exists(table: str, column: str) -> bool:
+    return column in {
+        col["name"] for col in inspect(op.get_bind()).get_columns(table)
+    }
 
 
 def upgrade():
@@ -48,10 +55,41 @@ def upgrade():
         batch_op.add_column(sa.Column('idempotency_key', sa.String(length=100), nullable=True))
         batch_op.create_unique_constraint('uq_payments_idempotency_key', ['idempotency_key'])
 
-    with op.batch_alter_table('posts', schema=None) as batch_op:
-        batch_op.alter_column('user_id',
-               existing_type=sa.VARCHAR(length=12),
-               nullable=False)
+    # Real bug in this migration, found while running the full chain
+    # against a genuinely fresh database for the first time (this was
+    # never previously exercised against an empty DB -- every real DB
+    # touched so far had already drifted ahead via db.create_all(),
+    # which silently papered over the gap). `posts.user_id` was never
+    # actually added by any migration -- this one only ever tried to
+    # ALTER a column that didn't exist, which fails outright on a fresh
+    # database. Original table creation (533a075cb638) only added
+    # `seller_id`; the model was evidently changed to `user_id` at some
+    # point (posts are user-authored, not seller-only) with no migration
+    # ever capturing that. Fixed here rather than as a new migration
+    # since, per the same evidence, this revision has never actually
+    # applied successfully anywhere -- there's no real deployed state to
+    # preserve. `seller_id` is left in place (orphaned, unused by the
+    # current model) rather than dropped here -- flagged for a later
+    # cleanup migration instead of silently dropping a column that might
+    # hold real data on some environment.
+    #
+    # Assumes no pre-existing `posts` rows lack a real author -- true for
+    # every environment checked so far (this chain has never completed),
+    # but confirm before ever running this against a `posts` table that
+    # might already have rows.
+    if not _column_exists('posts', 'user_id'):
+        with op.batch_alter_table('posts', schema=None) as batch_op:
+            batch_op.add_column(
+                sa.Column('user_id', sa.String(length=12), nullable=False)
+            )
+            batch_op.create_foreign_key(
+                'fk_posts_user_id', 'users', ['user_id'], ['id']
+            )
+    else:
+        with op.batch_alter_table('posts', schema=None) as batch_op:
+            batch_op.alter_column('user_id',
+                   existing_type=sa.VARCHAR(length=12),
+                   nullable=False)
 
     # ### end Alembic commands ###
 

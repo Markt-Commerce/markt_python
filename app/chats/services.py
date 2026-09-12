@@ -9,7 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 # project imports
 from external.database import db
 from external.redis import redis_client
-from app.libs.session import session_scope
+from app.libs.session import session_scope, read_scope
 from app.libs.errors import (
     NotFoundError,
     ValidationError,
@@ -84,14 +84,29 @@ class ChatService:
     @staticmethod
     def _format_room_messages(messages_iter, session) -> List[Dict[str, Any]]:
         """Format messages for room_data (socket join), with enriched product/offer."""
+        # Materialise first: the caller may pass a generator (reversed(...)),
+        # and the offers below need the ids up front.
+        msgs = list(messages_iter)
+        # One query for every offer on the page instead of one per offer
+        # message -- the same batching get_room_messages already got in #92.
+        offers_by_message = ChatService._batch_offers(session, [m.id for m in msgs])
+
+        # And one query for every product referenced by the page, rather than a
+        # SELECT per product/offer message.
+        wanted = [o.product_id for o in offers_by_message.values()]
+        for m in msgs:
+            if m.message_type == "product" and isinstance(m.message_data, dict):
+                wanted.append(m.message_data.get("product_id"))
+        snapshots = ChatService._batch_product_snapshots(session, wanted)
+
         formatted = []
-        for msg in messages_iter:
+        for msg in msgs:
             msg_dict = {
                 "id": msg.id,
                 "content": msg.content,
                 "message_type": msg.message_type,
                 "message_data": ChatService._enrich_message_data(
-                    msg.message_type, msg.message_data, msg.id, session
+                    msg.message_type, msg.message_data, msg.id, session, snapshots
                 ),
                 "sender_id": msg.sender_id,
                 "sender_username": msg.sender.username,
@@ -99,11 +114,7 @@ class ChatService:
                 "created_at": msg.created_at.isoformat(),
             }
             if msg.message_type == "offer":
-                offer = (
-                    session.query(ChatOffer)
-                    .filter(ChatOffer.message_id == msg.id)
-                    .first()
-                )
+                offer = offers_by_message.get(msg.id)
                 if offer:
                     offer_payload = {
                         "id": offer.id,
@@ -111,9 +122,7 @@ class ChatService:
                         "price": float(offer.price),
                         "status": offer.status,
                     }
-                    product_snapshot = ChatService._build_product_snapshot(
-                        offer.product_id, session
-                    )
+                    product_snapshot = snapshots.get(offer.product_id)
                     if product_snapshot:
                         offer_payload["product"] = product_snapshot
                     msg_dict["offer"] = offer_payload
@@ -126,6 +135,7 @@ class ChatService:
         message_data: Optional[Dict[str, Any]],
         message_id: int,
         session,
+        snapshots: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Enrich message_data with product snapshot for product messages.
 
@@ -138,10 +148,55 @@ class ChatService:
         if message_type == "product":
             pid = result.get("product_id")
             if pid and "product" not in result:
-                snapshot = ChatService._build_product_snapshot(pid, session)
+                # Prefer the batch the caller already built; fall back to a
+                # single fetch for one-off callers.
+                snapshot = (
+                    snapshots.get(pid)
+                    if snapshots is not None
+                    else ChatService._build_product_snapshot(pid, session)
+                )
                 if snapshot:
                     result["product"] = snapshot
         return result
+
+    @staticmethod
+    def _user_pair_room_filter(buyer_id: str, seller_id: str):
+        """Match a chat room regardless of which user is stored as buyer or seller."""
+        return db.or_(
+            db.and_(
+                ChatRoom.buyer_id == buyer_id,
+                ChatRoom.seller_id == seller_id,
+            ),
+            db.and_(
+                ChatRoom.buyer_id == seller_id,
+                ChatRoom.seller_id == buyer_id,
+            ),
+        )
+
+    @staticmethod
+    def _find_room_for_user_pair(session, buyer_id: str, seller_id: str):
+        """Return the most recently active room between two users, if any."""
+        return (
+            session.query(ChatRoom)
+            .filter(ChatService._user_pair_room_filter(buyer_id, seller_id))
+            .order_by(
+                ChatRoom.last_message_at.desc().nullslast(),
+                ChatRoom.id.desc(),
+            )
+            .first()
+        )
+
+    @staticmethod
+    def _apply_room_context(
+        room: ChatRoom,
+        product_id: Optional[str],
+        request_id: Optional[str],
+    ) -> None:
+        """Attach product/request context to a room when not already set."""
+        if product_id and room.product_id is None:
+            room.product_id = product_id
+        if request_id and room.request_id is None:
+            room.request_id = request_id
 
     @staticmethod
     def create_or_get_chat_room(
@@ -150,69 +205,50 @@ class ChatService:
         product_id: Optional[str] = None,
         request_id: Optional[str] = None,
     ) -> ChatRoom:
-        """Create or get existing chat room between buyer and seller
+        """Create or get the single chat room between a buyer and seller.
 
-        This method ensures that only one chat room exists between two users
-        for a given product/request, regardless of which user initiated the conversation.
+        One conversation exists per user pair. product_id and request_id are
+        optional context (e.g. opened from a product page) and do not create
+        separate rooms. Product-specific content belongs on messages.
         """
         try:
-            # Validate that buyer and seller are different users
             if buyer_id == seller_id:
                 raise ValidationError("Cannot create a chat room with yourself")
 
-            # Validate that both users exist
-            buyer = session.query(User).filter(User.id == buyer_id).first()
-            if not buyer:
-                raise NotFoundError(f"Buyer with ID {buyer_id} not found")
-
-            seller = session.query(User).filter(User.id == seller_id).first()
-            if not seller:
-                raise NotFoundError(f"Seller with ID {seller_id} not found")
-
-            # Validate product_id if provided
-            if product_id:
-                product = (
-                    session.query(Product).filter(Product.id == product_id).first()
-                )
-                if not product:
-                    raise NotFoundError(f"Product with ID {product_id} not found")
-
-            # Validate request_id if provided
-            if request_id:
-                request_obj = (
-                    session.query(BuyerRequest)
-                    .filter(BuyerRequest.id == request_id)
-                    .first()
-                )
-                if not request_obj:
-                    raise NotFoundError(f"Request with ID {request_id} not found")
-
             with session_scope() as session:
-                # Check if room already exists in either direction
-                # (buyer_id=A, seller_id=B) OR (buyer_id=B, seller_id=A)
-                existing_room = (
-                    session.query(ChatRoom)
-                    .filter(
-                        db.or_(
-                            db.and_(
-                                ChatRoom.buyer_id == buyer_id,
-                                ChatRoom.seller_id == seller_id,
-                            ),
-                            db.and_(
-                                ChatRoom.buyer_id == seller_id,
-                                ChatRoom.seller_id == buyer_id,
-                            ),
-                        ),
-                        ChatRoom.product_id == product_id,
-                        ChatRoom.request_id == request_id,
-                    )
-                    .first()
-                )
+                buyer = session.query(User).filter(User.id == buyer_id).first()
+                if not buyer:
+                    raise NotFoundError(f"Buyer with ID {buyer_id} not found")
 
+                seller = session.query(User).filter(User.id == seller_id).first()
+                if not seller:
+                    raise NotFoundError(f"Seller with ID {seller_id} not found")
+
+                if product_id:
+                    product = (
+                        session.query(Product).filter(Product.id == product_id).first()
+                    )
+                    if not product:
+                        raise NotFoundError(f"Product with ID {product_id} not found")
+
+                if request_id:
+                    request_obj = (
+                        session.query(BuyerRequest)
+                        .filter(BuyerRequest.id == request_id)
+                        .first()
+                    )
+                    if not request_obj:
+                        raise NotFoundError(f"Request with ID {request_id} not found")
+
+                existing_room = ChatService._find_room_for_user_pair(
+                    session, buyer_id, seller_id
+                )
                 if existing_room:
+                    ChatService._apply_room_context(
+                        existing_room, product_id, request_id
+                    )
                     return existing_room
 
-                # Create new room
                 room = ChatRoom(
                     buyer_id=buyer_id,
                     seller_id=seller_id,
@@ -223,15 +259,16 @@ class ChatService:
                 session.add(room)
                 session.flush()
 
-                # Cache room for both users
                 ChatService._cache_user_room(buyer_id, room)
                 ChatService._cache_user_room(seller_id, room)
 
                 return room
 
+        except APIError:
+            raise
         except Exception as e:
-            logger.error(f"Failed to create chat room: {str(e)}")
-            raise APIError("Failed to create chat room")
+            logger.exception("Failed to create chat room: %s", e)
+            raise APIError("Failed to create chat room", status_code=500)
 
     @staticmethod
     def get_user_chat_rooms(
@@ -239,42 +276,58 @@ class ChatService:
     ) -> Dict[str, Any]:
         """Get chat rooms for a user with recent messages"""
         try:
-            with session_scope() as session:
-                # Get rooms where user is buyer or seller
+            # read_scope, not session_scope: session_scope commits on exit, and a
+            # commit expires every loaded instance. Anything touched afterwards
+            # then re-SELECTs itself one row at a time.
+            with read_scope() as session:
+                membership = db.or_(
+                    ChatRoom.buyer_id == user_id,
+                    ChatRoom.seller_id == user_id,
+                )
+
+                # joinedload(ChatRoom.messages) used to be here. It pulled the
+                # entire message history of every room on the page into memory
+                # just to render a one-line preview -- the cost grew with how
+                # much people had talked, which is the wrong thing to scale on.
                 rooms = (
                     session.query(ChatRoom)
                     .options(
                         joinedload(ChatRoom.buyer),
                         joinedload(ChatRoom.seller),
-                        joinedload(ChatRoom.product),
+                        joinedload(ChatRoom.product).joinedload(Product.images),
                         joinedload(ChatRoom.request),
-                        joinedload(ChatRoom.messages),
                     )
-                    .filter(
-                        db.or_(
-                            ChatRoom.buyer_id == user_id,
-                            ChatRoom.seller_id == user_id,
-                        )
+                    .filter(membership)
+                    # id.desc() is a tiebreaker, not decoration: last_message_at
+                    # is null for a room nobody has spoken in yet, and ties on
+                    # equal timestamps otherwise. Without a stable second key the
+                    # order varies between calls, so paging can repeat or skip a
+                    # room. _find_room_for_user_pair already orders this way.
+                    .order_by(
+                        ChatRoom.last_message_at.desc().nullslast(),
+                        ChatRoom.id.desc(),
                     )
-                    .order_by(ChatRoom.last_message_at.desc())
                     .offset((page - 1) * per_page)
                     .limit(per_page)
                     .all()
                 )
 
+                room_ids = [room.id for room in rooms]
+                last_messages = ChatService._batch_last_messages(session, room_ids)
+                unread_counts = ChatService._batch_unread_counts(
+                    session, room_ids, user_id
+                )
+
+                # Real total, so the client can page. This used to report
+                # len(enhanced_rooms) -- the size of the current page, which
+                # meant the last page and a full page looked identical.
+                total = session.query(ChatRoom).filter(membership).count()
+
                 # Enhance rooms with additional data
                 enhanced_rooms = []
                 for room in rooms:
-                    # Get last message
-                    last_message = (
-                        session.query(ChatMessage)
-                        .filter(ChatMessage.room_id == room.id)
-                        .order_by(ChatMessage.created_at.desc())
-                        .first()
-                    )
-
-                    # Get unread count
-                    unread_count = ChatService._get_unread_count(room.id, user_id)
+                    last_message = last_messages.get(room.id)
+                    unread_count = unread_counts.get(room.id, 0)
 
                     # Get other user info
                     other_user = room.seller if room.buyer_id == user_id else room.buyer
@@ -285,44 +338,54 @@ class ChatService:
                             "id": other_user.id,
                             "username": other_user.username,
                             "profile_picture": other_user.profile_picture,
-                            "is_seller": hasattr(other_user, "seller_account"),
+                            # hasattr() on a relationship is always True -- the
+                            # attribute exists whether or not it resolves to a
+                            # row -- so this reported every counterparty as a
+                            # seller, buyers included.
+                            "is_seller": other_user.seller_account is not None,
                         },
-                        "product": {
-                            "id": room.product.id,
-                            "name": room.product.name,
-                            "price": float(room.product.price),
-                            "image": (
-                                room.product.images[0].media.get_url()
-                                if (
-                                    room.product.images
-                                    and len(room.product.images) > 0
-                                    and room.product.images[0].media
-                                )
-                                else None
-                            ),
-                        }
-                        if room.product
-                        else None,
-                        "request": {
-                            "id": room.request.id,
-                            "title": room.request.title,
-                            "description": room.request.description,
-                        }
-                        if room.request
-                        else None,
-                        "last_message": {
-                            "id": last_message.id,
-                            "sender_id": last_message.sender_id,
-                            "content": last_message.content,
-                            "message_type": last_message.message_type,
-                            "created_at": last_message.created_at,
-                        }
-                        if last_message
-                        else None,
+                        "product": (
+                            {
+                                "id": room.product.id,
+                                "name": room.product.name,
+                                "price": float(room.product.price),
+                                "image": (
+                                    room.product.images[0].media.get_url()
+                                    if (
+                                        room.product.images
+                                        and len(room.product.images) > 0
+                                        and room.product.images[0].media
+                                    )
+                                    else None
+                                ),
+                            }
+                            if room.product
+                            else None
+                        ),
+                        "request": (
+                            {
+                                "id": room.request.id,
+                                "title": room.request.title,
+                                "description": room.request.description,
+                            }
+                            if room.request
+                            else None
+                        ),
+                        "last_message": (
+                            {
+                                "id": last_message.id,
+                                "sender_id": last_message.sender_id,
+                                "content": last_message.content,
+                                "message_type": last_message.message_type,
+                                "created_at": last_message.created_at,
+                            }
+                            if last_message
+                            else None
+                        ),
                         "unread_count": unread_count,
-                        "last_message_at": room.last_message_at
-                        if room.last_message_at
-                        else None,
+                        "last_message_at": (
+                            room.last_message_at if room.last_message_at else None
+                        ),
                     }
 
                     enhanced_rooms.append(room_data)
@@ -332,7 +395,7 @@ class ChatService:
                     "pagination": {
                         "page": page,
                         "per_page": per_page,
-                        "total": len(enhanced_rooms),
+                        "total": total,
                     },
                 }
 
@@ -341,13 +404,115 @@ class ChatService:
             raise APIError("Failed to get chat rooms")
 
     @staticmethod
+    def _batch_product_snapshots(session, product_ids) -> Dict[str, Dict[str, Any]]:
+        """Snapshots for many products in one query.
+
+        _build_product_snapshot() fetches a single product, so calling it while
+        formatting a page of messages cost one SELECT per product/offer message.
+        """
+        ids = {pid for pid in product_ids if pid}
+        if not ids:
+            return {}
+        products = (
+            session.query(Product)
+            .options(joinedload(Product.images))
+            .filter(Product.id.in_(ids))
+            .all()
+        )
+        snapshots: Dict[str, Dict[str, Any]] = {}
+        for product in products:
+            image_url = None
+            if product.images and len(product.images) > 0:
+                first_image = product.images[0]
+                if first_image.media:
+                    try:
+                        image_url = first_image.media.get_url()
+                    except Exception:
+                        pass
+            snapshots[product.id] = {
+                "id": product.id,
+                "name": product.name,
+                "price": float(product.price),
+                "currency": "NGN",
+                "image_url": image_url,
+            }
+        return snapshots
+
+    @staticmethod
+    def _batch_offers(session, message_ids: List[int]) -> Dict[int, ChatOffer]:
+        """Offers keyed by message id, in one query instead of one per offer."""
+        if not message_ids:
+            return {}
+        rows = (
+            session.query(ChatOffer).filter(ChatOffer.message_id.in_(message_ids)).all()
+        )
+        return {offer.message_id: offer for offer in rows}
+
+    @staticmethod
+    def _batch_last_messages(session, room_ids: List[int]) -> Dict[int, ChatMessage]:
+        """Newest message per room, in one query instead of one query per room."""
+        if not room_ids:
+            return {}
+        newest = (
+            db.select(
+                ChatMessage,
+                db.func.row_number()
+                .over(
+                    partition_by=ChatMessage.room_id,
+                    # id.desc() breaks ties: messages sent in the same instant
+                    # share a created_at, and without it "the last message"
+                    # varies between reads.
+                    order_by=(
+                        ChatMessage.created_at.desc(),
+                        ChatMessage.id.desc(),
+                    ),
+                )
+                .label("rn"),
+            )
+            .filter(ChatMessage.room_id.in_(room_ids))
+            .subquery()
+        )
+        aliased = db.aliased(ChatMessage, newest)
+        rows = session.query(aliased).filter(newest.c.rn == 1).all()
+        return {msg.room_id: msg for msg in rows}
+
+    @staticmethod
+    def _batch_unread_counts(
+        session, room_ids: List[int], user_id: str
+    ) -> Dict[int, int]:
+        """Unread count per room, in one grouped query.
+
+        The old path called _get_unread_count() per room, and that helper opened
+        its own session_scope -- so every room both cost a query and committed,
+        expiring the rooms and users already loaded above.
+        """
+        if not room_ids:
+            return {}
+        rows = (
+            session.query(ChatMessage.room_id, db.func.count(ChatMessage.id))
+            .filter(
+                ChatMessage.room_id.in_(room_ids),
+                ChatMessage.sender_id != user_id,
+                ChatMessage.is_read.is_(False),
+            )
+            .group_by(ChatMessage.room_id)
+            .all()
+        )
+        return {room_id: count for room_id, count in rows}
+
+    @staticmethod
     def get_room_messages(
         room_id: int, user_id: str, page: int = 1, per_page: int = 50
     ) -> Dict[str, Any]:
         """Get messages for a specific chat room"""
         try:
+            # Access check and the read-receipt write happen first, in a scope
+            # that is allowed to commit. Doing the write *during* the read was
+            # the bug: the commit expired every message and sender already
+            # loaded, so the formatting loop re-fetched them one row at a time.
+            # Marking before reading also keeps the response identical to what
+            # it was -- messages come back already flagged read.
             with session_scope() as session:
-                # Verify user has access to this room
                 room = (
                     session.query(ChatRoom)
                     .filter(
@@ -359,23 +524,37 @@ class ChatService:
                     )
                     .first()
                 )
-
                 if not room:
                     raise ForbiddenError("Access denied to this chat room")
 
+            ChatService._mark_messages_as_read(room_id, user_id)
+
+            with read_scope() as session:
                 # Get messages with pagination
                 messages = (
                     session.query(ChatMessage)
                     .options(joinedload(ChatMessage.sender))
                     .filter(ChatMessage.room_id == room_id)
-                    .order_by(ChatMessage.created_at.desc())
+                    .order_by(
+                        ChatMessage.created_at.desc(),
+                        ChatMessage.id.desc(),
+                    )
                     .offset((page - 1) * per_page)
                     .limit(per_page)
                     .all()
                 )
 
-                # Mark messages as read
-                ChatService._mark_messages_as_read(room_id, user_id)
+                # Offers for this page, batched. Previously one SELECT per
+                # message that happened to be an offer.
+                offers_by_message = ChatService._batch_offers(
+                    session, [m.id for m in messages]
+                )
+
+                total = (
+                    session.query(ChatMessage)
+                    .filter(ChatMessage.room_id == room_id)
+                    .count()
+                )
 
                 # Format messages
                 formatted_messages = []
@@ -405,11 +584,7 @@ class ChatService:
 
                     # Add offer data if message contains an offer
                     if message.message_type == "offer":
-                        offer = (
-                            session.query(ChatOffer)
-                            .filter(ChatOffer.message_id == message.id)
-                            .first()
-                        )
+                        offer = offers_by_message.get(message.id)
                         if offer:
                             offer_payload = {
                                 "id": offer.id,
@@ -432,7 +607,7 @@ class ChatService:
                     "pagination": {
                         "page": page,
                         "per_page": per_page,
-                        "total": len(formatted_messages),
+                        "total": total,
                     },
                 }
 
@@ -465,9 +640,17 @@ class ChatService:
 
     @staticmethod
     def get_room_with_messages(room_id: int, user_id: str) -> Dict[str, Any]:
-        """Get room details with recent messages for socket connection"""
+        """Get room details with recent messages for socket connection.
+
+        Runs on every chat open over the socket, so it had the same three
+        problems its siblings did (see #92) and was simply missed.
+        """
         try:
-            with session_scope() as session:
+            # read_scope: session_scope commits on exit, and _get_unread_count
+            # opened a second one mid-read -- a commit expires every loaded
+            # instance, so anything touched afterwards re-SELECTs a row at a
+            # time.
+            with read_scope() as session:
                 # Verify user has access to this room
                 room = (
                     session.query(ChatRoom)
@@ -509,35 +692,53 @@ class ChatService:
                         "id": other_user.id,
                         "username": other_user.username,
                         "profile_picture": other_user.profile_picture,
-                        "is_seller": hasattr(other_user, "seller_account"),
+                        # hasattr() on a relationship is always True -- the
+                        # attribute exists whether or not it resolves to a row --
+                        # so every counterparty was reported as a seller.
+                        "is_seller": other_user.seller_account is not None,
                     },
-                    "product": {
-                        "id": room.product.id,
-                        "name": room.product.name,
-                        "price": float(room.product.price),
-                        "image": (
-                            room.product.images[0].media.get_url()
-                            if (
-                                room.product.images
-                                and len(room.product.images) > 0
-                                and room.product.images[0].media
-                            )
-                            else None
-                        ),
-                    }
-                    if room.product
-                    else None,
-                    "request": {
-                        "id": room.request.id,
-                        "title": room.request.title,
-                        "description": room.request.description,
-                    }
-                    if room.request
-                    else None,
+                    "product": (
+                        {
+                            "id": room.product.id,
+                            "name": room.product.name,
+                            "price": float(room.product.price),
+                            "image": (
+                                room.product.images[0].media.get_url()
+                                if (
+                                    room.product.images
+                                    and len(room.product.images) > 0
+                                    and room.product.images[0].media
+                                )
+                                else None
+                            ),
+                        }
+                        if room.product
+                        else None
+                    ),
+                    "request": (
+                        {
+                            "id": room.request.id,
+                            "title": room.request.title,
+                            "description": room.request.description,
+                        }
+                        if room.request
+                        else None
+                    ),
                     "messages": ChatService._format_room_messages(
                         reversed(messages), session
                     ),
-                    "unread_count": ChatService._get_unread_count(room.id, user_id),
+                    # Counted in this session rather than through
+                    # _get_unread_count(), which opens its own scope and commits.
+                    "unread_count": (
+                        session.query(db.func.count(ChatMessage.id))
+                        .filter(
+                            ChatMessage.room_id == room.id,
+                            ChatMessage.sender_id != user_id,
+                            ChatMessage.is_read.is_(False),
+                        )
+                        .scalar()
+                        or 0
+                    ),
                 }
 
         except Exception as e:
@@ -668,7 +869,7 @@ class ChatService:
                 chat_message = ChatMessage(
                     room_id=room_id,
                     sender_id=user_id,
-                    content=f"Offered ${amount:.2f} for {product.name}",
+                    content=f"Offered \u20a6{amount:,.2f} for {product.name}",
                     message_type="offer",
                     message_data=message_data,
                 )
@@ -960,6 +1161,33 @@ class ChatReactionService:
     """Service for managing reactions on chat messages"""
 
     @staticmethod
+    def _emit_message_reaction_event(
+        event: str,
+        message_id: int,
+        user_id: str,
+        reaction_type: str,
+        username: Optional[str] = None,
+    ) -> None:
+        """Emit reaction events from HTTP handlers (outside Socket.IO request context)."""
+        from main.extensions import socketio
+
+        reaction_value = (
+            reaction_type.value if hasattr(reaction_type, "value") else reaction_type
+        )
+        socketio.emit(
+            event,
+            {
+                "message_id": message_id,
+                "user_id": user_id,
+                "username": username or "User",
+                "reaction_type": reaction_value,
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+            room=f"message_{message_id}",
+            namespace="/chat",
+        )
+
+    @staticmethod
     def add_message_reaction(user_id: str, message_id: int, reaction_type: str):
         """Add or update a reaction on a chat message"""
         try:
@@ -1006,22 +1234,22 @@ class ChatReactionService:
                 session.add(reaction)
                 session.commit()
 
-                # Emit real-time websocket event
                 try:
-                    from flask_socketio import emit
-
-                    emit(
+                    user = session.query(User).filter(User.id == user_id).first()
+                    ChatReactionService._emit_message_reaction_event(
                         "message_reaction_added",
-                        {
-                            "message_id": message_id,
-                            "user_id": user_id,
-                            "reaction_type": reaction_type,
-                            "timestamp": datetime.utcnow().isoformat(),
-                        },
-                        room=f"message_{message_id}",
+                        message_id,
+                        user_id,
+                        reaction_type_enum,
+                        username=user.username if user else None,
+                    )
+                    redis_client.hincrby(
+                        f"message:{message_id}:reactions",
+                        reaction_type_enum.value,
+                        1,
                     )
                 except Exception as e:
-                    logger.warning(f"Failed to emit message_reaction_added event: {e}")
+                    logger.warning("Failed to emit message_reaction_added event: %s", e)
 
                 return reaction
 
@@ -1056,23 +1284,21 @@ class ChatReactionService:
                 session.delete(reaction)
                 session.commit()
 
-                # Emit real-time websocket event
                 try:
-                    from flask_socketio import emit
-
-                    emit(
+                    user = session.query(User).filter(User.id == user_id).first()
+                    ChatReactionService._emit_message_reaction_event(
                         "message_reaction_removed",
-                        {
-                            "message_id": message_id,
-                            "user_id": user_id,
-                            "reaction_type": reaction_type,
-                            "timestamp": datetime.utcnow().isoformat(),
-                        },
-                        room=f"message_{message_id}",
+                        message_id,
+                        user_id,
+                        reaction_type,
+                        username=user.username if user else None,
+                    )
+                    redis_client.hincrby(
+                        f"message:{message_id}:reactions", reaction_type, -1
                     )
                 except Exception as e:
                     logger.warning(
-                        f"Failed to emit message_reaction_removed event: {e}"
+                        "Failed to emit message_reaction_removed event: %s", e
                     )
 
                 return True
@@ -1215,12 +1441,26 @@ class DiscountService:
                 message_content = DiscountService._generate_discount_message(
                     discount, room
                 )
+                # Everything the card in the chat needs to draw itself
+                # without a second request. `status` is the value at the
+                # moment of offering: it moves when the buyer responds, and
+                # the client reads the live one from the room's discount list
+                # rather than trusting this snapshot.
+                product = (
+                    session.query(Product).get(discount.product_id)
+                    if discount.product_id
+                    else None
+                )
                 message_data = {
                     "discount_id": discount.id,
                     "discount_type": discount.discount_type,
                     "discount_value": discount.discount_value,
                     "expires_at": discount.expires_at.isoformat(),
                     "product_id": discount.product_id,
+                    "product_name": getattr(product, "name", None),
+                    "minimum_order_amount": discount.minimum_order_amount,
+                    "discount_message": discount.discount_message,
+                    "status": discount.status,
                 }
 
                 chat_message = ChatMessage(
@@ -1261,13 +1501,15 @@ class DiscountService:
                     "discount_message": discount.discount_message,
                     "discount_code": discount.discount_code,
                     "created_at": discount.created_at.isoformat(),
-                    "product": {
-                        "id": room.product.id,
-                        "name": room.product.name,
-                        "price": float(room.product.price),
-                    }
-                    if room.product
-                    else None,
+                    "product": (
+                        {
+                            "id": room.product.id,
+                            "name": room.product.name,
+                            "price": float(room.product.price),
+                        }
+                        if room.product
+                        else None
+                    ),
                     "offered_to": {
                         "id": room.buyer.id,
                         "username": room.buyer.username,
@@ -1503,13 +1745,15 @@ class DiscountService:
                             "discount_code": discount.discount_code,
                             "created_at": discount.created_at.isoformat(),
                             "is_valid": discount.is_valid(),
-                            "product": {
-                                "id": discount.product.id,
-                                "name": discount.product.name,
-                                "price": float(discount.product.price),
-                            }
-                            if discount.product
-                            else None,
+                            "product": (
+                                {
+                                    "id": discount.product.id,
+                                    "name": discount.product.name,
+                                    "price": float(discount.product.price),
+                                }
+                                if discount.product
+                                else None
+                            ),
                             "created_by": {
                                 "id": discount.created_by.id,
                                 "username": discount.created_by.username,
@@ -1528,76 +1772,182 @@ class DiscountService:
             raise APIError("Failed to get active discounts")
 
     @staticmethod
+    def spendable_for_buyer(buyer_user_id: str) -> List[Dict[str, Any]]:
+        """Offers this buyer could actually spend, tagged with the shop.
+
+        The basket is grouped by seller *account*, and a chat discount records
+        the seller by *user* id, so the join happens here -- once, on the
+        server -- rather than leaving the app to guess which offer belongs to
+        which card.
+
+        Only offers with a shop attached come back: one that cannot be matched
+        to a group could never be applied, and showing it would be an offer
+        the buyer cannot take.
+        """
+        from app.users.models import Seller
+
+        with read_scope() as session:
+            rows = (
+                session.query(ChatDiscount, Seller.id)
+                .join(Seller, Seller.user_id == ChatDiscount.created_by_id)
+                .filter(
+                    ChatDiscount.offered_to_id == buyer_user_id,
+                    ChatDiscount.status.in_(
+                        [
+                            DiscountStatus.PENDING,
+                            DiscountStatus.ACTIVE,
+                            DiscountStatus.ACCEPTED,
+                        ]
+                    ),
+                    ChatDiscount.expires_at > datetime.utcnow(),
+                    ChatDiscount.usage_count < ChatDiscount.usage_limit,
+                )
+                .order_by(ChatDiscount.created_at.desc())
+                .all()
+            )
+
+            return [
+                {
+                    "id": discount.id,
+                    "seller_id": seller_id,
+                    "room_id": discount.room_id,
+                    "discount_type": discount.discount_type,
+                    "discount_value": discount.discount_value,
+                    "minimum_order_amount": discount.minimum_order_amount,
+                    "maximum_discount_amount": discount.maximum_discount_amount,
+                    "expires_at": discount.expires_at.isoformat(),
+                    "discount_message": discount.discount_message,
+                    "product_id": discount.product_id,
+                }
+                for discount, seller_id in rows
+            ]
+
+    @staticmethod
+    def validate_for_order(
+        session,
+        *,
+        buyer_user_id: str,
+        discount_id: int,
+        order_amount: float,
+        seller_user_id: Optional[str] = None,
+        eligible_by_product: Optional[Dict[str, float]] = None,
+        product_names: Optional[Dict[str, str]] = None,
+    ) -> Tuple[Optional["ChatDiscount"], float, str]:
+        """Can this buyer use this discount on this order, and for how much?
+
+        Pure: reads, checks, returns. No writes, no usage burned, no events.
+        That separation is the point -- previewing a total and committing to
+        one are different acts, and the old single method did both, so asking
+        "what would this cost?" consumed a single-use offer.
+
+        Runs inside the caller's session so the answer and the order it feeds
+        are decided in one transaction. Checked between the two, a discount
+        can be used twice.
+
+        `seller_user_id` scopes it to one shop. A discount is offered in a
+        room by one seller; the cart is now one order per shop, and without
+        this an offer from shop A would quietly reduce the bill at shop B.
+
+        `eligible_by_product` maps product id to what this order spends on it.
+        An offer made against one product in chat comes off that product's
+        lines only -- not off everything else the buyer happened to add from
+        the same shop. Passed as a map rather than a single figure because
+        whether the offer is tied to a product is a fact about the offer, and
+        the offer is not in hand until the locking read below.
+
+        The order total still decides whether a minimum_order_amount is met,
+        because that is what "minimum order" means to whoever set it.
+        """
+        discount = (
+            session.query(ChatDiscount)
+            .filter(
+                ChatDiscount.id == discount_id,
+                ChatDiscount.offered_to_id == buyer_user_id,
+            )
+            .with_for_update()
+            .first()
+        )
+        if discount is None:
+            # Not "forbidden": whether a discount id exists is not something
+            # a stranger needs to learn.
+            return None, 0.0, "Discount not found"
+
+        if seller_user_id and discount.created_by_id != seller_user_id:
+            return None, 0.0, "That offer is from a different shop."
+
+        can_apply, message = discount.can_be_applied_to_order(order_amount)
+        if not can_apply:
+            return None, 0.0, message
+
+        if discount.product_id and eligible_by_product is not None:
+            base = float(eligible_by_product.get(discount.product_id, 0))
+        else:
+            base = float(order_amount)
+
+        if discount.product_id and base <= 0:
+            # The seller pointed at one product. Buying something else from
+            # the same shop is not what they offered, and silently applying it
+            # anyway is how "15% off this jersey" became 15% off a basket.
+            name = (product_names or {}).get(discount.product_id)
+            return (
+                None,
+                0.0,
+                f"That offer is for {name}, which isn't in this order."
+                if name
+                else "That offer is for a product that isn't in this order.",
+            )
+
+        amount = discount.calculate_discount_amount(base)
+        # Never more than what it applies to. A fixed-amount offer larger than
+        # the basket would otherwise make the total negative and Markt would
+        # be paying the buyer to shop.
+        amount = min(float(amount), base)
+        return discount, amount, "Discount can be applied"
+
+    @staticmethod
+    def consume(session, discount: "ChatDiscount") -> None:
+        """Spend one use, inside the caller's transaction.
+
+        Called only once an order actually exists. If that transaction rolls
+        back the use rolls back with it, which is the whole reason this is
+        not a separate call.
+        """
+        discount.usage_count += 1
+        if discount.usage_count >= discount.usage_limit:
+            discount.status = DiscountStatus.USED
+            discount.used_at = datetime.utcnow()
+
+    @staticmethod
     def apply_discount_to_order(
         user_id: str, discount_id: int, order_amount: float
     ) -> Tuple[bool, float, str]:
-        """
-        Apply a discount to an order (validate and calculate discount amount)
+        """What this discount would take off an order. A preview, nothing more.
 
-        Args:
-            user_id: ID of the user applying the discount
-            discount_id: ID of the discount to apply
-            order_amount: Amount of the order
+        It used to increment usage_count and mark the offer USED -- so asking
+        "what would this cost?" spent a single-use discount, with no order
+        anywhere. A client showing a running total would have burned every
+        offer it displayed.
 
-        Returns:
-            Tuple of (success, discount_amount, message)
+        The spending now happens in checkout, inside the transaction that
+        creates the order, so a discount is only used if something was
+        actually bought.
         """
         try:
-            with session_scope() as session:
-                # Get discount
-                discount = (
-                    session.query(ChatDiscount)
-                    .filter(
-                        ChatDiscount.id == discount_id,
-                        ChatDiscount.offered_to_id == user_id,
-                    )
-                    .first()
+            with read_scope() as session:
+                _, amount, message = DiscountService.validate_for_order(
+                    session,
+                    buyer_user_id=user_id,
+                    discount_id=discount_id,
+                    order_amount=order_amount,
                 )
-
-                if not discount:
-                    return False, 0.0, "Discount not found"
-
-                # Validate discount can be applied
-                can_apply, message = discount.can_be_applied_to_order(order_amount)
-                if not can_apply:
-                    return False, 0.0, message
-
-                # Calculate discount amount
-                discount_amount = discount.calculate_discount_amount(order_amount)
-
-                # Update usage count
-                discount.usage_count += 1
-                if discount.usage_count >= discount.usage_limit:
-                    discount.status = DiscountStatus.USED
-                    discount.used_at = datetime.utcnow()
-
-                session.commit()
-
-                # Update cache
-                DiscountService._cache_discount(discount)
-
-                # Emit real-time event for discount usage
-                from app.realtime.event_manager import EventManager
-
-                EventManager.emit_event(
-                    event="discount_applied",
-                    data={
-                        "discount_id": discount_id,
-                        "user_id": user_id,
-                        "order_amount": order_amount,
-                        "discount_amount": discount_amount,
-                        "remaining_usage": discount.usage_limit - discount.usage_count,
-                    },
-                    room=f"room_{discount.room_id}",
-                    namespace="/chat",
-                    use_async=True,
+                return (
+                    (amount > 0 or message == "Discount can be applied"),
+                    amount,
+                    message,
                 )
-
-                return True, discount_amount, "Discount applied successfully"
-
         except Exception as e:
-            logger.error(f"Failed to apply discount: {str(e)}")
-            return False, 0.0, "Failed to apply discount"
+            logger.error(f"Failed to preview discount {discount_id}: {e}")
+            return False, 0.0, "Could not check that discount right now."
 
     @staticmethod
     def cancel_discount(seller_id: str, discount_id: int) -> Dict[str, Any]:
@@ -1726,18 +2076,44 @@ class DiscountService:
 
     @staticmethod
     def _generate_discount_message(discount: ChatDiscount, room: ChatRoom) -> str:
-        """Generate a human-readable discount offer message"""
-        product_name = room.product.name if room.product else "your order"
+        """Generate a human-readable discount offer message.
 
+        It used to name the room's product -- "15% off on Barcelona Jersey" --
+        whatever the offer actually covered. Checkout scopes a discount to the
+        *shop*, not to a product (see DiscountService.validate_for_order), so
+        that sentence promised one thing and did another: a buyer who added
+        four more things from the same shop got 15% off all of them, and a
+        buyer who bought something else entirely still got the discount while
+        believing it was tied to the jersey.
+
+        Now it names whichever is true. An offer made from a product message
+        carries that product and is scoped to it at checkout; one made from
+        the attach sheet covers the shop. The sentence follows the offer
+        rather than the room.
+        """
         if discount.discount_type == DiscountType.PERCENTAGE:
             discount_text = f"{discount.discount_value}% off"
         else:
-            discount_text = f"${discount.discount_value:.2f} off"
+            discount_text = f"\u20a6{discount.discount_value:,.2f} off"
 
-        message = f"🎉 Special discount offer: {discount_text} on {product_name}!"
+        if discount.product_id:
+            product = getattr(discount, "product", None)
+            name = getattr(product, "name", None)
+            # Falls back to the room's product only when it is the same one,
+            # so this can never name something the offer does not cover.
+            if not name and getattr(room, "product_id", None) == discount.product_id:
+                name = getattr(getattr(room, "product", None), "name", None)
+            scope = name or "that product"
+        else:
+            seller_account = getattr(
+                getattr(room, "seller", None), "seller_account", None
+            )
+            shop = getattr(seller_account, "shop_name", None)
+            scope = f"anything from {shop}" if shop else "anything in this shop"
+        message = f"🎉 Special discount offer: {discount_text} on {scope}!"
 
         if discount.minimum_order_amount:
-            message += f" (Minimum order: ${discount.minimum_order_amount:.2f})"
+            message += f" (Minimum order: \u20a6{discount.minimum_order_amount:,.2f})"
 
         if discount.discount_message:
             message += f"\n\n{discount.discount_message}"

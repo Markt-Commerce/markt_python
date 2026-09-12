@@ -25,6 +25,9 @@ repos:
     hooks:
       - id: remove-print-statements
         args: ['--verbose']
+        # The smoke harness is a CLI reporter -- print IS its output. Stripping
+        # them leaves scripts that run, pass, and tell you nothing.
+        exclude: ^tests/smoke/
   - repo: https://github.com/pycqa/flake8
     rev: 7.1.1
     hooks:

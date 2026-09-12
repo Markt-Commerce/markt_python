@@ -7,7 +7,6 @@ from app.libs.helpers import UniqueIdMixin
 from external.database import db
 from external.redis import redis_client
 
-
 CURRENT_ROLE_CACHE_KEY = "user:current_role:{user_id}"
 CURRENT_ROLE_CACHE_TTL = 60 * 60 * 24  # 24 hours
 
@@ -25,8 +24,21 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
 
     is_buyer = db.Column(db.Boolean, default=False)
     is_seller = db.Column(db.Boolean, default=False)
+    # Admin gate for app.libs.decorators.admin_required/_has_permission --
+    # no self-serve path to set this; an admin sets it directly (DB or a
+    # future internal tool), same "flagged permanently until someone
+    # edits the DB" treatment already used for MarketVerificationStatus.FLAGGED
+    # and SellerReliabilityScore.gaming_flagged.
+    is_admin = db.Column(db.Boolean, default=False, nullable=False)
     is_active = db.Column(db.Boolean, default=True)
     deactivated_at = db.Column(db.DateTime)
+    # Set when the user deletes their account (Apple App Store 5.1.1(v)).
+    # Distinct from deactivated_at, which is reversible: once this is set the
+    # row has already been stripped of personal data and can never be signed
+    # into again. The row itself survives only so that posts, reviews, chat
+    # threads and order history belonging to other people stay coherent --
+    # see AccountDeletionService.
+    deleted_at = db.Column(db.DateTime, nullable=True, index=True)
 
     # Email verification
     email_verified = db.Column(db.Boolean, default=False)
@@ -52,6 +64,15 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
         "Notification", back_populates="user", lazy="dynamic"
     )
     transactions = db.relationship("Transaction", back_populates="user", lazy="dynamic")
+    wallet_accounts = db.relationship(
+        "WalletAccount", back_populates="user", lazy="dynamic"
+    )
+    withdrawal_requests = db.relationship(
+        "WithdrawalRequest", back_populates="user", lazy="dynamic"
+    )
+    wallet_topups = db.relationship(
+        "WalletTopUp", back_populates="user", lazy="dynamic"
+    )
     posts = db.relationship("Post", back_populates="user", lazy="dynamic")
     post_likes = db.relationship("PostLike", back_populates="user", lazy="dynamic")
     post_comments = db.relationship(
@@ -100,6 +121,11 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
     def check_password(self, password):
         from passlib.hash import pbkdf2_sha256
 
+        # Account deletion destroys the hash outright, and passlib raises on a
+        # null hash rather than returning False -- which would surface as a 500
+        # instead of "invalid credentials".
+        if not self.password_hash:
+            return False
         return pbkdf2_sha256.verify(password, self.password_hash)
 
     @property
@@ -161,6 +187,64 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
         self.deactivated_at = None
 
 
+class SocialAccount(BaseModel):
+    """A verified third-party identity linked to a Markt user.
+
+    Keyed on (provider, provider_sub) rather than email, deliberately. `sub` is
+    the provider's stable, immutable subject id; an email can be changed by the
+    user, and Apple's private-relay addresses can be revoked entirely. Matching
+    on email would mean losing the link the moment either happens.
+
+    One row per (provider, user), so a user can hold both a Google and an Apple
+    identity, but a single provider identity can never point at two accounts.
+    """
+
+    __tablename__ = "social_accounts"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(
+        db.String(12), db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    provider = db.Column(db.String(16), nullable=False)  # "google" | "apple"
+
+    # The provider's subject claim. Unique per provider, never reused.
+    provider_sub = db.Column(db.String(255), nullable=False)
+
+    # What the provider told us at link time, kept for support questions.
+    # Apple sends the name exactly once, on first authorisation, so if it is
+    # not captured here it is gone for good.
+    email_at_link = db.Column(db.String(255), nullable=True)
+    name_at_link = db.Column(db.String(255), nullable=True)
+
+    # True when the provider asserted the email was verified. Drives whether an
+    # email collision may auto-link; an unverified provider email would
+    # otherwise be an account-takeover vector.
+    email_verified_at_link = db.Column(db.Boolean, nullable=False, default=False)
+
+    linked_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    last_used_at = db.Column(db.DateTime, nullable=True)
+
+    user = db.relationship("User", backref=db.backref("social_accounts", lazy=True))
+
+    __table_args__ = (
+        db.UniqueConstraint("provider", "provider_sub", name="uq_social_provider_sub"),
+        db.UniqueConstraint("provider", "user_id", name="uq_social_provider_user"),
+    )
+
+
+class RefundPreference(Enum):
+    """Where a buyer wants money owed back to them to land.
+
+    CARD is the money genuinely returning -- to the card that paid, through
+    Paystack, over days. WALLET is instant and withdrawable, but it is Markt
+    holding the money until the buyer moves it, which is a real difference and
+    is why the buyer chooses rather than us.
+    """
+
+    CARD = "card"
+    WALLET = "wallet"
+
+
 class Buyer(BaseModel):
     __tablename__ = "buyers"
 
@@ -170,6 +254,17 @@ class Buyer(BaseModel):
     shipping_address = db.Column(db.JSON)
     is_active = db.Column(db.Boolean, default=True)
     deactivated_at = db.Column(db.DateTime)
+    # Where money owed back goes -- today only the saving from a shared
+    # delivery. Stored as a plain string rather than a native enum: adding a
+    # third destination later should be a deploy, not an ALTER TYPE that needs
+    # ownership of the type (see the local-database note in the runbook).
+    #
+    # Defaults to the card, deliberately. ADR-002 allows wallet credit only as
+    # an opt-in with the cash refund as default, because turning someone's
+    # money into store credit without asking is not Markt's decision to make.
+    refund_preference = db.Column(
+        db.String(10), nullable=False, default=RefundPreference.CARD.value
+    )
 
     # Relationships
     user = db.relationship("User", back_populates="buyer_account")
@@ -197,6 +292,17 @@ class SellerVerificationStatus(Enum):
     SUSPENDED = "suspended"
 
 
+class MarketVerificationStatus(Enum):
+    """Separate from SellerVerificationStatus (business/KYC identity) --
+    this is specifically about whether a seller's claimed Market matches
+    where their shop address actually geocodes to. See
+    app.markets.services.MarketService.assign_seller_market."""
+
+    UNVERIFIED = "unverified"  # no market claimed yet, or nothing to check against
+    VERIFIED = "verified"  # geocoded shop address within tolerance of the market
+    FLAGGED = "flagged"  # outside tolerance -- excluded from rerouting until reviewed
+
+
 class Seller(BaseModel):
     __tablename__ = "sellers"
 
@@ -205,6 +311,11 @@ class Seller(BaseModel):
     shop_name = db.Column(db.String(100))
     shop_slug = db.Column(db.String(110), unique=True)
     description = db.Column(db.Text)
+    # Shop cover image. profile_picture on User is the shop's avatar; this is
+    # the wide image behind it on a shop card. Stored as a URL for the same
+    # reason User.profile_picture is: the media row is the source of truth,
+    # this is the denormalised read path so a shop list does not join media.
+    banner_url = db.Column(db.String(500), nullable=True)
     policies = db.Column(db.JSON)  # Return, shipping policies
     total_rating = db.Column(db.Integer, default=0)
     total_raters = db.Column(db.Integer, default=0)
@@ -213,6 +324,24 @@ class Seller(BaseModel):
     )
     is_active = db.Column(db.Boolean, default=True)
     deactivated_at = db.Column(db.DateTime)
+    paystack_subaccount_code = db.Column(db.String(50), nullable=True)
+    payout_bank_code = db.Column(db.String(10), nullable=True)
+    payout_account_number = db.Column(db.String(20), nullable=True)
+    payout_account_name = db.Column(db.String(100), nullable=True)
+    # Market membership (7.2, Phase 6) -- explicit assignment, not
+    # geofenced. shop_address/lat/lng are only used to sanity-check the
+    # claim (see market_verification_status), never to derive it.
+    market_id = db.Column(db.Integer, db.ForeignKey("markets.id"), nullable=True)
+    shop_address = db.Column(db.JSON, nullable=True)
+    shop_latitude = db.Column(db.Float, nullable=True)
+    shop_longitude = db.Column(db.Float, nullable=True)
+    market_verification_status = db.Column(
+        db.Enum(MarketVerificationStatus),
+        default=MarketVerificationStatus.UNVERIFIED,
+        nullable=False,
+    )
+
+    market = db.relationship("Market")
 
     # Relationships
     user = db.relationship("User", back_populates="seller_account")

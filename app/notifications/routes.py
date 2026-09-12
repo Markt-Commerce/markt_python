@@ -14,8 +14,10 @@ from .schemas import (
     UnreadCountSchema,
     MarkAsReadRequestSchema,
     MarkAsReadResponseSchema,
+    PushTokenSchema,
+    PushTokenDeleteSchema,
 )
-from .services import NotificationService
+from .services import NotificationService, PushService
 
 bp = Blueprint(
     "notifications",
@@ -60,3 +62,22 @@ class MarkAsRead(MethodView):
             current_user.id, data.get("notification_ids")
         )
         return {"updated": updated}
+
+
+@bp.route("/push-token")
+class PushTokenResource(MethodView):
+    @login_required
+    @bp.arguments(PushTokenSchema)
+    @bp.response(204)
+    def post(self, data):
+        """Register this device's Expo push token for the current user."""
+        PushService.register_token(current_user.id, data["token"], data.get("platform"))
+        return None
+
+    @login_required
+    @bp.arguments(PushTokenDeleteSchema)
+    @bp.response(204)
+    def delete(self, data):
+        """Remove a push token (e.g. on logout)."""
+        PushService.remove_token(data["token"])
+        return None

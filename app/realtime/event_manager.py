@@ -2,6 +2,7 @@
 Centralized event manager for real-time communications
 This module provides a clean interface for emitting real-time events with proper error handling
 """
+
 import logging
 from datetime import datetime
 from typing import Dict, Any, Optional, Union

@@ -2,7 +2,32 @@ from marshmallow import Schema, fields, validate
 from app.libs.schemas import PaginationSchema
 from app.products.schemas import ProductSimpleSchema, ProductVariantSchema
 from app.users.schemas import BuyerSimpleSchema
+from .events import OrderEventType, ActorType
 from .models import OrderStatus, OrderItem
+from .snapshot import product_image_url
+
+
+def bought_product(item):
+    """What was bought, preferring the snapshot taken at checkout.
+
+    An order shows what was bought, not what the listing says today. Reading
+    the live product meant a seller who renamed a listing or swapped its photo
+    rewrote the buyer's own receipt -- and the app now lets sellers change
+    photos, so this is reachable rather than theoretical.
+
+    Falls back field by field, so an order placed before snapshots existed
+    still renders, and so does one whose photo could not be read at the time.
+    """
+    live = getattr(item, "product", None)
+    return {
+        # The id stays live on purpose: it is how the buyer opens the product
+        # again, and it does not change when a listing is edited.
+        "id": getattr(live, "id", None) or getattr(item, "product_id", None),
+        "name": getattr(item, "product_name", None) or getattr(live, "name", None),
+        "image_url": (
+            getattr(item, "product_image_url", None) or product_image_url(live)
+        ),
+    }
 
 
 class OrderItemSchema(Schema):
@@ -12,6 +37,19 @@ class OrderItemSchema(Schema):
     price = fields.Float(required=True)
     seller_id = fields.Int(dump_only=True)
     status = fields.Enum(OrderItem.Status, by_value=True, dump_only=True)
+    # An order item used to carry only a product_id, so any client rendering a
+    # list of orders had to fetch each product separately just to show a name
+    # and a thumbnail -- one request per line. The relationship already existed;
+    # it was simply never exposed.
+    #
+    # It is no longer the live product, though: an order shows what was
+    # bought. Exposing the relationship directly meant a seller who renamed a
+    # listing or swapped its photo rewrote the buyer's own receipt, and the
+    # app now lets sellers change photos.
+    product = fields.Method("get_product", dump_only=True)
+
+    def get_product(self, obj):
+        return bought_product(obj)
 
 
 class OrderCreateSchema(Schema):
@@ -19,6 +57,31 @@ class OrderCreateSchema(Schema):
     shipping_address = fields.Dict(required=True)
     payment_method = fields.Str(required=True)
     customer_note = fields.Str()
+
+
+class OrderDeliverySchema(Schema):
+    """Where the parcel is, for the buyer.
+
+    Only what someone tracking a delivery needs. Deliberately not the quote
+    breakdown or the pickup coordinates: the fee was agreed at checkout and
+    the seller's exact location is not the buyer's business.
+    """
+
+    state = fields.Str(dump_only=True, attribute="state.value")
+    fee = fields.Method("get_fee", dump_only=True)
+    distance_km = fields.Float(dump_only=True)
+    external_job_id = fields.Str(dump_only=True, allow_none=True)
+    last_status_at = fields.DateTime(dump_only=True, allow_none=True)
+    failure_reason = fields.Str(dump_only=True, allow_none=True)
+    batch_opt_in = fields.Bool(dump_only=True)
+    #: Null until a shared run closes and the final share is known.
+    settled = fields.Bool(dump_only=True, attribute="is_settled")
+
+    def get_fee(self, obj):
+        """Naira, from the kobo the delivery is priced in. The settled figure
+        once a batch has closed, the solo one before that."""
+        minor = getattr(obj, "effective_fee_minor", None)
+        return None if minor is None else minor / 100
 
 
 class OrderSchema(OrderCreateSchema):
@@ -35,6 +98,10 @@ class OrderSchema(OrderCreateSchema):
     created_at = fields.DateTime(dump_only=True)
     # For responses, serialize ORM relationship via helper dict on model
     shipping_address = fields.Dict(dump_only=True, attribute="shipping_address_dict")
+    items = fields.Nested(lambda: OrderItemSchema(many=True), dump_only=True)
+    # Absent on orders checked out without a delivery quote, which is why it
+    # is allow_none rather than assumed.
+    delivery = fields.Nested(OrderDeliverySchema, dump_only=True, allow_none=True)
 
 
 class OrderPaginationSchema(Schema):
@@ -50,14 +117,23 @@ class BuyerOrderSchema(OrderCreateSchema):
     subtotal = fields.Float(dump_only=True)
     created_at = fields.DateTime(dump_only=True)
     items = fields.Nested(lambda: OrderItemSchema(many=True), dump_only=True)
+    shipping_address = fields.Dict(dump_only=True, attribute="shipping_address_dict")
+    delivery = fields.Nested(OrderDeliverySchema, dump_only=True, allow_none=True)
 
 
 # For sellers - shows individual order items
 class SellerOrderItemSchema(Schema):
     id = fields.Int(dump_only=True)
     order_id = fields.Str(dump_only=True)
-    product = fields.Nested(lambda: ProductSimpleSchema())
+    # The snapshot here too: a seller's own record of what they sold should
+    # not move when they edit the listing, which is the whole point when a
+    # buyer is disputing what arrived.
+    product = fields.Method("get_product", dump_only=True)
     variant = fields.Nested(lambda: ProductVariantSchema())
+
+    def get_product(self, obj):
+        return bought_product(obj)
+
     quantity = fields.Int(dump_only=True)
     price = fields.Float(dump_only=True)
     status = fields.Enum(OrderItem.Status, by_value=True, dump_only=True)
@@ -78,7 +154,59 @@ class SellerOrderResponseSchema(Schema):
 
 
 class TrackingSchema(Schema):
-    pass
+    order_id = fields.Str()
+    order_number = fields.Str(allow_none=True)
+    status = fields.Str()
+    timeline = fields.List(fields.Dict())
+    shipping_address = fields.Dict(allow_none=True)
+    items = fields.List(fields.Dict())
+    shipment = fields.Dict(allow_none=True)
+    delivery = fields.Dict(allow_none=True)
+
+
+class OrderCancelSchema(Schema):
+    reason = fields.Str(allow_none=True)
+
+
+class OrderCancelResponseSchema(Schema):
+    order_id = fields.Str()
+    status = fields.Str()
+    cancelled_at = fields.DateTime(allow_none=True)
+    cancel_reason = fields.Str(allow_none=True)
+
+
+class DeliveryWaitChoiceSchema(Schema):
+    """10.3: the buyer's response to the thin-volume delivery prompt."""
+
+    choice = fields.Str(required=True, validate=validate.OneOf(["wait", "pay_now"]))
+    # Only meaningful for "wait" -- consent to being charged the
+    # single-drop rate if the run still hasn't filled by cutoff.
+    fallback_consent = fields.Bool(load_default=False)
+
+
+class DeliveryWaitChoiceResponseSchema(Schema):
+    order_id = fields.Str()
+    choice = fields.Str()
+    fallback_consent = fields.Bool()
+    refund_amount = fields.Float()
+
+
+class OrderReturnRequestSchema(Schema):
+    reason = fields.Str(required=True, validate=validate.Length(min=3))
+
+
+class OrderReturnResponseSchema(Schema):
+    id = fields.Str()
+    order_id = fields.Str()
+    status = fields.Str()
+    reason = fields.Str()
+    refund_amount = fields.Float(allow_none=True)
+    seller_notes = fields.Str(allow_none=True)
+    created_at = fields.DateTime()
+
+
+class OrderReturnActionSchema(Schema):
+    seller_notes = fields.Str(allow_none=True)
 
 
 class OrderItemStatusUpdateSchema(Schema):
@@ -87,3 +215,26 @@ class OrderItemStatusUpdateSchema(Schema):
 
 class ReviewSchema(Schema):
     pass
+
+
+class OrderEventSchema(Schema):
+    """14.2 / 15: buyer-facing fulfilment-history entry."""
+
+    id = fields.Int(dump_only=True)
+    order_item_id = fields.Int(dump_only=True, allow_none=True)
+    event_type = fields.Enum(OrderEventType, by_value=True, dump_only=True)
+    actor_type = fields.Enum(ActorType, by_value=True, dump_only=True)
+    metadata = fields.Dict(dump_only=True, attribute="event_metadata")
+    created_at = fields.DateTime(dump_only=True)
+
+
+class SellerPendingCountSchema(Schema):
+    """One number: paid order items waiting on this seller."""
+
+    needs_action = fields.Int()
+
+
+class BuyerPendingCountSchema(Schema):
+    """One number: order items waiting on this buyer to decide."""
+
+    needs_action = fields.Int()

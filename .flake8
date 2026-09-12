@@ -4,7 +4,7 @@ exclude =
     migrations
 
 # Temporary legacy baseline for existing code.
-# Goal: tighten this list gradually as modules are cleaned up.
+# Goal: tighten this list gradually as modules are cleaned up. @amethystcoder
 extend-ignore =
     E222,
     E265,

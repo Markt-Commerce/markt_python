@@ -9,15 +9,18 @@ from app.libs.errors import APIError
 
 # app imports
 from .services import CartService
+from .grouping import group_cart_items
 from .schemas import (
+    CartGroupSchema,
+    GroupedCartSchema,
     CartSchema,
     CartItemSchema,
     AddToCartSchema,
     UpdateCartItemSchema,
     CheckoutSchema,
+    CheckoutResponseSchema,
     CartSummarySchema,
 )
-
 
 bp = Blueprint(
     "cart", __name__, description="Shopping cart operations", url_prefix="/cart"
@@ -99,7 +102,7 @@ class Checkout(MethodView):
     @login_required
     @buyer_required
     @bp.arguments(CheckoutSchema)
-    @bp.response(201)
+    @bp.response(201, CheckoutResponseSchema)
     def post(self, checkout_data):
         """Checkout cart and create order"""
         try:
@@ -108,9 +111,44 @@ class Checkout(MethodView):
                 checkout_data,
                 idempotency_key=checkout_data.get("idempotency_key"),
             )
-            return {"order_id": order.id, "message": "Order created successfully"}
+            return {
+                "order_id": order.id,
+                "order_number": order.order_number,
+                "status": order.status.value,
+                "subtotal": order.subtotal,
+                "shipping_fee": order.shipping_fee,
+                "tax": order.tax,
+                "service_fee": order.service_fee,
+                "discount": order.discount,
+                "total": order.total,
+                "shipping_address": order.shipping_address_dict,
+                "message": "Order created successfully",
+            }
         except APIError as e:
             abort(e.status_code, message=e.message)
+
+
+@bp.route("/groups")
+class CartGroups(MethodView):
+    @login_required
+    @buyer_required
+    @bp.response(200, GroupedCartSchema)
+    def get(self):
+        """The basket split into the orders it will actually become.
+
+        A delivery quote prices one pickup to one dropoff, so a basket
+        spanning two shops is two deliveries and two orders. Presenting it as
+        one list made it possible to build a cart that could never be paid
+        for; this shows the truth, one card per shop, each checking out on
+        its own.
+        """
+        cart = CartService.get_cart(current_user.id)
+        groups = group_cart_items(cart.items if cart else [])
+        return {
+            "groups": groups,
+            "group_count": len(groups),
+            "total_items": sum(g.item_count for g in groups),
+        }
 
 
 @bp.route("/summary")

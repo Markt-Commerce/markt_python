@@ -67,12 +67,27 @@ def deliver_notification(self, notification_data: Dict, channels: List[str]):
 
 @celery_app.task(bind=True, queue="notifications")
 def send_push_notification(self, notification_data: Dict):
-    """Send push notification to mobile devices"""
+    """Send push notification to the user's registered devices via Expo Push."""
     try:
-        # Placeholder for push notification service integration
-        # Example: FCM, APNs, etc.
+        from .services import PushService
+
+        user_id = notification_data.get("user_id")
+        if not user_id:
+            return
+        title = notification_data.get("title") or "Markt"
+        body = notification_data.get("message") or notification_data.get("body") or ""
+        PushService.send_to_user(
+            user_id,
+            title,
+            body,
+            {
+                "type": notification_data.get("type"),
+                "reference_type": notification_data.get("reference_type"),
+                "reference_id": notification_data.get("reference_id"),
+            },
+        )
         logger.info(
-            f"Push notification sent for notification {notification_data['id']}"
+            f"Push notification dispatched for notification {notification_data.get('id')}"
         )
     except Exception as e:
         logger.error(f"Push notification failed: {str(e)}")

@@ -8,7 +8,9 @@ socketio = SocketIO(
     logger=False,
     engineio_logger=False,
     manage_session=False,
-    message_queue=f"redis://{settings.REDIS_HOST}:{settings.REDIS_PORT}/0"
-    if hasattr(settings, "REDIS_HOST")
-    else None,
+    message_queue=(
+        f"redis://{settings.REDIS_HOST}:{settings.REDIS_PORT}/0"
+        if hasattr(settings, "REDIS_HOST")
+        else None
+    ),
 )

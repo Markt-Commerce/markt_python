@@ -20,7 +20,11 @@ from .schemas import (
     CreateChatRoomSchema,
     SendMessageSchema,
     ChatMessageReactionCreateSchema,
+    ChatMessageReactionSchema,
     ChatMessageReactionSummarySchema,
+    CreateDiscountSchema,
+    DiscountResponseSchema,
+    ApplyDiscountSchema,
 )
 from .services import ChatService, ChatReactionService, DiscountService
 
@@ -54,12 +58,18 @@ class ChatRooms(MethodView):
                 buyer_id = current_user.id
                 seller_id = room_data.get("seller_id")
                 if not seller_id:
-                    abort(400, message="seller_id is required when creating a chat room as a buyer")
+                    abort(
+                        400,
+                        message="seller_id is required when creating a chat room as a buyer",
+                    )
             else:
                 buyer_id = room_data.get("buyer_id")
                 seller_id = current_user.id
                 if not buyer_id:
-                    abort(400, message="buyer_id is required when creating a chat room as a seller")
+                    abort(
+                        400,
+                        message="buyer_id is required when creating a chat room as a seller",
+                    )
 
             room = ChatService.create_or_get_chat_room(
                 buyer_id=buyer_id,
@@ -74,9 +84,9 @@ class ChatRooms(MethodView):
                 "seller_id": room.seller_id,
                 "product_id": room.product_id,
                 "request_id": room.request_id,
-                "last_message_at": room.last_message_at
-                if room.last_message_at
-                else None,
+                "last_message_at": (
+                    room.last_message_at if room.last_message_at else None
+                ),
                 "unread_count_buyer": room.unread_count_buyer,
                 "unread_count_seller": room.unread_count_seller,
             }
@@ -190,7 +200,7 @@ class ChatMessageReactions(MethodView):
 
     @login_required
     @bp.arguments(ChatMessageReactionCreateSchema)
-    @bp.response(201)
+    @bp.response(201, ChatMessageReactionSchema)
     def post(self, reaction_data, message_id):
         """Add a reaction to a chat message"""
         try:
@@ -218,6 +228,24 @@ class ChatMessageReactionDetail(MethodView):
 
 # Discount Routes for Chat
 # -----------------------------------------------
+@bp.route("/discounts/spendable")
+class SpendableDiscounts(MethodView):
+    @login_required
+    @bp.response(200)
+    def get(self):
+        """Offers this buyer can spend right now, tagged with the shop.
+
+        The cart screen needs this: a discount lives in a chat room, the
+        basket is grouped by shop, and only the server can join the two.
+        Expired, spent and withdrawn offers never appear -- an offer the
+        buyer can see is one they can take.
+        """
+        try:
+            return {"discounts": DiscountService.spendable_for_buyer(current_user.id)}
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
 @bp.route("/rooms/<int:room_id>/discounts")
 class ChatRoomDiscounts(MethodView):
     @login_required
@@ -233,24 +261,7 @@ class ChatRoomDiscounts(MethodView):
             abort(e.status_code, message=e.message)
 
     @login_required
-    @bp.arguments(
-        {
-            "discount_type": {
-                "type": "string",
-                "required": True,
-                "enum": ["percentage", "fixed_amount"],
-            },
-            "discount_value": {"type": "number", "required": True, "minimum": 0.01},
-            "minimum_order_amount": {"type": "number", "minimum": 0},
-            "maximum_discount_amount": {"type": "number", "minimum": 0},
-            "expires_at": {"type": "string", "required": True, "format": "date-time"},
-            "usage_limit": {"type": "integer", "minimum": 1, "default": 1},
-            "product_id": {"type": "string"},
-            "discount_message": {"type": "string"},
-            "discount_code": {"type": "string"},
-            "metadata": {"type": "object"},
-        }
-    )
+    @bp.arguments(CreateDiscountSchema)
     @bp.response(201)
     def post(self, discount_data, room_id):
         """Create a new discount offer in a chat room (seller only)"""
@@ -266,16 +277,7 @@ class ChatRoomDiscounts(MethodView):
 @bp.route("/discounts/<int:discount_id>/respond")
 class DiscountResponse(MethodView):
     @login_required
-    @bp.arguments(
-        {
-            "response": {
-                "type": "string",
-                "required": True,
-                "enum": ["accepted", "rejected"],
-            },
-            "response_message": {"type": "string"},
-        }
-    )
+    @bp.arguments(DiscountResponseSchema)
     @bp.response(200)
     def post(self, response_data, discount_id):
         """Respond to a discount offer (buyer only)"""
@@ -294,9 +296,7 @@ class DiscountResponse(MethodView):
 @bp.route("/discounts/<int:discount_id>/apply")
 class DiscountApplication(MethodView):
     @login_required
-    @bp.arguments(
-        {"order_amount": {"type": "number", "required": True, "minimum": 0.01}}
-    )
+    @bp.arguments(ApplyDiscountSchema)
     @bp.response(200)
     def post(self, application_data, discount_id):
         """Apply a discount to an order (validate and calculate discount amount)"""

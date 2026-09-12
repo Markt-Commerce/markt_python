@@ -11,6 +11,11 @@ class DeliveryLoginRequestSchema(Schema):
 
 class DeliveryLoginResponseSchema(Schema):
     partner = fields.Nested("PartnerSchema")
+    # Stateless bearer token (same mechanism as users/routes.py's
+    # UserSchema.access_token) -- React Native doesn't persist Flask
+    # session cookies reliably, especially across Expo Go restarts, so the
+    # rider app stores this and sends it back as `Authorization: Bearer`.
+    access_token = fields.Str(dump_only=True)
 
 
 class DeliveryRegisterRequestSchema(Schema):
@@ -76,7 +81,7 @@ class DeliveryAvailableOrdersQuerySchema(Schema):
     page = fields.Int(validate=validate.Range(min=1), missing=1)
     per_page = fields.Int(validate=validate.Range(min=1, max=50), missing=20)
     search_radius = fields.Int(
-        validate=validate.Range(min=100, max=50000), missing=3000
+        validate=validate.Range(min=100, max=50000), missing=5000
     )
 
 
@@ -154,3 +159,154 @@ class DeliveryOrderQRConfirmRequestSchema(Schema):
 class DeliveryOrderQRConfirmResponseSchema(Schema):
     status = fields.String()
     message = fields.String()
+
+
+# --- DeliveryRun rider assignment (10.6-10.7, Phase 10) ---------------------
+
+
+class DeliveryAvailableRunsQuerySchema(Schema):
+    page = fields.Int(validate=validate.Range(min=1), missing=1)
+    per_page = fields.Int(validate=validate.Range(min=1, max=50), missing=20)
+    search_radius = fields.Int(
+        validate=validate.Range(min=100, max=50000), missing=5000
+    )
+
+
+class AvailableRunSchema(Schema):
+    run_id = fields.String()
+    market = fields.String(allow_none=True)
+    area = fields.String()
+    order_count = fields.Integer()
+    price_per_order = fields.Float(allow_none=True)
+    distance_meters = fields.Float()
+
+
+class DeliveryAvailableRunsResponseSchema(Schema):
+    range_meters = fields.Integer()
+    runs = fields.List(fields.Nested(AvailableRunSchema))
+    page = fields.Integer()
+    per_page = fields.Integer()
+    total = fields.Integer()
+    total_pages = fields.Integer()
+
+
+class DeliveryRunAcceptResponseSchema(Schema):
+    run_id = fields.String()
+    status = fields.String()
+    assignment_id = fields.Integer(allow_none=True)
+
+
+class DeliveryRunFailRequestSchema(Schema):
+    reason = fields.String(allow_none=True)
+
+
+class DeliveryRunStopDetailSchema(Schema):
+    seller_id = fields.Integer()
+    seller_name = fields.String(allow_none=True)
+    shop_address = fields.String(allow_none=True)
+    status = fields.String(validate=validate.OneOf(["pending", "arrived", "picked_up"]))
+    arrived_at = fields.String(allow_none=True)
+    picked_up_at = fields.String(allow_none=True)
+
+
+class DeliveryRunOrderAddressSchema(Schema):
+    street_address = fields.String(allow_none=True)
+    city = fields.String(allow_none=True)
+    state = fields.String(allow_none=True)
+
+
+class DeliveryRunOrderDetailSchema(Schema):
+    order_id = fields.String()
+    order_number = fields.String(allow_none=True)
+    buyer_name = fields.String(allow_none=True)
+    delivery_address = fields.Nested(DeliveryRunOrderAddressSchema, allow_none=True)
+    pod_status = fields.String(
+        validate=validate.OneOf(["pending", "qr_issued", "delivered"])
+    )
+    delivered_at = fields.String(allow_none=True)
+
+
+class DeliveryRunDetailResponseSchema(Schema):
+    """Full rider-facing run state -- GET /runs/active and
+    GET /runs/<run_id>. `run_id` is the only field guaranteed present:
+    GET /runs/active returns just `{"run_id": null}` when the rider has
+    no run in progress, rather than a 404 (there's genuinely nothing
+    wrong, just nothing active)."""
+
+    run_id = fields.String(allow_none=True)
+    status = fields.String(allow_none=True)
+    market = fields.String(allow_none=True)
+    area = fields.String(allow_none=True)
+    price_per_order = fields.Float(allow_none=True)
+    stops = fields.List(fields.Nested(DeliveryRunStopDetailSchema), missing=list)
+    orders = fields.List(fields.Nested(DeliveryRunOrderDetailSchema), missing=list)
+
+
+# --- DeliveryRun pickup-per-stop / POD (10.6, Phase 10) ---------------------
+
+
+class DeliveryRunStopActionResponseSchema(Schema):
+    delivery_run_id = fields.String()
+    seller_id = fields.Integer()
+    status = fields.String(validate=validate.OneOf(["pending", "arrived", "picked_up"]))
+
+
+class DeliveryRunPickupConfirmResponseSchema(DeliveryRunStopActionResponseSchema):
+    run_status = fields.String()
+    pod_issued_for_orders = fields.List(fields.String())
+
+
+class DeliveryRunOrderPodQRResponseSchema(Schema):
+    order_id = fields.String()
+    qr_code = fields.String()
+
+
+class DeliveryRunOrderPodConfirmRequestSchema(Schema):
+    qr_code = fields.String(required=True)
+
+
+class DeliveryRunOrderPodConfirmResponseSchema(Schema):
+    status = fields.String()
+    message = fields.String()
+    run_completed = fields.Boolean()
+
+
+# --- Delivery failure & recovery (10.7, Phase 10) ---------------------------
+
+
+class DeliveryFailureReportRequestSchema(Schema):
+    reason = fields.String(
+        required=True,
+        validate=validate.OneOf(["buyer_unavailable", "bad_address", "buyer_refused"]),
+    )
+    notes = fields.String(allow_none=True)
+
+
+class DeliveryFailureSchema(Schema):
+    id = fields.String()
+    delivery_run_id = fields.String(allow_none=True)
+    order_id = fields.String()
+    reason = fields.String()
+    is_perishable = fields.Boolean()
+    outcome = fields.String()
+    recovery_action = fields.String(allow_none=True)
+    cost_bearer = fields.String(allow_none=True)
+    resolution_notes = fields.String(allow_none=True)
+    reported_at = fields.DateTime(allow_none=True)
+    resolved_at = fields.DateTime(allow_none=True)
+    completed_at = fields.DateTime(allow_none=True)
+
+
+class DeliveryFailureResolveRequestSchema(Schema):
+    recovery_action = fields.String(
+        required=True,
+        validate=validate.OneOf(["redelivery", "return_to_seller", "dispose"]),
+    )
+    cost_bearer = fields.String(
+        required=True, validate=validate.OneOf(["buyer", "seller", "markt"])
+    )
+    notes = fields.String(allow_none=True)
+
+
+class DeliveryFailureCompleteRequestSchema(Schema):
+    notes = fields.String(allow_none=True)

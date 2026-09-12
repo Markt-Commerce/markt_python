@@ -1,6 +1,7 @@
 # python imports
 import logging
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Optional, Dict, Any, List
 import json
 
@@ -11,6 +12,8 @@ from sqlalchemy.orm import joinedload
 from external.redis import redis_client
 from external.database import db
 from app.libs.session import session_scope
+from app.libs.money import to_money, from_subunit
+from app.orders.fees import calculate_service_fee
 from app.products.models import Product
 from app.libs.errors import (
     NotFoundError,
@@ -21,10 +24,15 @@ from app.libs.errors import (
 )
 
 # app imports
-from .models import Cart, CartItem
+from .models import Cart, CartItem, CART_TTL
 from app.users.models import User, Buyer
 from app.products.models import Product, ProductVariant
 from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
+from app.orders.snapshot import product_snapshot
+from app.orders.shipping import (
+    normalize_shipping_address,
+    shipping_address_to_model_kwargs,
+)
 from app.notifications.services import NotificationService
 from app.notifications.models import NotificationType
 
@@ -39,6 +47,28 @@ class CartService:
     CART_CACHE_KEY = "cart:{buyer_id}"
 
     @staticmethod
+    def resolve_cart(session, buyer_id: int, *, options=None):
+        """The one definition of "this buyer's cart".
+
+        There used to be three, and they disagreed. The read paths filtered on
+        `expires_at > now()`; the clear paths (clear_cart, apply_coupon, and
+        payment completion) did not, and every one of them used an unordered
+        `.first()`. With more than one cart row per buyer -- which nothing
+        prevented -- checkout could clear one cart while the app went on
+        reading another, so a paid-for item stayed in the basket.
+
+        Expiry is deliberately *not* a filter here. A cart past its TTL is
+        still that buyer's cart; hiding it is what caused a second one to be
+        created alongside it. Callers that care about staleness should say so.
+        """
+        query = session.query(Cart).filter_by(buyer_id=buyer_id)
+        if options:
+            query = query.options(*options)
+        # Ordered, so that even if a duplicate survives the backfill this is
+        # deterministic rather than whatever Postgres hands back first.
+        return query.order_by(Cart.id.desc()).first()
+
+    @staticmethod
     def get_or_create_cart(user_id: str) -> Cart:
         """Get existing cart or create new one for user"""
         with session_scope() as session:
@@ -47,25 +77,27 @@ class CartService:
             if not user or not user.is_buyer:
                 raise ForbiddenError("Only buyers can have shopping carts")
 
-            # Try to get existing active cart
-            cart = (
-                session.query(Cart)
-                .filter_by(buyer_id=user.buyer_account.id)
-                .filter(Cart.expires_at > datetime.utcnow())
-                .options(joinedload(Cart.items).joinedload(CartItem.product))
-                .first()
+            cart = CartService.resolve_cart(
+                session,
+                user.buyer_account.id,
+                options=[joinedload(Cart.items).joinedload(CartItem.product)],
             )
 
             if not cart:
                 # Create new cart
                 cart = Cart()
                 cart.buyer_id = user.buyer_account.id
-                cart.expires_at = datetime.utcnow() + timedelta(days=30)
+                cart.expires_at = datetime.utcnow() + CART_TTL
                 session.add(cart)
                 session.flush()
 
                 # Cache the new cart
                 CartService._cache_cart(cart)
+            elif cart.expires_at is None or cart.expires_at <= datetime.utcnow():
+                # Renew rather than abandon. Abandoning is what left the buyer
+                # with an invisible cart still holding items.
+                cart.expires_at = datetime.utcnow() + CART_TTL
+                session.flush()
 
             return cart
 
@@ -92,6 +124,16 @@ class CartService:
 
             if product.status.value != "active":
                 raise ValidationError("Product is not available for purchase")
+
+            # A user who sells and buys is one account with two modes, so
+            # nothing stopped a seller adding their own product in buyer mode
+            # -- they could pay themselves, minus Markt's fee, and the order
+            # would then open a fulfilment window against the very shop that
+            # placed it. Checked on the server because the app's own guard is
+            # a courtesy: the endpoint is the thing that has to hold.
+            seller_account = getattr(user, "seller_account", None)
+            if seller_account is not None and product.seller_id == seller_account.id:
+                raise ValidationError("This is your own product.")
 
             # Handle variant_id properly - convert 0 to None for products without variants
             if variant_id == 0:
@@ -227,7 +269,7 @@ class CartService:
                 raise ForbiddenError("Only buyers can clear cart")
 
             # Get cart
-            cart = session.query(Cart).filter_by(buyer_id=user.buyer_account.id).first()
+            cart = CartService.resolve_cart(session, user.buyer_account.id)
 
             if not cart:
                 return True  # No cart to clear
@@ -266,15 +308,13 @@ class CartService:
                     pass
 
             # Get cart with items
-            cart = (
-                session.query(Cart)
-                .filter_by(buyer_id=buyer_id)
-                .filter(Cart.expires_at > datetime.utcnow())
-                .options(
+            cart = CartService.resolve_cart(
+                session,
+                buyer_id,
+                options=[
                     joinedload(Cart.items).joinedload(CartItem.product),
                     joinedload(Cart.items).joinedload(CartItem.variant),
-                )
-                .first()
+                ],
             )
 
             if cart:
@@ -293,39 +333,125 @@ class CartService:
         import uuid
 
         with session_scope() as session:
-            # Check idempotency if key provided
-            if idempotency_key:
-                existing_order = (
-                    session.query(Order)
-                    .filter_by(idempotency_key=idempotency_key)
-                    .first()
-                )
-                if existing_order:
-                    return existing_order
-
             # Validate user
             user = session.query(User).get(user_id)
             if not user or not user.is_buyer:
                 raise ForbiddenError("Only buyers can checkout")
+
+            # Check idempotency if key provided — scoped to this buyer so a
+            # key reused by (or leaked from) another account can never return
+            # someone else's order.
+            if idempotency_key:
+                existing_order = (
+                    session.query(Order)
+                    .filter_by(
+                        idempotency_key=idempotency_key,
+                        buyer_id=user.buyer_account.id,
+                    )
+                    .first()
+                )
+                if existing_order:
+                    return existing_order
 
             # Get cart
             cart = CartService.get_cart(user_id)
             if not cart or not cart.items:
                 raise ValidationError("Cart is empty")
 
-            # Validate cart items (check availability, prices, etc.)
-            CartService._validate_cart_items(cart.items)
+            # One shop at a time when asked. A delivery quote prices one
+            # pickup to one dropoff, so a basket spanning two shops is two
+            # orders -- the app shows it as one card per shop and sends the
+            # seller whose card was tapped. Without this, the only way out of
+            # a two-shop basket was deleting items one by one.
+            seller_id = checkout_data.get("seller_id")
+            if seller_id is not None:
+                checkout_items = [
+                    i
+                    for i in cart.items
+                    if i.product is not None and i.product.seller_id == seller_id
+                ]
+                if not checkout_items:
+                    raise ValidationError(
+                        "Nothing from that shop is in your cart any more."
+                    )
+            else:
+                checkout_items = list(cart.items)
+                # No seller named, so this is "check out everything" -- which
+                # only makes sense when everything is from one shop. A basket
+                # spanning two shops is two pickups and two deliveries, and
+                # letting it through built a single order that no one courier
+                # job could ever fulfil. The old guard only caught this when
+                # a delivery quote was attached, so an older client silently
+                # created exactly that order.
+                sellers = {
+                    i.product.seller_id for i in checkout_items if i.product is not None
+                }
+                if len(sellers) > 1:
+                    raise ValidationError(
+                        "Your cart has items from more than one shop. Check "
+                        "out one shop at a time -- they're delivered "
+                        "separately."
+                    )
 
-            # Calculate order totals
-            subtotal = cart.subtotal()
-            shipping_fee = CartService._calculate_shipping_fee(
-                cart, checkout_data.get("shipping_address")
+            # Validate cart items (check availability, prices, etc.)
+            CartService._validate_cart_items(checkout_items)
+
+            shipping_normalized = normalize_shipping_address(
+                checkout_data.get("shipping_address"),
+                saved_address=user.buyer_account.shipping_address,
+                use_saved_address=checkout_data.get("use_saved_address", False),
+                default_recipient_name=(
+                    getattr(user.buyer_account, "buyername", None) or user.username
+                ),
             )
-            tax = CartService._calculate_tax(
-                subtotal, checkout_data.get("shipping_address")
+
+            # Calculate order totals. Over the items being bought now, not
+            # the whole basket -- the rest is still in the cart and will be
+            # paid for separately.
+            subtotal = to_money(
+                sum(
+                    (to_money(i.product_price) or 0) * (i.quantity or 0)
+                    for i in checkout_items
+                )
             )
-            discount = CartService._calculate_discount(subtotal, cart.coupon_code)
-            total = subtotal + shipping_fee + tax - discount
+            # A quote id means the buyer was shown a real, distance-based
+            # price and accepted it. Without one we fall back to the flat
+            # estimate, because existing clients do not send it yet and a
+            # checkout that started working last week must not stop.
+            quote_id = checkout_data.get("delivery_quote_id")
+            if quote_id:
+                # Zero, not None: the totals below are computed before the
+                # order has an id to consume the quote against, and they are
+                # recomputed once it does.
+                shipping_fee = to_money(0)
+            else:
+                shipping_fee = CartService._calculate_shipping_fee(
+                    cart, shipping_normalized
+                )
+            # A discount the seller offered in chat, if the buyer chose to use
+            # one. Validated and spent inside this transaction: checked
+            # anywhere else, the same offer could be used twice, and spent
+            # anywhere else it would be gone even if the order never existed.
+            discount, chat_discount = CartService._resolve_chat_discount(
+                session,
+                user=user,
+                discount_id=checkout_data.get("discount_id"),
+                items=checkout_items,
+                subtotal=subtotal,
+                coupon_code=cart.coupon_code,
+            )
+            # Phase 0 defers VAT, and this flow was charging 5% of it --
+            # which meant the same basket cost 5% more here than through the
+            # payment-first flow, and Markt was collecting a tax line it does
+            # not remit. Zero rather than NULL: the column means "no tax was
+            # charged", and a NULL would read as "nobody worked it out".
+            tax = to_money(0)
+            # 11.3: the Service Fee this flow never charged, on what the
+            # buyer actually pays for goods. Charging a percentage of a
+            # discount the seller gave away would quietly claw part of it
+            # back -- the floor still covers the small-order case.
+            service_fee = calculate_service_fee(subtotal - discount)
+            total = subtotal + shipping_fee + tax + service_fee - discount
 
             # Create order
             order = Order()
@@ -336,24 +462,13 @@ class CartService:
             order.subtotal = subtotal
             order.shipping_fee = shipping_fee
             order.tax = tax
+            order.service_fee = service_fee
             order.discount = discount
             order.total = total
 
-            # shipping_address is a relationship; map dict payload to ShippingAddress ORM
-            shipping_data = checkout_data.get("shipping_address") or {}
-            shipping_address = ShippingAddress(
-                recipient_name=shipping_data.get("recipient_name"),
-                street_address=shipping_data.get("street_address")
-                or shipping_data.get("street"),
-                city=shipping_data.get("city"),
-                state=shipping_data.get("state"),
-                postal_code=shipping_data.get("postal_code")
-                or shipping_data.get("zip"),
-                country=shipping_data.get("country"),
-                latitude=shipping_data.get("latitude"),
-                longitude=shipping_data.get("longitude"),
+            order.shipping_address = ShippingAddress(
+                **shipping_address_to_model_kwargs(shipping_normalized)
             )
-            order.shipping_address = shipping_address
 
             # billing_address is JSONB on Order, so we can store the dict directly
             order.billing_address = checkout_data.get("billing_address")
@@ -361,9 +476,44 @@ class CartService:
             order.idempotency_key = idempotency_key or str(uuid.uuid4())
             session.add(order)
             session.flush()
+            order.order_number = order.generate_order_number()
+
+            # Inside this transaction, deliberately. The quote is consumed,
+            # the snapshot written and the order created together or not at
+            # all -- an expired or already-used quote must leave no order
+            # behind, and an order must never exist with a delivery nobody
+            # reserved a price for.
+            if quote_id:
+                shipping_fee = CartService._attach_delivery(
+                    session,
+                    order,
+                    cart,
+                    quote_id=quote_id,
+                    buyer_id=user.buyer_account.id,
+                    batch_opt_in=bool(checkout_data.get("batch_opt_in", False)),
+                )
+                order.shipping_fee = shipping_fee
+                order.total = subtotal + shipping_fee + tax + service_fee - discount
+
+            # Recorded, not spent.
+            #
+            # It used to be spent here, on the grounds that the order existed.
+            # But an order is not a purchase: this flow creates it as
+            # PENDING_PAYMENT and the buyer pays on the next screen. The cart
+            # deliberately survives checkout so they can go back and adjust --
+            # and when they did, their offer was gone. Worse, the second
+            # checkout was refused outright ("Discount has already been
+            # used"), so backing out of the payment screen once locked them
+            # out of buying at all.
+            #
+            # Paying is what spends it, exactly like the basket being cleared.
+            # PaymentService.complete_payment does it, and this is the link
+            # that tells it which offer to spend.
+            if chat_discount is not None:
+                order.chat_discount_id = chat_discount.id
 
             # Create order items from cart items
-            for cart_item in cart.items:
+            for cart_item in checkout_items:
                 order_item = OrderItem()
                 order_item.order_id = order.id
                 order_item.product_id = cart_item.product_id
@@ -371,10 +521,29 @@ class CartService:
                 order_item.quantity = cart_item.quantity
                 order_item.price = cart_item.product_price
                 order_item.seller_id = cart_item.product.seller_id
+                # Frozen here, like the price. What the buyer agreed to buy
+                # must not change because the seller edited the listing after.
+                (
+                    order_item.product_name,
+                    order_item.product_image_url,
+                ) = product_snapshot(cart_item.product)
                 session.add(order_item)
 
-            # Clear cart
-            CartService.clear_cart(user_id)
+            # The cart is deliberately NOT cleared here.
+            #
+            # Checkout creates the order; paying for it is what empties the
+            # basket (see PaymentService.complete_payment). Clearing at this
+            # point meant a buyer who backed out of the payment screen -- to
+            # change a quantity, to add one more thing, or because they
+            # simply were not ready -- came back to an empty cart and an
+            # order they had not agreed to pay for yet. Every other
+            # marketplace keeps the basket until the money moves, and so do
+            # we.
+            #
+            # The consequence to keep in mind: an abandoned attempt leaves a
+            # PENDING_PAYMENT order behind. That is expected. It is surfaced
+            # to the buyer, it can still be paid, and expire_unpaid_orders
+            # cancels it if they never do.
 
             # Notify seller about new order
             CartService._notify_seller_new_order(order)
@@ -391,7 +560,7 @@ class CartService:
                 raise ForbiddenError("Only buyers can apply coupons")
 
             # Get cart
-            cart = session.query(Cart).filter_by(buyer_id=user.buyer_account.id).first()
+            cart = CartService.resolve_cart(session, user.buyer_account.id)
 
             if not cart:
                 raise ValidationError("No active cart found")
@@ -449,25 +618,47 @@ class CartService:
                     "product_id": item.product_id,
                     "variant_id": item.variant_id,
                     "quantity": item.quantity,
-                    "product_price": float(item.product_price)
-                    if item.product_price
-                    else 0.0,
-                    "created_at": item.created_at.isoformat()
-                    if item.created_at
-                    else None,
+                    "product_price": (
+                        float(item.product_price) if item.product_price else 0.0
+                    ),
+                    "created_at": (
+                        item.created_at.isoformat() if item.created_at else None
+                    ),
                 }
                 cart_data["items"].append(item_data)
 
-            # Cache serialized data
-            redis_client.set(
-                cache_key, json.dumps(cart_data), ex=CartService.CACHE_EXPIRY
-            )
+            # Same reasoning as _invalidate_cart_cache: writing the cache is
+            # an optimisation, and a Redis outage should not turn add-to-cart
+            # into a 500.
+            try:
+                redis_client.set(
+                    cache_key, json.dumps(cart_data), ex=CartService.CACHE_EXPIRY
+                )
+            except Exception:
+                logger.warning(
+                    "Could not cache cart for buyer %s", cart.buyer_id, exc_info=True
+                )
 
     @staticmethod
     def _invalidate_cart_cache(buyer_id: int):
-        """Invalidate cart cache"""
+        """Drop the cached cart. Best-effort.
+
+        This runs inside payment completion, and the two failure modes are not
+        symmetric: a missed invalidation costs one stale read, while raising
+        here costs a *paid* order its completion. The cache is derived data --
+        it is never the only record of anything -- so a Redis outage must not
+        propagate.
+        """
         cache_key = CartService.CART_CACHE_KEY.format(buyer_id=buyer_id)
-        redis_client.delete(cache_key)
+        try:
+            redis_client.delete(cache_key)
+        except Exception:
+            logger.warning(
+                "Could not invalidate cart cache for buyer %s; a stale cart "
+                "may be served until it expires",
+                buyer_id,
+                exc_info=True,
+            )
 
     @staticmethod
     def _validate_cart_items(cart_items: List[CartItem]):
@@ -524,28 +715,235 @@ class CartService:
                         )
 
     @staticmethod
-    def _calculate_shipping_fee(cart: Cart, shipping_address: Optional[Dict]) -> float:
-        """Calculate shipping fee based on cart and shipping address"""
-        # TODO: Implement actual shipping calculation logic
-        # For now, return a flat rate or calculate based on address/weight
-        # Example: Flat rate of 10.00 for now
-        if not shipping_address:
-            return 0.0
+    def _attach_delivery(
+        session,
+        order: Order,
+        cart: Cart,
+        *,
+        quote_id: str,
+        buyer_id: int,
+        batch_opt_in: bool,
+    ) -> Decimal:
+        """Consume a delivery quote and snapshot it onto the order.
 
-        # Basic flat rate shipping (can be enhanced with weight-based, distance-based, etc.)
-        return 10.00
+        Returns the shipping fee in naira. Must be called inside the order's
+        own transaction -- see the call site for why.
+
+        The snapshot is the point. The quote row records what we quoted; this
+        records what this order was actually sold, and the two stop being the
+        same thing the moment a fee strategy is retuned or a zone is redrawn.
+        Copying the numbers means a six-month-old order can still explain its
+        own delivery fee without us having to reconstruct the world as it was
+        when the buyer checked out.
+        """
+        from app.delivery_pricing.services import QuoteService
+        from app.delivery_pricing.order_delivery import OrderDelivery
+
+        # A quote prices one pickup against one dropoff. A basket spanning two
+        # markets is two separate deliveries (rerouting and delivery are both
+        # within-market, ADR 18.2), so one quote cannot cover it -- and
+        # accepting it anyway would charge the buyer for one journey and make
+        # Markt eat the other. Refused rather than silently undercharged;
+        # quoting a multi-market basket properly is its own piece of work.
+        if CartService.count_distinct_deliveries(cart) > 1:
+            raise ValidationError(
+                "This basket has items from more than one market, which needs "
+                "a delivery quote per market. Please check out from one market "
+                "at a time for now."
+            )
+
+        quote = QuoteService.consume(session, quote_id, buyer_id, order.id)
+
+        delivery = OrderDelivery()
+        delivery.order_id = order.id
+        delivery.quote_id = quote.id
+        delivery.fee_minor = quote.fee_minor
+        delivery.breakdown = quote.breakdown
+        delivery.distance_km = quote.distance_km
+        delivery.strategy = quote.strategy
+        delivery.strategy_version = quote.strategy_version
+        delivery.pickup_lat = quote.pickup_lat
+        delivery.pickup_lng = quote.pickup_lng
+        delivery.dropoff_lat = quote.dropoff_lat
+        delivery.dropoff_lng = quote.dropoff_lng
+        # What this buyer would pay alone, which is the ceiling any batched
+        # share is capped at later. Recorded now because after a batch closes
+        # there is no way to work out what going solo would have cost.
+        delivery.solo_fee_minor = quote.fee_minor
+        delivery.batch_opt_in = batch_opt_in
+        session.add(delivery)
+
+        logger.info(
+            "Order %s took delivery quote %s (%s kobo, %s v%s)",
+            order.id,
+            quote.id,
+            quote.fee_minor,
+            quote.strategy,
+            quote.strategy_version,
+        )
+        return from_subunit(quote.fee_minor)
 
     @staticmethod
-    def _calculate_tax(subtotal: float, shipping_address: Optional[Dict]) -> float:
-        """Calculate tax based on subtotal and shipping address"""
-        # TODO: Implement actual tax calculation logic
-        # For now, return a simple percentage (e.g., 5% VAT for Nigeria)
-        if not shipping_address:
-            return 0.0
+    def _calculate_shipping_fee(cart: Cart, shipping_address: Optional[Dict]) -> float:
+        """The fallback estimate, for checkouts that carry no delivery quote.
 
-        # Basic tax calculation: 5% VAT (can be enhanced with location-based tax)
-        tax_rate = 0.05  # 5%
-        return subtotal * tax_rate
+        Superseded by _attach_delivery above wherever the client sends a
+        quote id: that path prices the actual distance, holds the buyer to
+        the number they were shown, and records how it was arrived at. This
+        one stays because older app builds do not send a quote yet, and a
+        checkout that worked yesterday has to keep working. Retire it once
+        the mobile clients in the wild all quote.
+
+        Everything below describes that older behaviour.
+
+        1.1/10.3: flat fee per market the cart's items come from
+        (Phase 0: "flat fee per market->area pair, not zone/distance-
+        based"). Was a hardcoded flat ₦10 regardless of cart contents --
+        shared by both checkout flows (this one and
+        PaymentService.initialize_checkout_payment), so fixing it here
+        fixes both without touching either flow's own code.
+
+        Real fix, still approximate: DEFAULT_BASE_PRICE (the same
+        placeholder DeliveryRun pricing itself uses at run cutoff --
+        app.deliveries.runs) once per DISTINCT market among the cart's
+        sellers, so a basket spanning two markets is honestly charged for
+        two separate delivery runs instead of one flat number regardless
+        of size. This is what makes a multi-market basket have a real,
+        non-fabricated second fee to warn the buyer about (Phase 13's
+        multi-market basket UI item) -- previously there was nothing real
+        to show.
+
+        Not yet the true per-(market,area)-pair rate Phase 0 ultimately
+        wants -- that needs real rate data, same TBD status as
+        DeliveryRun's own pricing (Phase 11's "tune zone-based pricing"
+        item, blocked on real numbers). Deliberately doesn't resolve the
+        buyer's Area here (no DB session available at this call site,
+        and the number wouldn't change yet either way since there's only
+        one placeholder rate) -- revisit together once real per-pair
+        rates exist.
+
+        FLAGGED, NOT SOLVED (Unfinished-Tasks.md): this checkout-time
+        captured shipping_fee and the real cost
+        DeliveryRunService.close_runs_past_cutoff computes later
+        (run.price_per_order, once the run's actual roster is known) are
+        two unconnected numbers today -- nothing reconciles a difference
+        between what was captured here and what delivery actually costs
+        once batched with other orders. Needs a real decision (hard
+        estimate Markt absorbs the variance on, vs. reconciling via a
+        wallet credit/debit after the run closes) before that's truly
+        solved.
+        """
+        if not shipping_address or not cart.items:
+            return to_money(0)
+
+        from app.deliveries.runs import DEFAULT_BASE_PRICE
+
+        distinct_deliveries = CartService.count_distinct_deliveries(cart)
+        return to_money(to_money(DEFAULT_BASE_PRICE) * distinct_deliveries)
+
+    @staticmethod
+    def count_distinct_deliveries(cart: Cart) -> int:
+        """How many separate delivery runs this cart's items will need --
+        one per distinct market among its sellers (rerouting/delivery are
+        both within-market only, ADR 18.2). Used by _calculate_shipping_fee
+        above, and surfaced directly to the checkout response
+        (PaymentService.initialize_checkout_payment) so the buyer can see
+        *why* the shipping fee is what it is when it spans more than one
+        market (1.1/7.3's multi-market basket warning) -- not just a
+        bigger number with no explanation."""
+        if not cart.items:
+            return 0
+
+        market_ids = set()
+        unresolved_sellers = False
+        for item in cart.items:
+            seller = getattr(item.product, "seller", None) if item.product else None
+            market_id = getattr(seller, "market_id", None) if seller else None
+            if market_id:
+                market_ids.add(market_id)
+            else:
+                # No market assigned (nullable column; shouldn't happen
+                # post-Phase 6 but isn't enforced) -- still counts as one
+                # more delivery rather than being silently dropped.
+                unresolved_sellers = True
+
+        return max(len(market_ids) + (1 if unresolved_sellers else 0), 1)
+
+    @staticmethod
+    def _resolve_chat_discount(
+        session,
+        *,
+        user,
+        discount_id,
+        items,
+        subtotal,
+        coupon_code,
+    ):
+        """How much comes off, and which offer to spend for it.
+
+        Returns (amount, discount_or_None). The offer is not spent here --
+        the caller does that once the order exists.
+
+        A discount is offered by one seller in one chat room, and an order is
+        now one shop's worth of basket, so the offer is scoped to the shop
+        being bought from -- otherwise a generous offer from one seller would
+        discount every other seller's goods. The shop is taken from the items
+        actually being bought rather than from the seller_id the client sent,
+        because that is the shop whose money is at stake and it is true even
+        when the client sent no seller_id at all.
+
+        The chat recorded the seller by *user* id and the cart knows them by
+        seller account id, so the two are joined here rather than hoped to
+        match.
+        """
+        if not discount_id:
+            return CartService._calculate_discount(subtotal, coupon_code), None
+
+        from app.chats.services import DiscountService
+        from app.users.models import Seller
+
+        seller_ids = {i.product.seller_id for i in items if i.product is not None}
+        seller_user_id = None
+        if len(seller_ids) == 1:
+            seller = session.get(Seller, seller_ids.pop())
+            seller_user_id = getattr(seller, "user_id", None)
+        if not seller_user_id:
+            # Rather than fall through unscoped. Not being able to name the
+            # shop means not being able to check the offer came from it, and
+            # an unscoped check is exactly the hole this argument closes.
+            raise ValidationError("We couldn't match that offer to this shop.")
+
+        # What the offer actually comes off. An offer made against one product
+        # in chat applies to that product's lines only -- the rest of the
+        # basket is not what the seller pointed at.
+        eligible_by_product: Dict[str, Any] = {}
+        names: Dict[str, Any] = {}
+        for item in items:
+            product = item.product
+            if product is None:
+                continue
+            line = (to_money(item.product_price) or 0) * (item.quantity or 0)
+            eligible_by_product[product.id] = (
+                eligible_by_product.get(product.id, 0) + line
+            )
+            names[product.id] = product.name
+
+        discount, amount, message = DiscountService.validate_for_order(
+            session,
+            buyer_user_id=user.id,
+            discount_id=discount_id,
+            order_amount=float(subtotal),
+            seller_user_id=seller_user_id,
+            eligible_by_product=eligible_by_product,
+            product_names=names,
+        )
+        if discount is None:
+            # Refused rather than quietly ignored. A buyer who chose an offer
+            # and is charged full price without being told has been
+            # overcharged as far as they are concerned.
+            raise ValidationError(message)
+
+        return to_money(amount), discount
 
     @staticmethod
     def _calculate_discount(subtotal: float, coupon_code: Optional[str]) -> float:
@@ -553,11 +951,11 @@ class CartService:
         # TODO: Implement actual coupon validation and discount calculation
         # For now, return 0 if no coupon or coupon is invalid
         if not coupon_code:
-            return 0.0
+            return to_money(0)
 
         # Placeholder: Return 0 for now until coupon system is implemented
         # This should validate coupon, check expiry, calculate discount amount/percentage
-        return 0.0
+        return to_money(0)
 
     @staticmethod
     def _notify_seller_cart_addition(seller_id: int, product_id: str, quantity: int):

@@ -59,6 +59,13 @@ class Config:
         )
 
         # Payment Gateway Configuration (Paystack for Nigeria)
+        # Proactive image moderation. Empty means uploads are not scanned,
+        # which is the current state -- app.moderation is reactive (someone
+        # reports, a human acts). Setting this to a provider name is the
+        # single switch, and app/media/moderation.py is where one gets
+        # implemented; it needs third-party credentials Markt does not have.
+        self.IMAGE_MODERATION_PROVIDER = config("IMAGE_MODERATION_PROVIDER", default="")
+
         self.PAYSTACK_SECRET_KEY = config("PAYSTACK_SECRET_KEY", default="")
         self.PAYSTACK_PUBLIC_KEY = config("PAYSTACK_PUBLIC_KEY", default="")
         self.PAYMENT_CURRENCY = config("PAYMENT_CURRENCY", default="NGN")
@@ -72,14 +79,35 @@ class Config:
             "API_BASE_URL",
             default="http://localhost:8000" if self.ENV == "development" else "",
         )
-
-        # Frontend Base URL for payment redirects
-        # For production: https://yourdomain.com or https://app.yourdomain.com
-        # For development: http://localhost:3000
-        self.FRONTEND_BASE_URL = config(
-            "FRONTEND_BASE_URL",
-            default="http://localhost:3000" if self.ENV == "development" else "",
+        # This URL is handed to Paystack as the callback_url. If it is wrong,
+        # the payment still succeeds -- the webhook credits the wallet
+        # server-to-server -- but Paystack redirects the customer's browser to
+        # an address that doesn't exist, so they see ERR_CONNECTION_REFUSED
+        # after paying and have to navigate back to discover it worked.
+        #
+        # That failure is invisible from the server: nothing errors, nothing
+        # logs, the money arrives. So say something loudly at startup instead of
+        # letting it be found by a confused customer.
+        self.API_BASE_URL_IS_UNREACHABLE = (
+            not self.API_BASE_URL
+            or "localhost" in self.API_BASE_URL
+            or "127.0.0.1" in self.API_BASE_URL
         )
+
+        # Web app base URL for payment redirects
+        # For production: https://marktcommerce.com/app
+        # For development: http://localhost:3000
+        self.WEB_APP_BASE_URL = config(
+            "WEB_APP_BASE_URL",
+            default=(
+                "http://localhost:3000"
+                if self.ENV == "development"
+                else "https://marktcommerce.com/app"
+            ),
+        )
+
+        # Mobile app deep link scheme for payment redirects (e.g. markt://)
+        self.MOBILE_APP_SCHEME = config("MOBILE_APP_SCHEME", default="markt://")
 
         # AWS Configuration
         self.AWS_ACCESS_KEY = config("AWS_ACCESS_KEY", default="")
@@ -112,6 +140,55 @@ class Config:
         self.CELERY_TASK_ACKS_LATE = True  # Acknowledge after completion
         self.CELERY_WORKER_DISABLE_RATE_LIMITS = False
         self.CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+
+        self.UNPAID_ORDER_EXPIRY_HOURS = config(
+            "UNPAID_ORDER_EXPIRY_HOURS", default=48, cast=int
+        )
+        self.PLATFORM_COMMISSION_RATE = config(
+            "PLATFORM_COMMISSION_RATE", default=0.10, cast=float
+        )
+        # 11.1 / Phase 0: seller payout is eligible this long after POD,
+        # not immediately.
+        self.SETTLEMENT_HOLD_HOURS = config(
+            "SETTLEMENT_HOLD_HOURS", default=12, cast=int
+        )
+
+        # --- Social sign-in -------------------------------------------------
+        # Every one of these is an *audience* we accept identity tokens for.
+        # A token is only trusted if its `aud` matches one of them, which is
+        # what stops a token minted for another app being replayed at us.
+        #
+        # Google issues a separate client id per platform, and the id in the
+        # token's `aud` is the one belonging to the platform that signed in --
+        # so all three are accepted here, not just the web one. The web client
+        # id is also what the mobile app passes as `webClientId` to get an
+        # idToken at all.
+        self.GOOGLE_WEB_CLIENT_ID = config("GOOGLE_WEB_CLIENT_ID", default="")
+        self.GOOGLE_IOS_CLIENT_ID = config("GOOGLE_IOS_CLIENT_ID", default="")
+        self.GOOGLE_ANDROID_CLIENT_ID = config("GOOGLE_ANDROID_CLIENT_ID", default="")
+
+        # Apple's `aud` is the app's bundle identifier for a native iOS
+        # sign-in, and the Services ID for a web/Android one. Both accepted.
+        self.APPLE_BUNDLE_ID = config("APPLE_BUNDLE_ID", default="")
+        self.APPLE_SERVICES_ID = config("APPLE_SERVICES_ID", default="")
+
+    @property
+    def GOOGLE_AUDIENCES(self) -> list:
+        """Client ids we accept a Google token for. Empty entries dropped so an
+        unset variable can never widen the check to 'any audience'."""
+        return [
+            c
+            for c in (
+                self.GOOGLE_WEB_CLIENT_ID,
+                self.GOOGLE_IOS_CLIENT_ID,
+                self.GOOGLE_ANDROID_CLIENT_ID,
+            )
+            if c
+        ]
+
+    @property
+    def APPLE_AUDIENCES(self) -> list:
+        return [c for c in (self.APPLE_BUNDLE_ID, self.APPLE_SERVICES_ID) if c]
 
     @property
     def SQLALCHEMY_DATABASE_URI(self):

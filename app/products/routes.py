@@ -7,12 +7,15 @@ from flask_login import login_required, current_user
 from flask import request
 
 # project imports
-from app.socials.schemas import ShareSchema, CommentSchema
+from app.socials.schemas import CommentSchema
+from app.libs.errors import APIError
 from app.libs.decorators import seller_required, buyer_required
 from app.libs.schemas import PaginationQueryArgs
 from app.socials.services import ProductSocialService
 from app.socials.schemas import (
     ProductReviewSchema,
+    ProductReviewUpdateSchema,
+    ReviewDeleteSchema,
     ProductReviewsSchema,
     ReviewUpvoteSchema,
 )
@@ -25,7 +28,9 @@ from .schemas import (
     ProductUpdateSchema,
     ProductSearchSchema,
     ProductSearchResultSchema,
+    SellerProductQueryArgs,
     BulkProductResultSchema,
+    ProductShareLinkSchema,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,6 +65,10 @@ class ProductDetail(MethodView):
         return ProductService.get_product(product_id)
 
     @login_required
+    # Without this, a buyer-only account reaches current_user.seller_account.id
+    # on a None and the refusal arrives as a 500. Same decorator the create
+    # and bulk endpoints above already use.
+    @seller_required
     @bp.arguments(ProductUpdateSchema)
     @bp.response(200, ProductSchema)
     def put(self, product_data, product_id):
@@ -72,6 +81,7 @@ class ProductDetail(MethodView):
         )
 
     @login_required
+    @seller_required
     @bp.response(204)
     def delete(self, product_id):
         """Delete product (owner only)"""
@@ -140,6 +150,29 @@ class ProductReviews(MethodView):
         return ProductSocialService.create_review(current_user.id, product_id, data)
 
 
+@bp.route("/reviews/<int:review_id>")
+class ProductReviewDetail(MethodView):
+    """Edit or remove your own review.
+
+    Neither was possible before: a review was permanent once posted, so a
+    mistyped rating stayed wrong and a buyer whose problem the seller fixed had
+    no way to reflect that.
+    """
+
+    @login_required
+    @bp.arguments(ProductReviewUpdateSchema)
+    @bp.response(200, ProductReviewSchema)
+    def patch(self, data, review_id):
+        """Edit your own review"""
+        return ProductSocialService.update_review(current_user.id, review_id, data)
+
+    @login_required
+    @bp.response(200, ReviewDeleteSchema)
+    def delete(self, review_id):
+        """Delete your own review"""
+        return ProductSocialService.delete_review(current_user.id, review_id)
+
+
 @bp.route("/reviews/<review_id>/upvote")
 class ReviewUpvote(MethodView):
     @login_required
@@ -165,26 +198,45 @@ class ProductView(MethodView):
 @bp.route("/<product_id>/share")
 class ShareProduct(MethodView):
     @login_required
-    @bp.response(200, ShareSchema)
-    def post(self, product_id):
-        """Share product socially"""
-        # TODO: Generate share links
-        # TODO: Track shares
-        # TODO: Reward system for shares
+    @bp.response(200, ProductShareLinkSchema)
+    def get(self, product_id):
+        """Canonical links for sharing a product.
+
+        Was a stub: three TODOs and no return statement, so flask-smorest
+        tried to serialize None and the endpoint 500'd for anyone who called
+        it. Nothing did, which is why it went unnoticed.
+
+        GET rather than POST -- it creates nothing, and a share sheet may well
+        ask for the same link twice.
+        """
+        try:
+            return ProductService.build_share_links(product_id)
+        except APIError as e:
+            abort(e.status_code, message=e.message)
 
 
 @bp.route("/seller/my-products")
 class SellerProducts(MethodView):
     @login_required
     @seller_required
-    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.arguments(SellerProductQueryArgs, location="query")
     @bp.response(200, ProductSearchResultSchema)
     def get(self, args):
-        """Get seller's own products"""
+        """Get seller's own products.
+
+        `search`, `status` and `low_stock` are handled here rather than in the
+        client: the route already accepted a `search` param through the
+        generic pagination schema and silently dropped it, so the dashboard
+        filtered whichever page it was holding. That works only while the
+        client pretends one page is the whole inventory.
+        """
         return ProductService.get_seller_products(
             seller_id=current_user.seller_account.id,
             page=args.get("page", 1),
             per_page=args.get("per_page", 20),
+            search=args.get("search"),
+            status=args.get("status"),
+            low_stock=args.get("low_stock", False),
         )
 
 
