@@ -242,6 +242,11 @@ def test_cancel_order_refunds_only_remaining_amount_after_prior_item_refund(
     session.query.return_value.options.return_value.get.return_value = order
     # 300 already refunded out of 1000 captured -- only 700 should go out now.
     session.query.return_value.filter.return_value.scalar.return_value = 300.0
+    # This order carries no delivery row -- it was checked out before
+    # delivery quoting, or without a quote. Said explicitly because a bare
+    # MagicMock answers every query with a truthy stub, and cancel_order now
+    # asks whether the parcel is already with a rider.
+    session.query.return_value.filter_by.return_value.first.return_value = None
     mock_scope.return_value.__enter__.return_value = session
 
     OrderService.cancel_order("ORD_1", buyer_id=42)

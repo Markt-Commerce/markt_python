@@ -57,11 +57,28 @@ def app():
 
 @pytest.fixture
 def world(app):
-    """A city with two zones and one lane, removed afterwards."""
+    """A city with two zones and one lane, removed afterwards.
+
+    Any other active city is switched off for the duration and switched back
+    on afterwards. These tests assert on *which* zone a coordinate resolves
+    to, and zone_for_point answers with the nearest centroid across every
+    active city -- so a served area that happens to exist in the same
+    database (a seeded Ibadan, say) silently wins, the pickup resolves to a
+    zone the fixture never made, and the failure surfaces as `no_lane` rather
+    than as the collision it is. Hermetic beats mystifying.
+    """
     marker = uuid.uuid4().hex[:8]
     made = {"quotes": [], "lanes": [], "zones": [], "cities": [], "users": []}
+    suspended = []
 
     with app.app_context():
+        for other in (
+            db.session.query(ServiceCity).filter(ServiceCity.is_active.is_(True)).all()
+        ):
+            other.is_active = False
+            suspended.append(other.id)
+        db.session.flush()
+
         city = ServiceCity(
             name=f"Ibadan {marker}", slug=f"ibadan-{marker}", is_active=True
         )
@@ -140,6 +157,12 @@ def world(app):
         )
         db.session.query(Buyer).filter(Buyer.id == made["buyer_id"]).delete()
         db.session.query(User).filter(User.id == made["user_id"]).delete()
+        # Put back whatever was live before, so running these tests is not a
+        # way to quietly switch a city off.
+        if suspended:
+            db.session.query(ServiceCity).filter(ServiceCity.id.in_(suspended)).update(
+                {"is_active": True}, synchronize_session=False
+            )
         db.session.commit()
 
 

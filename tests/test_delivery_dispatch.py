@@ -303,3 +303,54 @@ def test_an_empty_signature_is_refused(monkeypatch):
 
     monkeypatch.setattr(routes, "config", lambda *a, **kw: "shared-secret")
     assert routes._signature_is_valid(b'{"status":"delivered"}', "") is False
+
+
+# --- cancellation -----------------------------------------------------------
+
+
+def test_cancelling_before_a_rider_has_it_is_fine():
+    from app.delivery_pricing.dispatch import cancel_for_order
+
+    for state in (
+        DeliveryState.QUOTED,
+        DeliveryState.PAID,
+        DeliveryState.AWAITING_DISPATCH,
+        DeliveryState.JOB_CREATED,
+        DeliveryState.ASSIGNED,
+        DeliveryState.FAILED,
+    ):
+        d = _delivery(state=state)
+        assert cancel_for_order(_Session(d), "ORD_D1") is d
+        assert d.state is DeliveryState.CANCELLED, state
+
+
+def test_cancelling_once_the_parcel_is_moving_is_refused():
+    """Past pickup this is a return, not a cancellation: a rider has to carry
+    it back, which costs real money. Refunding the delivery fee for a journey
+    somebody actually made is money we do not get back."""
+    from app.libs.errors import ValidationError
+    from app.delivery_pricing.dispatch import cancel_for_order
+
+    for state in (
+        DeliveryState.PICKED_UP,
+        DeliveryState.IN_TRANSIT,
+        DeliveryState.DELIVERED,
+    ):
+        d = _delivery(state=state)
+        with pytest.raises(ValidationError):
+            cancel_for_order(_Session(d), "ORD_D1")
+        assert d.state is state, state
+
+
+def test_cancelling_an_order_with_no_delivery_is_not_an_error():
+    from app.delivery_pricing.dispatch import cancel_for_order
+
+    assert cancel_for_order(_Session(None), "ORD_D1") is None
+
+
+def test_cancelling_twice_is_not_an_error():
+    from app.delivery_pricing.dispatch import cancel_for_order
+
+    d = _delivery(state=DeliveryState.CANCELLED)
+    assert cancel_for_order(_Session(d), "ORD_D1") is d
+    assert d.state is DeliveryState.CANCELLED

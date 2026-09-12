@@ -515,6 +515,14 @@ class OrderService:
                     f"Order in status '{order.status.value}' cannot be cancelled"
                 )
 
+            # Before anything is mutated: if the parcel is already with a
+            # rider this raises, and the order must be left exactly as it
+            # was. A delivery fee refunded for a journey somebody actually
+            # made is money we do not get back.
+            from app.delivery_pricing.dispatch import cancel_for_order
+
+            cancel_for_order(session, order_id)
+
             captured_amount = OrderService._get_completed_payment_amount(order)
             # Only refund what hasn't already gone out -- an item may have
             # been refunded on its own earlier (see refund_unresolved_item,

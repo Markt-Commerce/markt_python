@@ -146,3 +146,38 @@ def _job_request_for(delivery: OrderDelivery, order) -> JobRequest:
         fee_minor=delivery.effective_fee_minor,
         notes=getattr(order, "customer_note", None),
     )
+
+
+def cancel_for_order(session, order_id: str) -> Optional[OrderDelivery]:
+    """Cancel the delivery attached to an order, if that is still honest.
+
+    Raises ValidationError when the parcel is already in someone's hands.
+    Past pickup, cancelling stops being a state change and becomes a return:
+    a rider has to carry it back, which costs real money and is a different
+    process with different rules. Letting the buyer cancel there would refund
+    a delivery fee for work that was actually done.
+
+    Called inside the caller's transaction and *before* the order is mutated,
+    so a refusal leaves the order exactly as it was.
+    """
+    from app.libs.errors import ValidationError
+
+    delivery = session.query(OrderDelivery).filter_by(order_id=order_id).first()
+    if delivery is None:
+        return None  # no quote was used; nothing to cancel
+
+    if delivery.state is DeliveryState.CANCELLED:
+        return delivery  # already done; cancelling twice is not an error
+
+    if DeliveryState.CANCELLED not in OrderDelivery.VALID_TRANSITIONS.get(
+        delivery.state, []
+    ):
+        raise ValidationError(
+            "This order is already out for delivery and can't be cancelled. "
+            "Please refuse it at the door or start a return instead."
+        )
+
+    was = delivery.state.value
+    delivery.transition_to(DeliveryState.CANCELLED)
+    logger.info("Delivery for order %s cancelled from %s", order_id, was)
+    return delivery
