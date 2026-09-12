@@ -170,6 +170,16 @@ class PaymentService:
                         )
                         session.add(transaction)
 
+            if not already_completed and order:
+                # Paying is what empties the basket, not checking out.
+                #
+                # Only the items that were actually bought: a buyer who added
+                # something else while this order sat unpaid should still find
+                # it there afterwards. And only when the payment completes
+                # *here* -- a duplicate or late webhook must not reach in and
+                # clear a basket the buyer has since refilled.
+                PaymentService._clear_purchased_items_from_cart(session, order)
+
             session.flush()
 
             # Inside the transaction: a delivery that thinks it is unpaid, for
@@ -361,6 +371,54 @@ class PaymentService:
 
         PaymentService._invalidate_payment_cache(payment_id_for_cache)
         return True
+
+    @staticmethod
+    def _clear_purchased_items_from_cart(session, order) -> None:
+        """Take the things that were just paid for out of the buyer's cart.
+
+        Matched on product and variant rather than wiping the cart, because
+        the cart is now kept alive through checkout: anything added while the
+        order sat unpaid is still wanted and must survive.
+
+        Best effort. A cart that could not be tidied is a cosmetic problem;
+        raising here would fail a payment that has already gone through.
+        """
+        try:
+            from app.cart.models import CartItem
+            from app.cart.services import CartService
+
+            buyer = getattr(order, "buyer", None)
+            user_id = getattr(buyer, "user_id", None)
+            if not user_id:
+                return
+
+            cart = CartService.resolve_cart(session, order.buyer_id)
+            if cart is None:
+                return
+
+            purchased = {(i.product_id, i.variant_id) for i in order.items}
+            if not purchased:
+                return
+
+            removed = 0
+            for item in list(cart.items):
+                if (item.product_id, item.variant_id) in purchased:
+                    session.delete(item)
+                    removed += 1
+
+            if removed:
+                # The ORM deletes above bypass nothing, but the cached copy
+                # still has to be dropped or the app shows the old basket.
+                CartService._invalidate_cart_cache(cart.buyer_id)
+                logger.info(
+                    "Cleared %s paid item(s) from the cart for order %s",
+                    removed,
+                    order.id,
+                )
+        except Exception:
+            logger.exception(
+                "Could not tidy the cart after order %s was paid", order.id
+            )
 
     @staticmethod
     def _dispatch_delivery(order_id: Optional[str]) -> None:

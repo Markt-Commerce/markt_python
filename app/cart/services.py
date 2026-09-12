@@ -427,8 +427,21 @@ class CartService:
                 order_item.seller_id = cart_item.product.seller_id
                 session.add(order_item)
 
-            # Clear cart
-            CartService.clear_cart(user_id)
+            # The cart is deliberately NOT cleared here.
+            #
+            # Checkout creates the order; paying for it is what empties the
+            # basket (see PaymentService.complete_payment). Clearing at this
+            # point meant a buyer who backed out of the payment screen -- to
+            # change a quantity, to add one more thing, or because they
+            # simply were not ready -- came back to an empty cart and an
+            # order they had not agreed to pay for yet. Every other
+            # marketplace keeps the basket until the money moves, and so do
+            # we.
+            #
+            # The consequence to keep in mind: an abandoned attempt leaves a
+            # PENDING_PAYMENT order behind. That is expected. It is surfaced
+            # to the buyer, it can still be paid, and expire_unpaid_orders
+            # cancels it if they never do.
 
             # Notify seller about new order
             CartService._notify_seller_new_order(order)
