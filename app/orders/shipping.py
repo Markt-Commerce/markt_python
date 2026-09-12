@@ -31,6 +31,7 @@ def normalize_shipping_address(
     *,
     saved_address: Optional[Dict[str, Any]] = None,
     use_saved_address: bool = False,
+    default_recipient_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Validate and normalize a shipping address payload.
 
@@ -56,6 +57,14 @@ def normalize_shipping_address(
         "latitude": data.get("latitude"),
         "longitude": data.get("longitude"),
     }
+
+    # Whose name to put on the parcel, when the address itself does not say.
+    # An address book entry is usually the buyer's own home and asking them to
+    # name themselves on every one is noise -- and the server already knows
+    # who is checking out, so refusing the order over it was asking the client
+    # for something we had all along.
+    if not normalized.get("recipient_name") and default_recipient_name:
+        normalized["recipient_name"] = default_recipient_name
 
     missing = [field for field in REQUIRED_SHIPPING_FIELDS if not normalized.get(field)]
     if missing:

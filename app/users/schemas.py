@@ -643,6 +643,8 @@ class SavedAddressSchema(Schema):
     )
     latitude = fields.Float(required=True, validate=validate.Range(-90, 90))
     longitude = fields.Float(required=True, validate=validate.Range(-180, 180))
+    city = fields.Str(allow_none=True, validate=validate.Length(max=100))
+    state = fields.Str(allow_none=True, validate=validate.Length(max=100))
     building_type = fields.Enum(BuildingType, by_value=True, load_default=None)
     entry_code = fields.Str(allow_none=True, validate=validate.Length(max=40))
     directions = fields.Str(allow_none=True)

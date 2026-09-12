@@ -120,6 +120,15 @@ def main() -> int:
             "test environment you are about to exercise."
         ),
     )
+    parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help=(
+            "Seed a database that is not on localhost. Needed for a staging "
+            "or test server: this is served-area configuration, not test "
+            "data, and without it every address reads as unserviceable."
+        ),
+    )
     args = parser.parse_args()
 
     from main.setup import create_flask_app
@@ -130,13 +139,19 @@ def main() -> int:
     with app.app_context():
         url = str(db.engine.url)
         print(f"Database: {url}")
-        if not any(h in url for h in ("localhost", "127.0.0.1")):
+        is_local = any(h in url for h in ("localhost", "127.0.0.1"))
+        if not is_local and not args.allow_remote:
             print(
-                "Refusing to seed a database that is not local. Seed data is "
-                "for disposable environments.",
+                "\nRefusing to seed a database that is not local.\n\n"
+                "This is served areas, not throwaway test data -- without it "
+                "every address in the app reads as 'we don't deliver here', "
+                "so a staging or test server does need it.\n\n"
+                "If this is that server, re-run with --allow-remote.",
                 file=sys.stderr,
             )
             return 1
+        if not is_local:
+            print("  (remote database, --allow-remote given)")
 
         session = db.session
         total_zones = total_lanes = 0

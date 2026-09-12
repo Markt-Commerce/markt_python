@@ -57,6 +57,14 @@ class SavedAddress(BaseModel):
     latitude = db.Column(db.Float, nullable=False)
     longitude = db.Column(db.Float, nullable=False)
 
+    #: City and state as the geocoder reported them. Not for finding the place
+    #: -- the coordinate does that -- but because Order's ShippingAddress
+    #: still requires them, and an address book that cannot fill in a checkout
+    #: is not much of an address book. Nullable: plenty of real places come
+    #: back from a geocoder with neither.
+    city = db.Column(db.String(100), nullable=True)
+    state = db.Column(db.String(100), nullable=True)
+
     building_type = db.Column(
         db.Enum(BuildingType), nullable=False, default=BuildingType.HOUSE
     )

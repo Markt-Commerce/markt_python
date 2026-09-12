@@ -63,6 +63,8 @@ class SavedAddressService:
                 formatted_address=data["formatted_address"].strip(),
                 latitude=lat,
                 longitude=lng,
+                city=(data.get("city") or "").strip() or None,
+                state=(data.get("state") or "").strip() or None,
                 building_type=data.get("building_type") or BuildingType.HOUSE,
                 entry_code=(data.get("entry_code") or "").strip() or None,
                 directions=(data.get("directions") or "").strip() or None,
@@ -98,6 +100,8 @@ class SavedAddressService:
                 "directions",
                 "contact_name",
                 "contact_phone",
+                "city",
+                "state",
             ):
                 if field in data:
                     setattr(address, field, (data[field] or "").strip() or None)

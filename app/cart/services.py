@@ -398,6 +398,9 @@ class CartService:
                 checkout_data.get("shipping_address"),
                 saved_address=user.buyer_account.shipping_address,
                 use_saved_address=checkout_data.get("use_saved_address", False),
+                default_recipient_name=(
+                    getattr(user.buyer_account, "buyername", None) or user.username
+                ),
             )
 
             # Calculate order totals. Over the items being bought now, not
