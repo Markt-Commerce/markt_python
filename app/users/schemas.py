@@ -356,6 +356,12 @@ class SellerSimpleSchema(Schema):
     id = fields.Int(dump_only=True)
     shop_name = fields.Str(dump_only=True)
     shop_slug = fields.Str(dump_only=True)
+    # Where the shop is, so a client can ask whether we deliver from there
+    # before letting someone fill a basket they could never check out. Already
+    # public in effect -- distance-ranked discovery is built on it -- and a
+    # shop is a business address, not a home one.
+    shop_latitude = fields.Float(dump_only=True, allow_none=True)
+    shop_longitude = fields.Float(dump_only=True, allow_none=True)
     verification_status = fields.Method("get_verification_status", dump_only=True)
     average_rating = fields.Method("get_average_rating", dump_only=True)
     total_products = fields.Method("get_total_products", dump_only=True)
