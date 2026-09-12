@@ -12,6 +12,8 @@ def pytest_configure():
     import app.categories.models  # noqa: F401
     import app.chats.models  # noqa: F401
     import app.deliveries.models  # noqa: F401
+    import app.delivery_pricing.models  # noqa: F401
+    import app.delivery_pricing.order_delivery  # noqa: F401
     import app.fulfilment.models  # noqa: F401
     import app.gamification.models  # noqa: F401
     import app.inventory.models  # noqa: F401

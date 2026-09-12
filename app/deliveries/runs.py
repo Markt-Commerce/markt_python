@@ -462,6 +462,12 @@ class DeliveryRunService:
         closed = 0
         cancelled_empty = 0
         free_cancellations = 0
+        # Money owed back to buyers whose shared run came out cheaper than the
+        # solo fee they were charged. Collected here and sent after the
+        # transaction commits: a refund is a call to Paystack, and it must
+        # never be able to roll back the run it belongs to -- nor be sent for
+        # a settlement that then failed to persist.
+        pending_refunds: list = []
         now = datetime.utcnow()
 
         with session_scope() as session:
@@ -546,6 +552,34 @@ class DeliveryRunService:
                 # first-come-first-served simplicity) -- a priced run opens
                 # straight up for any online rider to browse and accept.
                 run.transition_to(DeliveryRunStatus.RIDER_ASSIGNMENT)
+
+                # The roster is final and the run's cost is known, which is
+                # the first moment a shared fee can be worked out. Everyone
+                # who opted in was charged their solo quote at checkout; what
+                # they actually owe is settled here, and the difference goes
+                # back to their card once this transaction commits.
+                try:
+                    from app.delivery_pricing.batch import (
+                        batch_enabled,
+                        settle_run,
+                    )
+
+                    if batch_enabled():
+                        settlement = settle_run(session, run.id)
+                        if settlement:
+                            for share in settlement.shares:
+                                owed_back = share.saved_minor
+                                if owed_back > 0:
+                                    pending_refunds.append((share.order_id, owed_back))
+                except Exception:
+                    # A run that could not be settled still has to close --
+                    # riders are waiting on it. The orders keep the solo fee
+                    # they already paid, which is the safe direction to be
+                    # wrong in, and this is loud enough to chase.
+                    logger.exception(
+                        "Could not settle shared delivery for run %s", run.id
+                    )
+
                 closed += 1
 
             order_buyer_ids = {}
@@ -587,15 +621,33 @@ class DeliveryRunService:
                     DeliveryRunOrder.order_id.in_(to_cancel)
                 ).delete(synchronize_session=False)
 
+        # After the commit: each of these is a call to Paystack.
+        refunded = 0
+        if pending_refunds:
+            from app.payments.services import PaymentService
+
+            for order_id, amount_minor in pending_refunds:
+                if PaymentService.refund_to_source(
+                    order_id,
+                    amount_minor,
+                    reason="Shared delivery came out cheaper than quoted",
+                ):
+                    refunded += 1
+
         logger.info(
             "Closed %s delivery run(s) into planning, cancelled %s empty run(s), "
-            "%s order(s) free-cancelled on wait-deadline fallback",
+            "%s order(s) free-cancelled on wait-deadline fallback, "
+            "%s of %s shared-delivery refund(s) sent",
             closed,
             cancelled_empty,
             free_cancellations,
+            refunded,
+            len(pending_refunds),
         )
         return {
             "closed": closed,
             "cancelled_empty": cancelled_empty,
             "free_cancellations": free_cancellations,
+            "refunds_owed": len(pending_refunds),
+            "refunds_sent": refunded,
         }

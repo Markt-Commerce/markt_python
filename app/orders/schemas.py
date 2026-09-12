@@ -27,6 +27,31 @@ class OrderCreateSchema(Schema):
     customer_note = fields.Str()
 
 
+class OrderDeliverySchema(Schema):
+    """Where the parcel is, for the buyer.
+
+    Only what someone tracking a delivery needs. Deliberately not the quote
+    breakdown or the pickup coordinates: the fee was agreed at checkout and
+    the seller's exact location is not the buyer's business.
+    """
+
+    state = fields.Str(dump_only=True, attribute="state.value")
+    fee = fields.Method("get_fee", dump_only=True)
+    distance_km = fields.Float(dump_only=True)
+    external_job_id = fields.Str(dump_only=True, allow_none=True)
+    last_status_at = fields.DateTime(dump_only=True, allow_none=True)
+    failure_reason = fields.Str(dump_only=True, allow_none=True)
+    batch_opt_in = fields.Bool(dump_only=True)
+    #: Null until a shared run closes and the final share is known.
+    settled = fields.Bool(dump_only=True, attribute="is_settled")
+
+    def get_fee(self, obj):
+        """Naira, from the kobo the delivery is priced in. The settled figure
+        once a batch has closed, the solo one before that."""
+        minor = getattr(obj, "effective_fee_minor", None)
+        return None if minor is None else minor / 100
+
+
 class OrderSchema(OrderCreateSchema):
     id = fields.Str(dump_only=True)
     order_number = fields.Str(dump_only=True)
@@ -42,6 +67,9 @@ class OrderSchema(OrderCreateSchema):
     # For responses, serialize ORM relationship via helper dict on model
     shipping_address = fields.Dict(dump_only=True, attribute="shipping_address_dict")
     items = fields.Nested(lambda: OrderItemSchema(many=True), dump_only=True)
+    # Absent on orders checked out without a delivery quote, which is why it
+    # is allow_none rather than assumed.
+    delivery = fields.Nested(OrderDeliverySchema, dump_only=True, allow_none=True)
 
 
 class OrderPaginationSchema(Schema):
@@ -58,6 +86,7 @@ class BuyerOrderSchema(OrderCreateSchema):
     created_at = fields.DateTime(dump_only=True)
     items = fields.Nested(lambda: OrderItemSchema(many=True), dump_only=True)
     shipping_address = fields.Dict(dump_only=True, attribute="shipping_address_dict")
+    delivery = fields.Nested(OrderDeliverySchema, dump_only=True, allow_none=True)
 
 
 # For sellers - shows individual order items

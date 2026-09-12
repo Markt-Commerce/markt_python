@@ -8,6 +8,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 # project imports
 from external.redis import redis_client
+from app.libs.money import json_safe
 from app.libs.session import session_scope
 from app.libs.pagination import Paginator
 from app.libs.errors import NotFoundError
@@ -489,7 +490,13 @@ class NotificationService:
                     is_seen=False,
                     reference_type=reference_type,
                     reference_id=reference_id,
-                    metadata_=metadata_ or {},
+                    # Through json_safe: metadata_ is JSONB and callers pass
+                    # money straight in (payment amounts, order totals).
+                    # Decimal does not serialise, and the failure lands at
+                    # flush -- which, for a notification created inside a
+                    # payment's own transaction, took the payment's other
+                    # work down with it.
+                    metadata_=json_safe(metadata_ or {}),
                 )
                 session.add(notification)
                 session.flush()

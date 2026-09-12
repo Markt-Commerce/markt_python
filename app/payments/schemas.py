@@ -110,6 +110,26 @@ class CheckoutPaymentInitializeSchema(Schema):
         },
     )
     idempotency_key = fields.Str(allow_none=True)
+    delivery_quote_id = fields.Str(
+        allow_none=True,
+        metadata={
+            "description": (
+                "From POST /delivery/quote. Optional: without one the flat "
+                "estimate applies, so older clients keep working. With one, "
+                "the buyer is charged exactly the fee they were shown."
+            )
+        },
+    )
+    batch_opt_in = fields.Bool(
+        missing=False,
+        metadata={
+            "description": (
+                "Buyer asking to share a delivery run with other orders "
+                "going the same way. Only meaningful alongside a quote, and "
+                "never inferred on their behalf."
+            )
+        },
+    )
 
 
 class CheckoutPaymentResponseSchema(Schema):

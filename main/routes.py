@@ -30,6 +30,7 @@ def register_blueprints(app, api):
         "markets",
         "moderation",
         "location",
+        "delivery_pricing",
     ]
 
     for module in modules:

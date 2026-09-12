@@ -111,6 +111,13 @@ class Database:
                 WalletTopUp,
             )
             from app.location.models import BrowseLocation
+            from app.delivery_pricing.models import (
+                ServiceCity,
+                ServiceZone,
+                DeliveryLane,
+                DeliveryQuote,
+            )
+            from app.delivery_pricing.order_delivery import OrderDelivery
 
         # Import other models as needed
 

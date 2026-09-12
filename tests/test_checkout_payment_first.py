@@ -547,17 +547,55 @@ def test_handle_failed_charge_is_idempotent_for_repeat_notifications(
     mock_release.assert_not_called()
 
 
+@patch("app.payments.services.read_scope")
 @patch("app.payments.services.PaymentService.complete_checkout_payment")
 @patch("app.payments.services.PaymentService.complete_payment")
 def test_handle_successful_charge_routes_order_based_payment_as_before(
-    mock_complete_payment, mock_complete_checkout
+    mock_complete_payment, mock_complete_checkout, mock_read_scope
 ):
+    # No metadata, and the Payment carries no checkout snapshot -- an
+    # ordinary order-first payment.
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.first.return_value = _payment(
+        snapshot=None
+    )
+    mock_read_scope.return_value.__enter__.return_value = session
+
     data = {"reference": "PAY_1", "metadata": {}}
     PaymentService._handle_successful_charge(data)
     mock_complete_payment.assert_called_once_with(
         reference="PAY_1", gateway_response=data
     )
     mock_complete_checkout.assert_not_called()
+
+
+@patch("app.payments.services.read_scope")
+@patch("app.payments.services.PaymentService.complete_checkout_payment")
+@patch("app.payments.services.PaymentService.complete_payment")
+def test_a_checkout_payment_is_recognised_even_without_paystacks_metadata(
+    mock_complete_payment, mock_complete_checkout, mock_read_scope
+):
+    """Routing used to depend entirely on metadata Paystack echoes back. When
+    that echo went missing -- a replayed event, a manual retry from the
+    dashboard -- a payment-first checkout fell through to complete_payment,
+    which assumes an order already exists. The payment went COMPLETED, no
+    order was built, and the buyer had paid for nothing.
+
+    A Payment carrying pending_checkout_data is a payment-first checkout by
+    construction; nothing else sets that column.
+    """
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.first.return_value = _payment(
+        snapshot={"items": []}
+    )
+    mock_read_scope.return_value.__enter__.return_value = session
+
+    data = {"reference": "PAY_1", "metadata": {}}  # no "type": "checkout"
+    PaymentService._handle_successful_charge(data)
+    mock_complete_checkout.assert_called_once_with(
+        reference="PAY_1", gateway_response=data
+    )
+    mock_complete_payment.assert_not_called()
 
 
 @patch("app.payments.services.requests.get")

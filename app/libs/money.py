@@ -75,3 +75,44 @@ def to_subunit(value: Numberish) -> int:
     if amount is None:
         raise ValueError("Cannot convert None to a currency subunit")
     return int(amount * 100)
+
+
+def from_subunit(minor: Optional[int]) -> Optional[Decimal]:
+    """Kobo -> naira, the inverse of :func:`to_subunit`.
+
+    Delivery prices in integer kobo end to end, because a fee that gets split
+    across several buyers has to divide without leaving a fraction of a kobo
+    unaccounted for. Orders store naira in NUMERIC(12,2). This is the one
+    place that crosses between them, so there is exactly one line to audit if
+    a fee is ever a kobo out.
+
+    Exact by construction: an integer number of kobo always has an exact 2dp
+    naira representation, so nothing is rounded here and nothing can be lost.
+    """
+    if minor is None:
+        return None
+    if not isinstance(minor, int) or isinstance(minor, bool):
+        # bool is an int subclass, and `from_subunit(True)` meaning one kobo
+        # is never what anyone meant.
+        raise TypeError(f"Minor units must be an int, got {type(minor).__name__}")
+    return (Decimal(minor) / 100).quantize(CENTS, rounding=ROUND_HALF_UP)
+
+
+def json_safe(value):
+    """Recursively make a structure safe to store in a JSON column.
+
+    Decimal is not JSON serializable, so a dict carrying money straight into a
+    JSON column raises at flush time -- after the request has done its work,
+    from inside SQLAlchemy, with a traceback that names the serializer rather
+    than the money. Converts through :func:`money_to_float`, which is exact at
+    the 2dp NUMERIC(12,2) holds.
+
+    Only Decimals are touched; everything else is passed through unchanged.
+    """
+    if isinstance(value, Decimal):
+        return money_to_float(value)
+    if isinstance(value, dict):
+        return {k: json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+    return value

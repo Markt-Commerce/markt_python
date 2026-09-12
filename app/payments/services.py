@@ -12,10 +12,10 @@ from sqlalchemy.orm import joinedload
 
 # project imports
 from external.redis import redis_client
-from app.libs.session import session_scope
+from app.libs.session import session_scope, read_scope
 from decimal import Decimal
 
-from app.libs.money import to_money, to_subunit
+from app.libs.money import to_money, to_subunit, from_subunit, json_safe
 from app.libs.errors import (
     NotFoundError,
     ValidationError,
@@ -170,7 +170,26 @@ class PaymentService:
                         )
                         session.add(transaction)
 
+            if not already_completed and order:
+                # Paying is what empties the basket, not checking out.
+                #
+                # Only the items that were actually bought: a buyer who added
+                # something else while this order sat unpaid should still find
+                # it there afterwards. And only when the payment completes
+                # *here* -- a duplicate or late webhook must not reach in and
+                # clear a basket the buyer has since refilled.
+                PaymentService._clear_purchased_items_from_cart(session, order)
+
             session.flush()
+
+            # Inside the transaction: a delivery that thinks it is unpaid, for
+            # an order that is paid, is a bookkeeping lie.
+            from app.delivery_pricing.dispatch import mark_paid
+
+            delivery = (
+                mark_paid(session, payment.order_id) if payment.order_id else None
+            )
+            needs_dispatch = delivery is not None
 
             if not already_completed:
                 PaymentService._send_payment_notifications(
@@ -179,7 +198,14 @@ class PaymentService:
                 PaymentService._emit_payment_confirmed(payment)
 
             PaymentService._invalidate_payment_cache(payment.id)
-            return True
+            order_id_for_dispatch = payment.order_id
+
+        # Outside it: creating the courier job calls another company over the
+        # network. It must not be able to roll back a payment that already
+        # succeeded, nor leave a real job against an order that did not commit.
+        if needs_dispatch:
+            PaymentService._dispatch_delivery(order_id_for_dispatch)
+        return True
 
     @staticmethod
     def complete_checkout_payment(
@@ -254,6 +280,16 @@ class PaymentService:
             )
             payment.order_id = order.id
 
+            PaymentService._attach_paid_delivery(session, order, snapshot)
+            # This flow only reaches here once the money is in, so the
+            # delivery is paid the moment it is attached. Through the same
+            # transition as every other path rather than being written
+            # straight to PAID, so the state machine stays the only authority
+            # on what is legal.
+            from app.delivery_pricing.dispatch import mark_paid
+
+            mark_paid(session, order.id)
+
             failed_reservation_ids = set(
                 InventoryService.confirm_reservations(
                     session,
@@ -299,11 +335,14 @@ class PaymentService:
 
             session.flush()
             payment_id_for_cache = payment.id
+            payment_order_id = order.id
             item_specs = [
                 (item.id, item.seller_id, item.quantity, item.product_id)
                 for item in order.items
                 if item.id not in unsecured_order_item_ids
             ]
+
+        PaymentService._dispatch_delivery(payment_order_id)
 
         # Open the seller-acceptance window (12.1-12.2, Phase 5) only
         # after the order has actually committed -- an allocation (and its
@@ -312,9 +351,32 @@ class PaymentService:
         from app.fulfilment.services import FulfilmentService
 
         for order_item_id, seller_id, quantity, product_id in item_specs:
-            FulfilmentService.create_allocation(
-                order_item_id, seller_id, quantity, product_id=product_id
-            )
+            try:
+                FulfilmentService.create_allocation(
+                    order_item_id, seller_id, quantity, product_id=product_id
+                )
+            except ConflictError:
+                # Already allocated. A retried charge.success is normal
+                # traffic -- Paystack retries anything that is not a 2xx, and
+                # it re-sends on its own besides -- so arriving at an item
+                # that already has its seller window open is success, not
+                # failure.
+                logger.info(
+                    "Fulfilment for order item %s was already open; "
+                    "ignoring the duplicate",
+                    order_item_id,
+                )
+            except Exception:
+                # The money is in and the order exists. Opening the seller's
+                # acceptance window is the next step, not part of the
+                # payment, and letting it escape turned a completed payment
+                # into a non-2xx that makes Paystack retry something that
+                # will never succeed.
+                logger.exception(
+                    "Could not open fulfilment for order item %s -- the "
+                    "order stands and needs a human",
+                    order_item_id,
+                )
 
         if unsecured_order_item_ids:
             logger.warning(
@@ -332,6 +394,210 @@ class PaymentService:
 
         PaymentService._invalidate_payment_cache(payment_id_for_cache)
         return True
+
+    @staticmethod
+    def _clear_purchased_items_from_cart(session, order) -> None:
+        """Take the things that were just paid for out of the buyer's cart.
+
+        Matched on product and variant rather than wiping the cart, because
+        the cart is now kept alive through checkout: anything added while the
+        order sat unpaid is still wanted and must survive.
+
+        Best effort. A cart that could not be tidied is a cosmetic problem;
+        raising here would fail a payment that has already gone through.
+        """
+        try:
+            from app.cart.models import CartItem
+            from app.cart.services import CartService
+
+            buyer = getattr(order, "buyer", None)
+            user_id = getattr(buyer, "user_id", None)
+            if not user_id:
+                return
+
+            cart = CartService.resolve_cart(session, order.buyer_id)
+            if cart is None:
+                return
+
+            purchased = {(i.product_id, i.variant_id) for i in order.items}
+            if not purchased:
+                return
+
+            removed = 0
+            for item in list(cart.items):
+                if (item.product_id, item.variant_id) in purchased:
+                    session.delete(item)
+                    removed += 1
+
+            if removed:
+                # The ORM deletes above bypass nothing, but the cached copy
+                # still has to be dropped or the app shows the old basket.
+                CartService._invalidate_cart_cache(cart.buyer_id)
+                logger.info(
+                    "Cleared %s paid item(s) from the cart for order %s",
+                    removed,
+                    order.id,
+                )
+        except Exception:
+            logger.exception(
+                "Could not tidy the cart after order %s was paid", order.id
+            )
+
+    @staticmethod
+    def refund_to_source(order_id: str, amount_minor: int, reason: str) -> bool:
+        """Send money back to the card it came from.
+
+        Used when a shared delivery run settles for less than the buyer was
+        charged. ADR-002 rules out crediting a wallet for this: the buyer
+        paid with a card and is owed money, not store credit, and turning one
+        into the other without asking is a decision Markt does not get to
+        make on their behalf.
+
+        Returns True when Paystack accepted the refund. Never raises -- a
+        refund that could not be sent is an operational problem to chase, not
+        a reason to fail whatever asked for it.
+        """
+        if amount_minor <= 0:
+            return False
+
+        try:
+            with session_scope() as session:
+                payment = (
+                    session.query(Payment)
+                    .filter_by(order_id=order_id, status=PaymentStatus.COMPLETED)
+                    .first()
+                )
+                if payment is None or not payment.transaction_id:
+                    logger.error(
+                        "No completed payment to refund against for order %s",
+                        order_id,
+                    )
+                    return False
+                reference = payment.transaction_id
+                payment_id = payment.id
+
+            response = requests.post(
+                f"{PaymentService.PAYSTACK_BASE_URL}/refund",
+                json={
+                    "transaction": reference,
+                    # Kobo, like every other amount Paystack takes.
+                    "amount": int(amount_minor),
+                    "merchant_note": reason,
+                },
+                headers={
+                    "Authorization": f"Bearer {PaymentService.PAYSTACK_SECRET_KEY}"
+                },
+                timeout=20,
+            )
+            if response.status_code not in (200, 201):
+                logger.error(
+                    "Paystack refused a %s kobo refund on %s (HTTP %s): %s",
+                    amount_minor,
+                    reference,
+                    response.status_code,
+                    response.text[:500],
+                )
+                return False
+
+            with session_scope() as session:
+                payment = session.query(Payment).get(payment_id)
+                if payment is not None:
+                    # Partial by definition here: the buyer keeps the
+                    # delivery they paid for, just at a lower price.
+                    if payment.status == PaymentStatus.COMPLETED:
+                        payment.transition_to(PaymentStatus.PARTIALLY_REFUNDED)
+            logger.info(
+                "Refunded %s kobo to the card for order %s (%s)",
+                amount_minor,
+                order_id,
+                reason,
+            )
+            return True
+        except Exception:
+            logger.exception(
+                "Could not refund %s kobo for order %s", amount_minor, order_id
+            )
+            return False
+
+    @staticmethod
+    def _dispatch_delivery(order_id: Optional[str]) -> None:
+        """Ask a courier for this order, after its payment has committed.
+
+        Swallows everything. Dispatch failing is already handled inside
+        dispatch() by parking the delivery at AWAITING_DISPATCH; anything that
+        escapes that is a bug here, and it must not turn a completed payment
+        into a 500 for a buyer whose money has already moved.
+        """
+        if not order_id:
+            return
+        try:
+            from app.delivery_pricing.dispatch import dispatch
+
+            dispatch(order_id)
+        except Exception:
+            logger.exception(
+                "Dispatching the delivery for order %s failed outright", order_id
+            )
+
+    @staticmethod
+    def _attach_paid_delivery(session, order, snapshot: Dict[str, Any]) -> None:
+        """Attach the delivery to an order built from a paid checkout.
+
+        Runs inside the completion transaction, so the order and its delivery
+        commit together or not at all.
+
+        Nothing here is allowed to fail the completion. The buyer has paid;
+        the order must exist. A delivery that could not be attached is logged
+        loudly and left for an operator, because the alternative -- rolling
+        back an order someone has already been charged for -- is worse than
+        any bookkeeping gap.
+        """
+        quote_id = (snapshot or {}).get("delivery_quote_id")
+        if not quote_id:
+            return
+
+        try:
+            from app.delivery_pricing.services import QuoteService
+            from app.delivery_pricing.order_delivery import OrderDelivery
+
+            quote = QuoteService.consume(
+                session,
+                quote_id,
+                order.buyer_id,
+                order.id,
+                # Already paid. See consume() for why expiry stops applying
+                # at this point.
+                allow_expired=True,
+            )
+
+            delivery = OrderDelivery()
+            delivery.order_id = order.id
+            delivery.quote_id = quote.id
+            delivery.fee_minor = quote.fee_minor
+            delivery.breakdown = quote.breakdown
+            delivery.distance_km = quote.distance_km
+            delivery.strategy = quote.strategy
+            delivery.strategy_version = quote.strategy_version
+            delivery.pickup_lat = quote.pickup_lat
+            delivery.pickup_lng = quote.pickup_lng
+            delivery.dropoff_lat = quote.dropoff_lat
+            delivery.dropoff_lng = quote.dropoff_lng
+            delivery.solo_fee_minor = quote.fee_minor
+            delivery.batch_opt_in = bool(snapshot.get("batch_opt_in", False))
+            session.add(delivery)
+            logger.info(
+                "Order %s took delivery quote %s (%s kobo)",
+                order.id,
+                quote.id,
+                quote.fee_minor,
+            )
+        except Exception:
+            logger.exception(
+                "Could not attach delivery quote %s to paid order %s -- the "
+                "order stands and needs a delivery record created by hand",
+                quote_id,
+                order.id,
+            )
 
     @staticmethod
     def _emit_payment_confirmed(payment: Payment):
@@ -478,9 +744,15 @@ class PaymentService:
 
         with session_scope() as session:
             if idempotency_key:
+                # Scoped to the buyer, like checkout_cart's equivalent lookup.
+                # Unscoped, a key that was guessed or leaked from another
+                # account returned that account's Payment -- and a Payment
+                # carries pending_checkout_data, which holds their shipping
+                # address. A retry key is not a credential and must never be
+                # able to act as one.
                 existing = (
                     session.query(Payment)
-                    .filter_by(idempotency_key=idempotency_key)
+                    .filter_by(idempotency_key=idempotency_key, buyer_id=buyer_id)
                     .first()
                 )
                 if existing:
@@ -503,10 +775,29 @@ class PaymentService:
             )
 
             subtotal = cart.subtotal()
-            shipping_fee = CartService._calculate_shipping_fee(
-                cart, shipping_normalized
-            )
             delivery_count = CartService.count_distinct_deliveries(cart)
+
+            # A quote is read here, not consumed: this flow charges the buyer
+            # before any order exists, and a quote is attached to an order.
+            # complete_checkout_payment consumes it once there is something to
+            # attach it to. Reading it now is what makes the buyer pay the fee
+            # they were actually shown.
+            delivery_quote_id = checkout_data.get("delivery_quote_id")
+            if delivery_quote_id:
+                from app.delivery_pricing.services import QuoteService
+
+                if delivery_count > 1:
+                    raise ValidationError(
+                        "This basket has items from more than one market, "
+                        "which needs a delivery quote per market. Please check "
+                        "out from one market at a time for now."
+                    )
+                quote = QuoteService.peek(session, delivery_quote_id, buyer_id)
+                shipping_fee = from_subunit(quote.fee_minor)
+            else:
+                shipping_fee = CartService._calculate_shipping_fee(
+                    cart, shipping_normalized
+                )
             # No tax/discount line here: Phase 0 deferred VAT (the old
             # flow's hardcoded 5% charge is a placeholder that contradicts
             # that decision) and there's no coupon system to discount
@@ -554,24 +845,43 @@ class PaymentService:
                 method=PaymentMethod.CARD,
                 status=PaymentStatus.PENDING,
                 gateway_response={},
-                pending_checkout_data={
-                    "items": items_snapshot,
-                    "shipping_address": shipping_normalized,
-                    "fulfilment_preference": checkout_data.get(
-                        "fulfilment_preference", "auto"
-                    ),
-                    **breakdown,
-                },
+                # Through json_safe: this is a JSON column, the snapshot is
+                # full of money, and Decimal does not serialise. Without it
+                # the whole payment-first checkout fails at flush time.
+                pending_checkout_data=json_safe(
+                    {
+                        "items": items_snapshot,
+                        "shipping_address": shipping_normalized,
+                        "fulfilment_preference": checkout_data.get(
+                            "fulfilment_preference", "auto"
+                        ),
+                        # Carried so completion can attach the delivery to the
+                        # order it finally creates.
+                        "delivery_quote_id": delivery_quote_id,
+                        "batch_opt_in": bool(checkout_data.get("batch_opt_in", False)),
+                        **breakdown,
+                    }
+                ),
                 idempotency_key=idempotency_key or str(uuid.uuid4()),
             )
             session.add(payment)
             session.flush()
 
-            PaymentService._initialize_paystack_transaction_for_checkout(
-                payment,
-                buyer.user.email,
-                platform=checkout_data.get("platform", "web"),
-            )
+            try:
+                PaymentService._initialize_paystack_transaction_for_checkout(
+                    payment,
+                    buyer.user.email,
+                    platform=checkout_data.get("platform", "web"),
+                )
+            except Exception:
+                # The reservations were taken before this point and are held in
+                # their own transaction, so the rollback about to happen will
+                # not free them. They would lapse on their own at the TTL, but
+                # that is up to ten minutes of stock held for a checkout that
+                # already failed -- long enough for the next buyer to be told
+                # an in-stock item is unavailable.
+                InventoryService.release_reservations(reserved_ids)
+                raise
 
             PaymentService._cache_payment(payment)
             return payment
@@ -823,8 +1133,12 @@ class PaymentService:
                 logger.info(f"Unhandled webhook event: {event}")
                 return True
 
-        except Exception as e:
-            logger.error(f"Webhook handling failed: {str(e)}")
+        except Exception:
+            # exception(), not error(str(e)): several of this codebase's own
+            # error types stringify to nothing, so the old line logged
+            # "Webhook handling failed: " and left no way to find out what
+            # had actually gone wrong.
+            logger.exception("Webhook handling failed")
             return False
 
     # ==================== PRIVATE METHODS ====================
@@ -914,10 +1228,20 @@ class PaymentService:
                 payment.gateway_response = data
                 payment.transaction_id = data["data"]["reference"]
             else:
+                # Paystack says exactly what it did not like ("email must be
+                # a valid email", "amount too low"). Throwing that away left
+                # a log line with nothing in it and no way to tell a bad
+                # payload from a dead gateway.
+                logger.error(
+                    "Paystack rejected the transaction for payment %s " "(HTTP %s): %s",
+                    payment.id,
+                    response.status_code,
+                    response.text[:500],
+                )
                 raise APIError("Failed to initialize payment", 500)
 
         except Exception as e:
-            logger.error(f"Paystack initialization failed: {str(e)}")
+            logger.error(f"Paystack initialization failed: {e!r}")
             raise APIError("Payment initialization failed", 500)
 
     @staticmethod
@@ -972,10 +1296,16 @@ class PaymentService:
                 payment.gateway_response = data
                 payment.transaction_id = data["data"]["reference"]
             else:
+                logger.error(
+                    "Paystack rejected the checkout for payment %s " "(HTTP %s): %s",
+                    payment.id,
+                    response.status_code,
+                    response.text[:500],
+                )
                 raise APIError("Failed to initialize payment", 500)
 
         except Exception as e:
-            logger.error(f"Paystack checkout initialization failed: {str(e)}")
+            logger.error(f"Paystack checkout initialization failed: {e!r}")
             raise APIError("Payment initialization failed", 500)
 
     @staticmethod
@@ -1136,7 +1466,25 @@ class PaymentService:
 
             return WalletService.complete_topup(reference, data)
 
-        if metadata.get("type") == "checkout":
+        # Which completion path this is was decided purely by metadata Paystack
+        # echoes back. When that echo is missing -- a replayed event, a manual
+        # retry from the dashboard, a gateway that trims unknown fields -- a
+        # payment-first checkout fell through to complete_payment, which
+        # assumes an order already exists. The payment went COMPLETED, no
+        # order was ever built, and the buyer had paid for nothing.
+        #
+        # So ask our own database instead, and keep the metadata as a hint.
+        # A Payment carrying pending_checkout_data is a payment-first
+        # checkout by construction; nothing else sets that column.
+        is_checkout = metadata.get("type") == "checkout"
+        if not is_checkout:
+            with read_scope() as session:
+                payment = (
+                    session.query(Payment).filter_by(transaction_id=reference).first()
+                )
+                is_checkout = bool(payment and payment.pending_checkout_data)
+
+        if is_checkout:
             return PaymentService.complete_checkout_payment(
                 reference=reference,
                 gateway_response=data,
