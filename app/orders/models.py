@@ -30,6 +30,12 @@ class Order(BaseModel, UniqueIdMixin):
     shipping_fee = db.Column(MONEY)
     tax = db.Column(MONEY)
     discount = db.Column(MONEY)
+    # Which chat offer produced that discount, so the offer can be spent when
+    # the order is paid rather than when it is created. Without the link there
+    # is no way, at payment time, to know what to spend.
+    chat_discount_id = db.Column(
+        db.Integer, db.ForeignKey("chat_discounts.id"), nullable=True
+    )
     # Buyer-facing Service Fee (11.3, Phase 0: 2.5%, floor ₦25, ceiling
     # ₦1,000). Nullable: orders from the pre-existing order-first checkout
     # flow predate this fee and never set it.

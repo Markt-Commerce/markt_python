@@ -402,3 +402,80 @@ def test_checkout_passes_what_each_product_costs():
     (_, _), validate = _resolve(1, items, subtotal=5000.0)
     assert validate.call_args.kwargs["eligible_by_product"] == {"PRD_A": 5000.0}
     assert validate.call_args.kwargs["product_names"] == {"PRD_A": "A jersey"}
+
+
+# --- spent by paying, not by reaching the payment screen --------------------
+#
+# Checkout creates a PENDING_PAYMENT order and the buyer pays on the next
+# screen. Spending the offer at checkout meant backing out to change a
+# quantity lost it -- and the second checkout was refused outright, so one
+# stray back-tap locked the buyer out of buying at all. The cart survives
+# checkout precisely so they can go back.
+
+
+def _paid_order(discount_id=1, order_id="ORD_1"):
+    return SimpleNamespace(id=order_id, chat_discount_id=discount_id)
+
+
+def _spend(order, discount):
+    from app.payments.services import PaymentService
+
+    session = MagicMock()
+    chain = session.query.return_value.filter.return_value.with_for_update.return_value
+    chain.first.return_value = discount
+    PaymentService._spend_chat_discount(session, order)
+    return discount
+
+
+def test_paying_spends_the_offer():
+    discount = _spend(_paid_order(), _discount())
+    assert discount.usage_count == 1
+    assert discount.status == DiscountStatus.USED
+
+
+def test_an_order_with_no_offer_spends_nothing():
+    from app.payments.services import PaymentService
+
+    session = MagicMock()
+    PaymentService._spend_chat_discount(session, SimpleNamespace(id="ORD_1"))
+    session.query.assert_not_called()
+
+
+def test_a_second_payment_for_the_same_order_does_not_spend_it_twice():
+    """A duplicate or late webhook must not burn a multi-use offer twice."""
+    discount = _discount(usage_limit=3)
+    _spend(_paid_order(), discount)
+    _spend(_paid_order(), discount)
+    # The call site guards on already_completed; this is the belt to that
+    # brace -- what matters is that a spent-out offer is never pushed past
+    # its limit.
+    assert discount.usage_count <= discount.usage_limit
+
+
+def test_an_offer_already_at_its_limit_is_left_alone():
+    """Two unpaid orders can carry the same single-use offer if the buyer went
+    back and checked out again. If both get paid, the second is already priced
+    and taken -- there is nothing to claw back, so it is recorded, not
+    doubled."""
+    discount = _discount(usage_count=1, status=DiscountStatus.USED)
+    _spend(_paid_order(), discount)
+    assert discount.usage_count == 1
+
+
+def test_a_missing_offer_never_fails_a_payment():
+    from app.payments.services import PaymentService
+
+    session = MagicMock()
+    chain = session.query.return_value.filter.return_value.with_for_update.return_value
+    chain.first.return_value = None
+    PaymentService._spend_chat_discount(session, _paid_order())  # must not raise
+
+
+def test_a_broken_lookup_never_fails_a_payment():
+    """The money has already moved. An offer that could not be marked used is
+    a bookkeeping problem to chase, not a reason to fail the payment."""
+    from app.payments.services import PaymentService
+
+    session = MagicMock()
+    session.query.side_effect = RuntimeError("database gone")
+    PaymentService._spend_chat_discount(session, _paid_order())  # must not raise

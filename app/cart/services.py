@@ -495,12 +495,22 @@ class CartService:
                 order.shipping_fee = shipping_fee
                 order.total = subtotal + shipping_fee + tax + service_fee - discount
 
-            # The order exists now, so the discount is genuinely spent. Same
-            # transaction: if anything below fails, the use rolls back with it.
+            # Recorded, not spent.
+            #
+            # It used to be spent here, on the grounds that the order existed.
+            # But an order is not a purchase: this flow creates it as
+            # PENDING_PAYMENT and the buyer pays on the next screen. The cart
+            # deliberately survives checkout so they can go back and adjust --
+            # and when they did, their offer was gone. Worse, the second
+            # checkout was refused outright ("Discount has already been
+            # used"), so backing out of the payment screen once locked them
+            # out of buying at all.
+            #
+            # Paying is what spends it, exactly like the basket being cleared.
+            # PaymentService.complete_payment does it, and this is the link
+            # that tells it which offer to spend.
             if chat_discount is not None:
-                from app.chats.services import DiscountService
-
-                DiscountService.consume(session, chat_discount)
+                order.chat_discount_id = chat_discount.id
 
             # Create order items from cart items
             for cart_item in checkout_items:
