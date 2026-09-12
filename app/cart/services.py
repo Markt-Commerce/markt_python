@@ -28,6 +28,7 @@ from .models import Cart, CartItem, CART_TTL
 from app.users.models import User, Buyer
 from app.products.models import Product, ProductVariant
 from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
+from app.orders.snapshot import product_snapshot
 from app.orders.shipping import (
     normalize_shipping_address,
     shipping_address_to_model_kwargs,
@@ -510,6 +511,12 @@ class CartService:
                 order_item.quantity = cart_item.quantity
                 order_item.price = cart_item.product_price
                 order_item.seller_id = cart_item.product.seller_id
+                # Frozen here, like the price. What the buyer agreed to buy
+                # must not change because the seller edited the listing after.
+                (
+                    order_item.product_name,
+                    order_item.product_image_url,
+                ) = product_snapshot(cart_item.product)
                 session.add(order_item)
 
             # The cart is deliberately NOT cleared here.

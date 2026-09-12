@@ -4,6 +4,30 @@ from app.products.schemas import ProductSimpleSchema, ProductVariantSchema
 from app.users.schemas import BuyerSimpleSchema
 from .events import OrderEventType, ActorType
 from .models import OrderStatus, OrderItem
+from .snapshot import product_image_url
+
+
+def bought_product(item):
+    """What was bought, preferring the snapshot taken at checkout.
+
+    An order shows what was bought, not what the listing says today. Reading
+    the live product meant a seller who renamed a listing or swapped its photo
+    rewrote the buyer's own receipt -- and the app now lets sellers change
+    photos, so this is reachable rather than theoretical.
+
+    Falls back field by field, so an order placed before snapshots existed
+    still renders, and so does one whose photo could not be read at the time.
+    """
+    live = getattr(item, "product", None)
+    return {
+        # The id stays live on purpose: it is how the buyer opens the product
+        # again, and it does not change when a listing is edited.
+        "id": getattr(live, "id", None) or getattr(item, "product_id", None),
+        "name": getattr(item, "product_name", None) or getattr(live, "name", None),
+        "image_url": (
+            getattr(item, "product_image_url", None) or product_image_url(live)
+        ),
+    }
 
 
 class OrderItemSchema(Schema):
@@ -17,7 +41,15 @@ class OrderItemSchema(Schema):
     # list of orders had to fetch each product separately just to show a name
     # and a thumbnail -- one request per line. The relationship already existed;
     # it was simply never exposed.
-    product = fields.Nested(ProductSimpleSchema, dump_only=True)
+    #
+    # It is no longer the live product, though: an order shows what was
+    # bought. Exposing the relationship directly meant a seller who renamed a
+    # listing or swapped its photo rewrote the buyer's own receipt, and the
+    # app now lets sellers change photos.
+    product = fields.Method("get_product", dump_only=True)
+
+    def get_product(self, obj):
+        return bought_product(obj)
 
 
 class OrderCreateSchema(Schema):
@@ -93,8 +125,15 @@ class BuyerOrderSchema(OrderCreateSchema):
 class SellerOrderItemSchema(Schema):
     id = fields.Int(dump_only=True)
     order_id = fields.Str(dump_only=True)
-    product = fields.Nested(lambda: ProductSimpleSchema())
+    # The snapshot here too: a seller's own record of what they sold should
+    # not move when they edit the listing, which is the whole point when a
+    # buyer is disputing what arrived.
+    product = fields.Method("get_product", dump_only=True)
     variant = fields.Nested(lambda: ProductVariantSchema())
+
+    def get_product(self, obj):
+        return bought_product(obj)
+
     quantity = fields.Int(dump_only=True)
     price = fields.Float(dump_only=True)
     status = fields.Enum(OrderItem.Status, by_value=True, dump_only=True)
