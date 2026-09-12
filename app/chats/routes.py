@@ -22,6 +22,9 @@ from .schemas import (
     ChatMessageReactionCreateSchema,
     ChatMessageReactionSchema,
     ChatMessageReactionSummarySchema,
+    CreateDiscountSchema,
+    DiscountResponseSchema,
+    ApplyDiscountSchema,
 )
 from .services import ChatService, ChatReactionService, DiscountService
 
@@ -258,24 +261,7 @@ class ChatRoomDiscounts(MethodView):
             abort(e.status_code, message=e.message)
 
     @login_required
-    @bp.arguments(
-        {
-            "discount_type": {
-                "type": "string",
-                "required": True,
-                "enum": ["percentage", "fixed_amount"],
-            },
-            "discount_value": {"type": "number", "required": True, "minimum": 0.01},
-            "minimum_order_amount": {"type": "number", "minimum": 0},
-            "maximum_discount_amount": {"type": "number", "minimum": 0},
-            "expires_at": {"type": "string", "required": True, "format": "date-time"},
-            "usage_limit": {"type": "integer", "minimum": 1, "default": 1},
-            "product_id": {"type": "string"},
-            "discount_message": {"type": "string"},
-            "discount_code": {"type": "string"},
-            "metadata": {"type": "object"},
-        }
-    )
+    @bp.arguments(CreateDiscountSchema)
     @bp.response(201)
     def post(self, discount_data, room_id):
         """Create a new discount offer in a chat room (seller only)"""
@@ -291,16 +277,7 @@ class ChatRoomDiscounts(MethodView):
 @bp.route("/discounts/<int:discount_id>/respond")
 class DiscountResponse(MethodView):
     @login_required
-    @bp.arguments(
-        {
-            "response": {
-                "type": "string",
-                "required": True,
-                "enum": ["accepted", "rejected"],
-            },
-            "response_message": {"type": "string"},
-        }
-    )
+    @bp.arguments(DiscountResponseSchema)
     @bp.response(200)
     def post(self, response_data, discount_id):
         """Respond to a discount offer (buyer only)"""
@@ -319,9 +296,7 @@ class DiscountResponse(MethodView):
 @bp.route("/discounts/<int:discount_id>/apply")
 class DiscountApplication(MethodView):
     @login_required
-    @bp.arguments(
-        {"order_amount": {"type": "number", "required": True, "minimum": 0.01}}
-    )
+    @bp.arguments(ApplyDiscountSchema)
     @bp.response(200)
     def post(self, application_data, discount_id):
         """Apply a discount to an order (validate and calculate discount amount)"""

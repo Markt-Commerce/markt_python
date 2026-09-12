@@ -1816,6 +1816,8 @@ class DiscountService:
         discount_id: int,
         order_amount: float,
         seller_user_id: Optional[str] = None,
+        eligible_by_product: Optional[Dict[str, float]] = None,
+        product_names: Optional[Dict[str, str]] = None,
     ) -> Tuple[Optional["ChatDiscount"], float, str]:
         """Can this buyer use this discount on this order, and for how much?
 
@@ -1831,6 +1833,16 @@ class DiscountService:
         `seller_user_id` scopes it to one shop. A discount is offered in a
         room by one seller; the cart is now one order per shop, and without
         this an offer from shop A would quietly reduce the bill at shop B.
+
+        `eligible_by_product` maps product id to what this order spends on it.
+        An offer made against one product in chat comes off that product's
+        lines only -- not off everything else the buyer happened to add from
+        the same shop. Passed as a map rather than a single figure because
+        whether the offer is tied to a product is a fact about the offer, and
+        the offer is not in hand until the locking read below.
+
+        The order total still decides whether a minimum_order_amount is met,
+        because that is what "minimum order" means to whoever set it.
         """
         discount = (
             session.query(ChatDiscount)
@@ -1853,11 +1865,29 @@ class DiscountService:
         if not can_apply:
             return None, 0.0, message
 
-        amount = discount.calculate_discount_amount(order_amount)
-        # Never more than the order. A fixed-amount offer larger than the
-        # basket would otherwise make the total negative and Markt would be
-        # paying the buyer to shop.
-        amount = min(float(amount), float(order_amount))
+        if discount.product_id and eligible_by_product is not None:
+            base = float(eligible_by_product.get(discount.product_id, 0))
+        else:
+            base = float(order_amount)
+
+        if discount.product_id and base <= 0:
+            # The seller pointed at one product. Buying something else from
+            # the same shop is not what they offered, and silently applying it
+            # anyway is how "15% off this jersey" became 15% off a basket.
+            name = (product_names or {}).get(discount.product_id)
+            return (
+                None,
+                0.0,
+                f"That offer is for {name}, which isn't in this order."
+                if name
+                else "That offer is for a product that isn't in this order.",
+            )
+
+        amount = discount.calculate_discount_amount(base)
+        # Never more than what it applies to. A fixed-amount offer larger than
+        # the basket would otherwise make the total negative and Markt would
+        # be paying the buyer to shop.
+        amount = min(float(amount), base)
         return discount, amount, "Discount can be applied"
 
     @staticmethod
@@ -2032,15 +2062,41 @@ class DiscountService:
 
     @staticmethod
     def _generate_discount_message(discount: ChatDiscount, room: ChatRoom) -> str:
-        """Generate a human-readable discount offer message"""
-        product_name = room.product.name if room.product else "your order"
+        """Generate a human-readable discount offer message.
 
+        It used to name the room's product -- "15% off on Barcelona Jersey" --
+        whatever the offer actually covered. Checkout scopes a discount to the
+        *shop*, not to a product (see DiscountService.validate_for_order), so
+        that sentence promised one thing and did another: a buyer who added
+        four more things from the same shop got 15% off all of them, and a
+        buyer who bought something else entirely still got the discount while
+        believing it was tied to the jersey.
+
+        Now it names whichever is true. An offer made from a product message
+        carries that product and is scoped to it at checkout; one made from
+        the attach sheet covers the shop. The sentence follows the offer
+        rather than the room.
+        """
         if discount.discount_type == DiscountType.PERCENTAGE:
             discount_text = f"{discount.discount_value}% off"
         else:
             discount_text = f"\u20a6{discount.discount_value:,.2f} off"
 
-        message = f"🎉 Special discount offer: {discount_text} on {product_name}!"
+        if discount.product_id:
+            product = getattr(discount, "product", None)
+            name = getattr(product, "name", None)
+            # Falls back to the room's product only when it is the same one,
+            # so this can never name something the offer does not cover.
+            if not name and getattr(room, "product_id", None) == discount.product_id:
+                name = getattr(getattr(room, "product", None), "name", None)
+            scope = name or "that product"
+        else:
+            seller_account = getattr(
+                getattr(room, "seller", None), "seller_account", None
+            )
+            shop = getattr(seller_account, "shop_name", None)
+            scope = f"anything from {shop}" if shop else "anything in this shop"
+        message = f"🎉 Special discount offer: {discount_text} on {scope}!"
 
         if discount.minimum_order_amount:
             message += f" (Minimum order: \u20a6{discount.minimum_order_amount:,.2f})"
