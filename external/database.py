@@ -117,6 +117,7 @@ class Database:
                 DeliveryLane,
                 DeliveryQuote,
             )
+            from app.delivery_pricing.order_delivery import OrderDelivery
 
         # Import other models as needed
 
