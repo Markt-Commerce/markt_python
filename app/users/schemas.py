@@ -4,6 +4,8 @@ from app.categories.schemas import CategorySchema
 
 from .models import SellerVerificationStatus
 
+from .addresses import BuildingType
+
 
 # Helper validators
 def validate_nigerian_phone(value):
@@ -618,3 +620,37 @@ class OAuthSignInSchema(Schema):
         allow_none=True,
         validate=validate.OneOf(["buyer", "seller"]),
     )
+
+
+class SavedAddressSchema(Schema):
+    """A place in the buyer's address book.
+
+    Shaped around what a rider needs rather than what a postal system wants:
+    a coordinate plus a landmark finds a door in Ogbomoso, a street number
+    and a postcode frequently do not.
+    """
+
+    id = fields.Int(dump_only=True)
+    label = fields.Str(allow_none=True, validate=validate.Length(max=60))
+    formatted_address = fields.Str(
+        required=True, validate=validate.Length(min=3, max=500)
+    )
+    latitude = fields.Float(required=True, validate=validate.Range(-90, 90))
+    longitude = fields.Float(required=True, validate=validate.Range(-180, 180))
+    building_type = fields.Enum(BuildingType, by_value=True, load_default=None)
+    entry_code = fields.Str(allow_none=True, validate=validate.Length(max=40))
+    directions = fields.Str(allow_none=True)
+    contact_name = fields.Str(allow_none=True, validate=validate.Length(max=100))
+    contact_phone = fields.Str(allow_none=True, validate=validate.Length(max=20))
+    is_default = fields.Bool(load_default=False)
+    last_used_at = fields.DateTime(dump_only=True, allow_none=True)
+    display_label = fields.Str(dump_only=True)
+
+
+class SavedAddressUpdateSchema(SavedAddressSchema):
+    """Everything optional -- editing only the label should not require
+    re-sending the coordinates."""
+
+    formatted_address = fields.Str(validate=validate.Length(min=3, max=500))
+    latitude = fields.Float(validate=validate.Range(-90, 90))
+    longitude = fields.Float(validate=validate.Range(-180, 180))

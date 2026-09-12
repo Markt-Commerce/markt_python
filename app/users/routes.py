@@ -24,6 +24,8 @@ from app.libs.pagination import Paginator
 from app.libs.schemas import PaginationQueryArgs
 from app.media.schemas import MediaSchema
 from app.libs.decorators import login_required, seller_required
+from app.libs.session import read_scope
+from .address_services import SavedAddressService
 
 # app imports
 from .schemas import (
@@ -60,6 +62,8 @@ from .schemas import (
     AccountDeletionResponseSchema,
     OAuthSignInSchema,
     ShopSearchArgs,
+    SavedAddressSchema,
+    SavedAddressUpdateSchema,
 )
 from .services import (
     AuthService,
@@ -757,3 +761,45 @@ class SellerAnalyticsTimeseries(MethodView):
 
 
 # -----------------------------------------------
+
+
+@bp.route("/addresses")
+class SavedAddressList(MethodView):
+    @login_required
+    @bp.response(200, SavedAddressSchema(many=True))
+    def get(self):
+        """Every address this buyer has saved.
+
+        Default first, then most recently used. That ordering is the point:
+        the address someone wants is nearly always the one they used last.
+        """
+        with read_scope() as session:
+            return SavedAddressService.list_for_user(session, current_user.id)
+
+    @login_required
+    @bp.arguments(SavedAddressSchema)
+    @bp.response(201, SavedAddressSchema)
+    def post(self, data):
+        """Save a new address."""
+        try:
+            return SavedAddressService.create(current_user.id, data)
+        except APIError:
+            raise
+
+
+@bp.route("/addresses/<int:address_id>")
+class SavedAddressDetail(MethodView):
+    @login_required
+    @bp.arguments(SavedAddressUpdateSchema)
+    @bp.response(200, SavedAddressSchema)
+    def patch(self, data, address_id):
+        """Edit one. Sending only the fields that changed is fine."""
+        return SavedAddressService.update(current_user.id, address_id, data)
+
+    @login_required
+    @bp.response(204)
+    def delete(self, address_id):
+        """Remove one. If it was the default, another is promoted -- a buyer
+        with addresses but no default gets a checkout that looks broken."""
+        SavedAddressService.delete(current_user.id, address_id)
+        return None
