@@ -95,14 +95,20 @@ def test_every_real_status_is_accepted():
 
 
 def test_status_uses_the_enum_the_column_is_mapped_to():
-    """There are two enums with identical members: a module-level
-    `ProductStatus` and the nested `Product.Status` the column actually uses.
+    """There used to be two enums with identical members: a module-level
+    `ProductStatus` and a nested `Product.Status` the column was built from.
 
-    Filtering with the wrong one binds as the string 'ProductStatus.DRAFT'
-    and Postgres rejects it — a 500 that only appears against a real
-    database, which is exactly how it got past the first run of these tests.
+    Binding the wrong one sent Postgres the string 'ProductStatus.DRAFT' --
+    SQLAlchemy's fallback for a member of a foreign enum class -- and it
+    rejected it. A 500 that only appears against a real database, which is
+    how it got past the first run of these tests, and which also broke every
+    product update that set a status.
+
+    They are one class now, so picking the wrong one is no longer possible.
+    This keeps checking the binding, because the filter is where it first
+    bit.
     """
-    assert ProductStatus is not Product.Status
+    assert ProductStatus is Product.Status
     chain, _ = _run(status="draft")
     bound = [
         f.right.value
