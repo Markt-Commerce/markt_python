@@ -444,6 +444,74 @@ class PaymentService:
             )
 
     @staticmethod
+    def return_to_buyer(order_id: str, amount_minor: int, reason: str) -> str:
+        """Send money owed back where this buyer asked it to go.
+
+        Returns "wallet", "card", or "" if nothing went anywhere. Never
+        raises: money owed back is an operational problem to chase, not a
+        reason to fail the run settlement that discovered it.
+
+        ADR-002 rejected crediting a wallet *instead of* refunding, and that
+        still stands -- what it allowed was the buyer choosing, with the cash
+        refund as the default. This reads that choice; it never makes it.
+
+        A wallet credit that fails falls through to the card. The buyer is
+        owed the money either way, and their preference is about which is
+        nicer, not about whether they get paid.
+        """
+        if amount_minor <= 0:
+            return ""
+
+        from app.users.models import Buyer, RefundPreference
+
+        user_id = None
+        try:
+            with read_scope() as session:
+                row = (
+                    session.query(Buyer.user_id, Buyer.refund_preference)
+                    .join(Order, Order.buyer_id == Buyer.id)
+                    .filter(Order.id == order_id)
+                    .first()
+                )
+            if row and row[1] == RefundPreference.WALLET.value:
+                user_id = row[0]
+        except Exception:
+            # Unreadable preference means the default, which is the card.
+            logger.exception("Could not read refund preference for %s", order_id)
+
+        if user_id:
+            try:
+                from app.wallet.models import WalletReferenceType
+                from app.wallet.services import WalletService
+
+                WalletService.credit(
+                    user_id,
+                    from_subunit(amount_minor),
+                    # The existing ORDER_REFUND rather than a new label: the
+                    # column is a native Postgres enum, and adding a value to
+                    # one needs ownership of the type. The description
+                    # carries the detail a new label would have.
+                    WalletReferenceType.ORDER_REFUND,
+                    order_id,
+                    description=reason,
+                    # Settlement can be retried; the buyer must not be paid
+                    # twice for the same run.
+                    idempotency_key=f"delivery-saving:{order_id}",
+                )
+                return "wallet"
+            except Exception:
+                logger.exception(
+                    "Wallet credit failed for order %s; falling back to the card",
+                    order_id,
+                )
+
+        return (
+            "card"
+            if PaymentService.refund_to_source(order_id, amount_minor, reason)
+            else ""
+        )
+
+    @staticmethod
     def refund_to_source(order_id: str, amount_minor: int, reason: str) -> bool:
         """Send money back to the card it came from.
 

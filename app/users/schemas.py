@@ -2,7 +2,7 @@ from marshmallow import Schema, fields, validate, ValidationError, EXCLUDE
 from app.libs.schemas import PaginationSchema
 from app.categories.schemas import CategorySchema
 
-from .models import SellerVerificationStatus
+from .models import RefundPreference, SellerVerificationStatus
 
 from .addresses import BuildingType
 
@@ -155,6 +155,13 @@ class UserUpdateSchema(Schema):
 class BuyerUpdateSchema(Schema):
     buyername = fields.Str()
     shipping_address = fields.Dict()
+    #: Where money owed back should land -- today, the saving when a delivery
+    #: is shared. "card" sends it back to the card that paid (days, and it is
+    #: genuinely their money leaving Markt); "wallet" is instant and
+    #: withdrawable. Defaults to "card" and is only ever changed by the buyer.
+    refund_preference = fields.Str(
+        validate=validate.OneOf([p.value for p in RefundPreference])
+    )
 
 
 class SellerUpdateSchema(Schema):
@@ -259,6 +266,9 @@ class UserProfileSchema(UserSchema):
 
 class BuyerProfileSchema(BuyerCreateSchema):
     id = fields.Int(dump_only=True)
+    #: So the settings screen can show what is currently chosen rather than
+    #: guessing at the default.
+    refund_preference = fields.Str(dump_only=True)
     total_orders = fields.Int(dump_only=True)
     pending_orders = fields.Int(dump_only=True)
     last_order_date = fields.DateTime(dump_only=True)

@@ -557,7 +557,8 @@ class DeliveryRunService:
                 # the first moment a shared fee can be worked out. Everyone
                 # who opted in was charged their solo quote at checkout; what
                 # they actually owe is settled here, and the difference goes
-                # back to their card once this transaction commits.
+                # back once this transaction commits -- to their card, or to
+                # their wallet if that is what they asked for.
                 try:
                     from app.delivery_pricing.batch import (
                         batch_enabled,
@@ -621,27 +622,34 @@ class DeliveryRunService:
                     DeliveryRunOrder.order_id.in_(to_cancel)
                 ).delete(synchronize_session=False)
 
-        # After the commit: each of these is a call to Paystack.
+        # After the commit: each of these leaves the database -- a Paystack
+        # refund, or a wallet credit, depending on what the buyer asked for.
         refunded = 0
+        credited = 0
         if pending_refunds:
             from app.payments.services import PaymentService
 
             for order_id, amount_minor in pending_refunds:
-                if PaymentService.refund_to_source(
+                destination = PaymentService.return_to_buyer(
                     order_id,
                     amount_minor,
                     reason="Shared delivery came out cheaper than quoted",
-                ):
+                )
+                if destination == "wallet":
+                    credited += 1
+                elif destination == "card":
                     refunded += 1
 
         logger.info(
             "Closed %s delivery run(s) into planning, cancelled %s empty run(s), "
             "%s order(s) free-cancelled on wait-deadline fallback, "
-            "%s of %s shared-delivery refund(s) sent",
+            "%s refunded and %s wallet-credited of %s shared-delivery "
+            "saving(s) owed",
             closed,
             cancelled_empty,
             free_cancellations,
             refunded,
+            credited,
             len(pending_refunds),
         )
         return {
@@ -650,4 +658,5 @@ class DeliveryRunService:
             "free_cancellations": free_cancellations,
             "refunds_owed": len(pending_refunds),
             "refunds_sent": refunded,
+            "wallet_credits_sent": credited,
         }
