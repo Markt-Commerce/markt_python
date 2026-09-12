@@ -896,12 +896,29 @@ class CartService:
             # an unscoped check is exactly the hole this argument closes.
             raise ValidationError("We couldn't match that offer to this shop.")
 
+        # What the offer actually comes off. An offer made against one product
+        # in chat applies to that product's lines only -- the rest of the
+        # basket is not what the seller pointed at.
+        eligible_by_product: Dict[str, Any] = {}
+        names: Dict[str, Any] = {}
+        for item in items:
+            product = item.product
+            if product is None:
+                continue
+            line = (to_money(item.product_price) or 0) * (item.quantity or 0)
+            eligible_by_product[product.id] = (
+                eligible_by_product.get(product.id, 0) + line
+            )
+            names[product.id] = product.name
+
         discount, amount, message = DiscountService.validate_for_order(
             session,
             buyer_user_id=user.id,
             discount_id=discount_id,
             order_amount=float(subtotal),
             seller_user_id=seller_user_id,
+            eligible_by_product=eligible_by_product,
+            product_names=names,
         )
         if discount is None:
             # Refused rather than quietly ignored. A buyer who chose an offer

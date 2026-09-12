@@ -205,8 +205,16 @@ def test_consume_does_not_commit_on_its_own():
 # --- how checkout resolves it ----------------------------------------------
 
 
-def _items(seller_account_id=7):
-    return [SimpleNamespace(product=SimpleNamespace(seller_id=seller_account_id))]
+def _items(seller_account_id=7, product_id="PRD_A", price=5000.0, quantity=1):
+    return [
+        SimpleNamespace(
+            product=SimpleNamespace(
+                id=product_id, name="A jersey", seller_id=seller_account_id
+            ),
+            product_price=price,
+            quantity=quantity,
+        )
+    ]
 
 
 def _resolve(discount_id, items, *, seller_user_id=SELLER, subtotal=5000.0):
@@ -281,3 +289,116 @@ def test_a_refused_offer_stops_checkout_instead_of_charging_full_price():
             )
     # .message, not str(): APIError carries its text there.
     assert "expired" in excinfo.value.message.lower()
+
+
+# --- an offer pinned to one product ----------------------------------------
+#
+# A seller offering "15% off" while looking at a jersey means the jersey. It
+# used to come off the whole basket from that shop, so adding four more things
+# quietly multiplied what the seller had given away.
+
+
+def _product_discount(product_id="PRD_A", **overrides):
+    return _discount(product_id=product_id, **overrides)
+
+
+def _validate_scoped(discount, *, order_amount, eligible, names=None):
+    return DiscountService.validate_for_order(
+        _session(discount),
+        buyer_user_id=BUYER,
+        discount_id=1,
+        order_amount=order_amount,
+        seller_user_id=SELLER,
+        eligible_by_product=eligible,
+        product_names=names or {"PRD_A": "A jersey"},
+    )
+
+
+def test_a_product_offer_comes_off_that_product_only():
+    """N5,000 jersey inside a N20,000 basket: 10% is N500, not N2,000."""
+    found, amount, _ = _validate_scoped(
+        _product_discount(discount_type=DiscountType.PERCENTAGE, discount_value=10.0),
+        order_amount=20000.0,
+        eligible={"PRD_A": 5000.0},
+    )
+    assert found is not None
+    assert amount == 500.0
+
+
+def test_a_product_offer_counts_every_line_of_that_product():
+    """Two of them in the basket is twice the base."""
+    _, amount, _ = _validate_scoped(
+        _product_discount(discount_type=DiscountType.PERCENTAGE, discount_value=10.0),
+        order_amount=20000.0,
+        eligible={"PRD_A": 10000.0},
+    )
+    assert amount == 1000.0
+
+
+def test_a_product_offer_is_refused_when_that_product_is_not_being_bought():
+    """And says which product, so the buyer can go and add it."""
+    found, amount, message = _validate_scoped(
+        _product_discount(),
+        order_amount=20000.0,
+        eligible={"PRD_OTHER": 20000.0},
+    )
+    assert found is None
+    assert amount == 0.0
+    assert "A jersey" in message
+
+
+def test_a_fixed_product_offer_cannot_exceed_that_product():
+    """N5,000 off a N1,200 item is N1,200 off -- the rest of the basket is not
+    the seller's to discount."""
+    _, amount, _ = _validate_scoped(
+        _product_discount(discount_value=5000.0),
+        order_amount=20000.0,
+        eligible={"PRD_A": 1200.0},
+    )
+    assert amount == 1200.0
+
+
+def test_a_shop_wide_offer_still_comes_off_the_whole_order():
+    """No product on the offer: unchanged behaviour."""
+    _, amount, _ = _validate_scoped(
+        _discount(discount_type=DiscountType.PERCENTAGE, discount_value=10.0),
+        order_amount=20000.0,
+        eligible={"PRD_A": 5000.0},
+    )
+    assert amount == 2000.0
+
+
+def test_the_minimum_order_is_still_about_the_order_not_the_product():
+    """ "Minimum order of N10,000" means the order. A N5,000 jersey inside a
+    N20,000 basket meets it."""
+    found, amount, _ = _validate_scoped(
+        _product_discount(
+            discount_type=DiscountType.PERCENTAGE,
+            discount_value=10.0,
+            minimum_order_amount=10000.0,
+        ),
+        order_amount=20000.0,
+        eligible={"PRD_A": 5000.0},
+    )
+    assert found is not None
+    assert amount == 500.0
+
+
+def test_a_product_offer_without_a_map_falls_back_to_the_order():
+    """An older caller that cannot say what is in the basket gets the previous
+    behaviour rather than a refusal -- being wrong in the buyer's favour beats
+    rejecting a checkout that used to work."""
+    _, amount, _ = _validate_scoped(
+        _product_discount(discount_type=DiscountType.PERCENTAGE, discount_value=10.0),
+        order_amount=20000.0,
+        eligible=None,
+    )
+    assert amount == 2000.0
+
+
+def test_checkout_passes_what_each_product_costs():
+    """The map comes from the items being bought, not from the client."""
+    items = _items(product_id="PRD_A", price=2500.0, quantity=2)
+    (_, _), validate = _resolve(1, items, subtotal=5000.0)
+    assert validate.call_args.kwargs["eligible_by_product"] == {"PRD_A": 5000.0}
+    assert validate.call_args.kwargs["product_names"] == {"PRD_A": "A jersey"}
