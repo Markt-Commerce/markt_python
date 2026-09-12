@@ -2032,15 +2032,29 @@ class DiscountService:
 
     @staticmethod
     def _generate_discount_message(discount: ChatDiscount, room: ChatRoom) -> str:
-        """Generate a human-readable discount offer message"""
-        product_name = room.product.name if room.product else "your order"
+        """Generate a human-readable discount offer message.
 
+        It used to name the room's product -- "15% off on Barcelona Jersey" --
+        whatever the offer actually covered. Checkout scopes a discount to the
+        *shop*, not to a product (see DiscountService.validate_for_order), so
+        that sentence promised one thing and did another: a buyer who added
+        four more things from the same shop got 15% off all of them, and a
+        buyer who bought something else entirely still got the discount while
+        believing it was tied to the jersey.
+
+        Naming the shop instead is the smaller of the two fixes. The other --
+        honouring product_id at checkout -- is a real feature and a decision
+        about whose money it is, not a wording change.
+        """
         if discount.discount_type == DiscountType.PERCENTAGE:
             discount_text = f"{discount.discount_value}% off"
         else:
             discount_text = f"\u20a6{discount.discount_value:,.2f} off"
 
-        message = f"🎉 Special discount offer: {discount_text} on {product_name}!"
+        seller_account = getattr(getattr(room, "seller", None), "seller_account", None)
+        shop = getattr(seller_account, "shop_name", None)
+        scope = f"anything from {shop}" if shop else "anything in this shop"
+        message = f"🎉 Special discount offer: {discount_text} on {scope}!"
 
         if discount.minimum_order_amount:
             message += f" (Minimum order: \u20a6{discount.minimum_order_amount:,.2f})"
