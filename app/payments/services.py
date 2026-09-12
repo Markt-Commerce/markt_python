@@ -444,6 +444,82 @@ class PaymentService:
             )
 
     @staticmethod
+    def refund_to_source(order_id: str, amount_minor: int, reason: str) -> bool:
+        """Send money back to the card it came from.
+
+        Used when a shared delivery run settles for less than the buyer was
+        charged. ADR-002 rules out crediting a wallet for this: the buyer
+        paid with a card and is owed money, not store credit, and turning one
+        into the other without asking is a decision Markt does not get to
+        make on their behalf.
+
+        Returns True when Paystack accepted the refund. Never raises -- a
+        refund that could not be sent is an operational problem to chase, not
+        a reason to fail whatever asked for it.
+        """
+        if amount_minor <= 0:
+            return False
+
+        try:
+            with session_scope() as session:
+                payment = (
+                    session.query(Payment)
+                    .filter_by(order_id=order_id, status=PaymentStatus.COMPLETED)
+                    .first()
+                )
+                if payment is None or not payment.transaction_id:
+                    logger.error(
+                        "No completed payment to refund against for order %s",
+                        order_id,
+                    )
+                    return False
+                reference = payment.transaction_id
+                payment_id = payment.id
+
+            response = requests.post(
+                f"{PaymentService.PAYSTACK_BASE_URL}/refund",
+                json={
+                    "transaction": reference,
+                    # Kobo, like every other amount Paystack takes.
+                    "amount": int(amount_minor),
+                    "merchant_note": reason,
+                },
+                headers={
+                    "Authorization": f"Bearer {PaymentService.PAYSTACK_SECRET_KEY}"
+                },
+                timeout=20,
+            )
+            if response.status_code not in (200, 201):
+                logger.error(
+                    "Paystack refused a %s kobo refund on %s (HTTP %s): %s",
+                    amount_minor,
+                    reference,
+                    response.status_code,
+                    response.text[:500],
+                )
+                return False
+
+            with session_scope() as session:
+                payment = session.query(Payment).get(payment_id)
+                if payment is not None:
+                    # Partial by definition here: the buyer keeps the
+                    # delivery they paid for, just at a lower price.
+                    if payment.status == PaymentStatus.COMPLETED:
+                        payment.transition_to(PaymentStatus.PARTIALLY_REFUNDED)
+            logger.info(
+                "Refunded %s kobo to the card for order %s (%s)",
+                amount_minor,
+                order_id,
+                reason,
+            )
+            return True
+        except Exception:
+            logger.exception(
+                "Could not refund %s kobo for order %s", amount_minor, order_id
+            )
+            return False
+
+    @staticmethod
     def _dispatch_delivery(order_id: Optional[str]) -> None:
         """Ask a courier for this order, after its payment has committed.
 

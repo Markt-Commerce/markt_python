@@ -269,7 +269,11 @@ def test_close_runs_past_cutoff_cancels_empty_run(mock_scope):
 
     result = DeliveryRunService.close_runs_past_cutoff()
 
-    assert result == {"closed": 0, "cancelled_empty": 1, "free_cancellations": 0}
+    assert result["closed"] == 0
+    assert result["cancelled_empty"] == 1
+    assert result["free_cancellations"] == 0
+    # Nothing opted into sharing, so nothing is owed back.
+    assert result["refunds_owed"] == 0
     assert run.status == DeliveryRunStatus.CANCELLED
     assert run.cancel_reason == "No orders joined before cutoff"
 
@@ -297,7 +301,10 @@ def test_close_runs_past_cutoff_prices_and_plans_nonempty_run(mock_scope):
 
     result = DeliveryRunService.close_runs_past_cutoff()
 
-    assert result == {"closed": 1, "cancelled_empty": 0, "free_cancellations": 0}
+    assert result["closed"] == 1
+    assert result["cancelled_empty"] == 0
+    assert result["free_cancellations"] == 0
+    assert result["refunds_owed"] == 0
     assert run.status == DeliveryRunStatus.RIDER_ASSIGNMENT
     assert run.surge_multiplier == 1.0
     assert run.base_price == DEFAULT_BASE_PRICE
@@ -366,7 +373,9 @@ def test_close_runs_past_cutoff_free_cancels_unconsented_thin_orders(
 
     result = DeliveryRunService.close_runs_past_cutoff()
 
-    assert result == {"closed": 0, "cancelled_empty": 1, "free_cancellations": 2}
+    assert result["closed"] == 0
+    assert result["cancelled_empty"] == 1
+    assert result["free_cancellations"] == 2
     assert run.status == DeliveryRunStatus.CANCELLED
     assert run.cancel_reason == "All orders free-cancelled on wait-deadline fallback"
     assert mock_cancel.call_count == 2
@@ -403,7 +412,9 @@ def test_close_runs_past_cutoff_keeps_consented_order_cancels_the_rest(
 
     result = DeliveryRunService.close_runs_past_cutoff()
 
-    assert result == {"closed": 1, "cancelled_empty": 0, "free_cancellations": 1}
+    assert result["closed"] == 1
+    assert result["cancelled_empty"] == 0
+    assert result["free_cancellations"] == 1
     assert run.status == DeliveryRunStatus.RIDER_ASSIGNMENT
     assert run.price_per_order == round(DEFAULT_BASE_PRICE / 1, 2)
     mock_cancel.assert_called_once()

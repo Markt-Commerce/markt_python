@@ -163,3 +163,71 @@ def test_batching_is_off_unless_the_environment_says_otherwise(monkeypatch):
 
     importlib.reload(batch_module)
     assert batch_module.batch_enabled() is False
+
+
+# --- who actually gets settled ---------------------------------------------
+
+
+class _Delivery:
+    def __init__(self, order_id, solo, opted_in, settled=None):
+        self.order_id = order_id
+        self.solo_fee_minor = solo
+        self.batch_opt_in = opted_in
+        self.settled_fee_minor = settled
+
+    @property
+    def is_settled(self):
+        return self.settled_fee_minor is not None
+
+
+class _RunOrder:
+    def __init__(self, joined_at=None):
+        self.joined_at = joined_at
+
+
+class _Run:
+    id = "RUN_1"
+    base_price = 1000  # naira; to_subunit makes it 100_000 kobo
+
+
+def _settle(rows, run=_Run()):
+    """Drive settle_run against stub rows."""
+    from unittest.mock import MagicMock
+    from app.delivery_pricing import batch as batch_module
+
+    session = MagicMock()
+    session.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = (
+        run
+    )
+    session.query.return_value.join.return_value.filter.return_value.all.return_value = (
+        rows
+    )
+    return batch_module.settle_run(session, "RUN_1")
+
+
+def test_only_the_buyers_who_asked_to_share_are_settled():
+    """A run can carry orders that never opted in -- the run machinery
+    predates batching. Splitting a shared cost across people who did not
+    consent to sharing would change the deal after the fact."""
+    opted = _Delivery("ORD_IN", 70_000, opted_in=True)
+    not_opted = _Delivery("ORD_OUT", 70_000, opted_in=False)
+    settlement = _settle([(_RunOrder(), opted), (_RunOrder(), not_opted)])
+
+    assert settlement is not None
+    assert [s.order_id for s in settlement.shares] == ["ORD_IN"]
+    assert opted.settled_fee_minor is not None
+    assert not_opted.settled_fee_minor is None, "never opted in, must be untouched"
+
+
+def test_a_run_where_nobody_opted_in_settles_nothing():
+    not_opted = _Delivery("ORD_OUT", 70_000, opted_in=False)
+    assert _settle([(_RunOrder(), not_opted)]) is None
+    assert not_opted.settled_fee_minor is None
+
+
+def test_an_already_settled_delivery_keeps_its_figure():
+    """Recomputing after a refund has gone out on the strength of it would
+    disagree with money that has already moved."""
+    already = _Delivery("ORD_A", 70_000, opted_in=True, settled=12_345)
+    _settle([(_RunOrder(), already)])
+    assert already.settled_fee_minor == 12_345

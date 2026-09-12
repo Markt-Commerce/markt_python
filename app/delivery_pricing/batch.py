@@ -166,13 +166,22 @@ def settle_run(session, delivery_run_id: str) -> Optional[Settlement]:
     if not rows:
         return None
 
+    # Only the buyers who asked to share. A run can carry orders that never
+    # opted in -- the run machinery predates this -- and they keep the solo
+    # fee they agreed to. Splitting a shared cost across people who did not
+    # consent to sharing would be changing the deal after the fact, in either
+    # direction.
+    sharing = [(ro, d) for ro, d in rows if d.batch_opt_in]
+    if not sharing:
+        return None
+
     participants = [
         Participant(
             order_id=delivery.order_id,
             solo_fee_minor=delivery.solo_fee_minor,
             joined_at=run_order.joined_at,
         )
-        for run_order, delivery in rows
+        for run_order, delivery in sharing
     ]
 
     # base_price is the whole run; price_per_order is its naive equal split and
@@ -184,7 +193,7 @@ def settle_run(session, delivery_run_id: str) -> Optional[Settlement]:
     settlement = split(participants, run_cost_minor)
     by_order = {s.order_id: s for s in settlement.shares}
 
-    for _, delivery in rows:
+    for _, delivery in sharing:
         share = by_order.get(delivery.order_id)
         if share is None:
             continue
