@@ -172,6 +172,15 @@ class PaymentService:
 
             session.flush()
 
+            # Inside the transaction: a delivery that thinks it is unpaid, for
+            # an order that is paid, is a bookkeeping lie.
+            from app.delivery_pricing.dispatch import mark_paid
+
+            delivery = (
+                mark_paid(session, payment.order_id) if payment.order_id else None
+            )
+            needs_dispatch = delivery is not None
+
             if not already_completed:
                 PaymentService._send_payment_notifications(
                     payment, PaymentStatus.COMPLETED
@@ -179,7 +188,14 @@ class PaymentService:
                 PaymentService._emit_payment_confirmed(payment)
 
             PaymentService._invalidate_payment_cache(payment.id)
-            return True
+            order_id_for_dispatch = payment.order_id
+
+        # Outside it: creating the courier job calls another company over the
+        # network. It must not be able to roll back a payment that already
+        # succeeded, nor leave a real job against an order that did not commit.
+        if needs_dispatch:
+            PaymentService._dispatch_delivery(order_id_for_dispatch)
+        return True
 
     @staticmethod
     def complete_checkout_payment(
@@ -255,6 +271,14 @@ class PaymentService:
             payment.order_id = order.id
 
             PaymentService._attach_paid_delivery(session, order, snapshot)
+            # This flow only reaches here once the money is in, so the
+            # delivery is paid the moment it is attached. Through the same
+            # transition as every other path rather than being written
+            # straight to PAID, so the state machine stays the only authority
+            # on what is legal.
+            from app.delivery_pricing.dispatch import mark_paid
+
+            mark_paid(session, order.id)
 
             failed_reservation_ids = set(
                 InventoryService.confirm_reservations(
@@ -301,11 +325,14 @@ class PaymentService:
 
             session.flush()
             payment_id_for_cache = payment.id
+            payment_order_id = order.id
             item_specs = [
                 (item.id, item.seller_id, item.quantity, item.product_id)
                 for item in order.items
                 if item.id not in unsecured_order_item_ids
             ]
+
+        PaymentService._dispatch_delivery(payment_order_id)
 
         # Open the seller-acceptance window (12.1-12.2, Phase 5) only
         # after the order has actually committed -- an allocation (and its
@@ -334,6 +361,26 @@ class PaymentService:
 
         PaymentService._invalidate_payment_cache(payment_id_for_cache)
         return True
+
+    @staticmethod
+    def _dispatch_delivery(order_id: Optional[str]) -> None:
+        """Ask a courier for this order, after its payment has committed.
+
+        Swallows everything. Dispatch failing is already handled inside
+        dispatch() by parking the delivery at AWAITING_DISPATCH; anything that
+        escapes that is a bug here, and it must not turn a completed payment
+        into a 500 for a buyer whose money has already moved.
+        """
+        if not order_id:
+            return
+        try:
+            from app.delivery_pricing.dispatch import dispatch
+
+            dispatch(order_id)
+        except Exception:
+            logger.exception(
+                "Dispatching the delivery for order %s failed outright", order_id
+            )
 
     @staticmethod
     def _attach_paid_delivery(session, order, snapshot: Dict[str, Any]) -> None:

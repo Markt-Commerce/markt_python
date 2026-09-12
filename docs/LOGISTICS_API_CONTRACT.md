@@ -2,12 +2,11 @@
 
 **Audience:** the affiliated logistics partner's engineering team.
 
-**Status: proposed.** Markt implements against this today behind an adapter
-interface (`app/delivery_pricing/logistics.py`) with a stub provider. Nothing
-is live until you confirm the shapes below, and two pieces on our side are
-explicitly not built yet — they are marked *not yet live* where they appear.
-We would rather hand you a contract with holes in it, labelled, than one that
-reads as finished and isn't.
+**Status: proposed, and implemented on our side.** Markt speaks this today
+behind an adapter interface (`app/delivery_pricing/logistics.py`); the
+inbound half (§2) is live and tested, and the outbound half (§1) runs against
+a stub until you confirm the shapes below. Anything still open is listed in
+§5 rather than left for you to discover.
 
 ---
 
@@ -80,10 +79,9 @@ indefinitely and silently — we escalate to a human.
 
 ## 2. You → Markt: status updates
 
-> **Not yet live.** The status vocabulary and the state machine behind it are
-> built and tested (`apply_status`), but the HTTP route below is not deployed.
-> Do not point an integration at it until we confirm. It is specified here
-> because its shape is the half of the contract you need in order to plan.
+> **Live.** Implemented, signed, and exercised end to end against a local
+> stack: synonyms map, duplicates and out-of-order updates are accepted and
+> ignored, and an unsigned request is refused.
 
 ```
 POST https://{markt_base_url}/api/v1/delivery/jobs/{job_id}/status
@@ -168,7 +166,6 @@ with both keys accepted for 24 hours.
 
 ## 5. Open on our side
 
-- **The inbound status route** (§2). Built behind it, not exposed yet.
 - **Proof of delivery.** We have a QR-based flow for our own riders. Whether
   yours uses it, sends a photo, or neither, is undecided and blocks nothing
   above.

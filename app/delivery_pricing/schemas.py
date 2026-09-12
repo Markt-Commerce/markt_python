@@ -52,3 +52,26 @@ class ServiceabilityResultSchema(Schema):
     serviceable = fields.Bool()
     city = fields.Str(allow_none=True)
     zone = fields.Str(allow_none=True)
+
+
+class JobStatusUpdateSchema(Schema):
+    """What a logistics provider posts when a parcel moves.
+
+    Documented for the partner in docs/LOGISTICS_API_CONTRACT.md. `status` is
+    deliberately a free string rather than an enum: a provider's vocabulary is
+    theirs, we map synonyms on our side, and a word we do not recognise is
+    logged and ignored rather than rejected with an error they would only
+    retry harder at.
+    """
+
+    class Meta:
+        unknown = EXCLUDE
+
+    status = fields.Str(required=True)
+    occurred_at = fields.DateTime(required=False, allow_none=True)
+    reason = fields.Str(required=False, allow_none=True)
+
+
+class JobStatusAckSchema(Schema):
+    applied = fields.Bool()
+    state = fields.Str(allow_none=True)

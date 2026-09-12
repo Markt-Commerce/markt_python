@@ -1,15 +1,24 @@
+import hashlib
+import hmac
 import logging
+from datetime import datetime
 
+from decouple import config
+from flask import request
 from flask.views import MethodView
 from flask_login import current_user, login_required
 from flask_smorest import Blueprint, abort
 
 from app.libs.decorators import buyer_required
 from app.libs.errors import APIError
-from app.libs.session import read_scope
+from app.libs.session import read_scope, session_scope
 
 from .models import ServiceCity, ServiceZone
+from .logistics import apply_status
+from .order_delivery import OrderDelivery
 from .schemas import (
+    JobStatusAckSchema,
+    JobStatusUpdateSchema,
     QuoteRequestSchema,
     QuoteSchema,
     ServiceabilityQuerySchema,
@@ -89,3 +98,60 @@ class CreateQuote(MethodView):
             abort(500, message="Could not price this delivery right now.")
 
         return quote
+
+
+def _signature_is_valid(raw_body: bytes, signature: str) -> bool:
+    """HMAC-SHA512 over the raw body, hex, compared in constant time.
+
+    Same shape as the Paystack webhook verifier this codebase already has, on
+    purpose -- one way of doing this rather than two.
+
+    No secret configured means no partner is sending us anything yet, and we
+    refuse rather than accept. An unauthenticated endpoint that moves parcels
+    through their delivery states is worth more to an attacker than it is to
+    us.
+    """
+    secret = config("LOGISTICS_WEBHOOK_SECRET", default="")
+    if not secret or not signature or not raw_body:
+        return False
+    computed = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha512).hexdigest()
+    return hmac.compare_digest(computed, signature)
+
+
+@bp.route("/jobs/<job_id>/status")
+class JobStatusWebhook(MethodView):
+    @bp.arguments(JobStatusUpdateSchema)
+    @bp.response(200, JobStatusAckSchema)
+    def post(self, data, job_id):
+        """A logistics provider reporting that a parcel moved.
+
+        Answers 200 to almost everything, deliberately. A duplicate, a status
+        we do not recognise, an update that arrives out of order, even a job
+        id we cannot place -- none of those are conditions the sender can fix
+        by trying again, and returning 5xx at them just turns a retry policy
+        into a stampede. What did or did not happen is in `applied`.
+
+        The exception is a bad signature, which is not a delivery report at
+        all.
+        """
+        if not _signature_is_valid(
+            request.get_data(), request.headers.get("X-Markt-Signature", "")
+        ):
+            logger.warning("Rejected an unsigned delivery status for job %s", job_id)
+            abort(401, message="Invalid signature")
+
+        with session_scope() as session:
+            delivery = (
+                session.query(OrderDelivery)
+                .filter_by(external_job_id=job_id)
+                .with_for_update()
+                .first()
+            )
+            if delivery is None:
+                logger.warning("Delivery status for unknown job %s", job_id)
+                return {"applied": False, "state": None}
+
+            applied = apply_status(delivery, data["status"], reason=data.get("reason"))
+            if applied:
+                delivery.last_status_at = data.get("occurred_at") or datetime.utcnow()
+            return {"applied": applied, "state": delivery.state.value}
