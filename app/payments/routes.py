@@ -102,7 +102,11 @@ class PaystackWebhook(MethodView):
             # Get webhook signature
             signature = request.headers.get("X-Paystack-Signature")
             if not signature:
-                abort(400, message="Missing webhook signature")
+                # Returned rather than aborted: abort() raises an
+                # HTTPException, and the broad except below caught it and
+                # turned a clean 400 into a 500 -- which tells the sender to
+                # retry something that will never work.
+                return jsonify({"message": "Missing webhook signature"}), 400
 
             # Get webhook payload
             raw_body = request.get_data()

@@ -12,7 +12,7 @@ from sqlalchemy.orm import joinedload
 
 # project imports
 from external.redis import redis_client
-from app.libs.session import session_scope
+from app.libs.session import session_scope, read_scope
 from decimal import Decimal
 
 from app.libs.money import to_money, to_subunit, from_subunit, json_safe
@@ -351,9 +351,32 @@ class PaymentService:
         from app.fulfilment.services import FulfilmentService
 
         for order_item_id, seller_id, quantity, product_id in item_specs:
-            FulfilmentService.create_allocation(
-                order_item_id, seller_id, quantity, product_id=product_id
-            )
+            try:
+                FulfilmentService.create_allocation(
+                    order_item_id, seller_id, quantity, product_id=product_id
+                )
+            except ConflictError:
+                # Already allocated. A retried charge.success is normal
+                # traffic -- Paystack retries anything that is not a 2xx, and
+                # it re-sends on its own besides -- so arriving at an item
+                # that already has its seller window open is success, not
+                # failure.
+                logger.info(
+                    "Fulfilment for order item %s was already open; "
+                    "ignoring the duplicate",
+                    order_item_id,
+                )
+            except Exception:
+                # The money is in and the order exists. Opening the seller's
+                # acceptance window is the next step, not part of the
+                # payment, and letting it escape turned a completed payment
+                # into a non-2xx that makes Paystack retry something that
+                # will never succeed.
+                logger.exception(
+                    "Could not open fulfilment for order item %s -- the "
+                    "order stands and needs a human",
+                    order_item_id,
+                )
 
         if unsecured_order_item_ids:
             logger.warning(
@@ -1034,8 +1057,12 @@ class PaymentService:
                 logger.info(f"Unhandled webhook event: {event}")
                 return True
 
-        except Exception as e:
-            logger.error(f"Webhook handling failed: {str(e)}")
+        except Exception:
+            # exception(), not error(str(e)): several of this codebase's own
+            # error types stringify to nothing, so the old line logged
+            # "Webhook handling failed: " and left no way to find out what
+            # had actually gone wrong.
+            logger.exception("Webhook handling failed")
             return False
 
     # ==================== PRIVATE METHODS ====================
@@ -1125,10 +1152,20 @@ class PaymentService:
                 payment.gateway_response = data
                 payment.transaction_id = data["data"]["reference"]
             else:
+                # Paystack says exactly what it did not like ("email must be
+                # a valid email", "amount too low"). Throwing that away left
+                # a log line with nothing in it and no way to tell a bad
+                # payload from a dead gateway.
+                logger.error(
+                    "Paystack rejected the transaction for payment %s " "(HTTP %s): %s",
+                    payment.id,
+                    response.status_code,
+                    response.text[:500],
+                )
                 raise APIError("Failed to initialize payment", 500)
 
         except Exception as e:
-            logger.error(f"Paystack initialization failed: {str(e)}")
+            logger.error(f"Paystack initialization failed: {e!r}")
             raise APIError("Payment initialization failed", 500)
 
     @staticmethod
@@ -1183,10 +1220,16 @@ class PaymentService:
                 payment.gateway_response = data
                 payment.transaction_id = data["data"]["reference"]
             else:
+                logger.error(
+                    "Paystack rejected the checkout for payment %s " "(HTTP %s): %s",
+                    payment.id,
+                    response.status_code,
+                    response.text[:500],
+                )
                 raise APIError("Failed to initialize payment", 500)
 
         except Exception as e:
-            logger.error(f"Paystack checkout initialization failed: {str(e)}")
+            logger.error(f"Paystack checkout initialization failed: {e!r}")
             raise APIError("Payment initialization failed", 500)
 
     @staticmethod
@@ -1347,7 +1390,25 @@ class PaymentService:
 
             return WalletService.complete_topup(reference, data)
 
-        if metadata.get("type") == "checkout":
+        # Which completion path this is was decided purely by metadata Paystack
+        # echoes back. When that echo is missing -- a replayed event, a manual
+        # retry from the dashboard, a gateway that trims unknown fields -- a
+        # payment-first checkout fell through to complete_payment, which
+        # assumes an order already exists. The payment went COMPLETED, no
+        # order was ever built, and the buyer had paid for nothing.
+        #
+        # So ask our own database instead, and keep the metadata as a hint.
+        # A Payment carrying pending_checkout_data is a payment-first
+        # checkout by construction; nothing else sets that column.
+        is_checkout = metadata.get("type") == "checkout"
+        if not is_checkout:
+            with read_scope() as session:
+                payment = (
+                    session.query(Payment).filter_by(transaction_id=reference).first()
+                )
+                is_checkout = bool(payment and payment.pending_checkout_data)
+
+        if is_checkout:
             return PaymentService.complete_checkout_payment(
                 reference=reference,
                 gateway_response=data,
