@@ -49,6 +49,28 @@ class CaptureModel(Enum):
 # safe, slower model rather than silently attempting a hold that will not work.
 PREAUTH_CAPABLE_METHODS = frozenset({"card"})
 
+# Paystack gates pre-authorization by currency as well as by merchant, and the
+# preauthorization API accepts ZAR only -- not NGN, which is what Markt
+# charges in. So on this deployment a hold is not available at any setting,
+# and PAYSTACK_PREAUTH_ENABLED on its own is not enough to get one.
+#
+# This is a guard, not a preference. Without it, switching the flag on in an
+# NGN deployment would send a hold request that Paystack answers with an
+# ordinary charge -- the buyer's money actually leaving, after we told them it
+# would only be held. That is the single worst outcome in this file, and it
+# would look exactly like a successful preauth from our side.
+#
+# Verified against Paystack's Preauthorization API documentation (September
+# 2026), which states only ZAR is supported. Revisit if that changes, or if
+# delivery ever settles through a processor that holds NGN.
+PREAUTH_SUPPORTED_CURRENCIES = frozenset({"ZAR"})
+
+
+def deployment_currency() -> str:
+    """What this deployment charges in. Matches main.config's PAYMENT_CURRENCY
+    so the two cannot drift into disagreeing about the same account."""
+    return config("PAYMENT_CURRENCY", default="NGN")
+
 
 def preauth_enabled() -> bool:
     """Whether pre-authorization is switched on for this deployment.
@@ -62,18 +84,35 @@ def preauth_enabled() -> bool:
     return config("PAYSTACK_PREAUTH_ENABLED", default=False, cast=bool)
 
 
-def capture_model_for(method: Optional[str], *, settles_later: bool) -> CaptureModel:
+def capture_model_for(
+    method: Optional[str], *, settles_later: bool, currency: Optional[str] = None
+) -> CaptureModel:
     """Which model applies to this payment.
 
     `settles_later` is true when the final amount is not yet known -- the buyer
     opted into a batch. A solo delivery has a fixed fee and nothing to settle,
     so it charges immediately whatever the method.
+
+    A hold needs three things to be true at once: the merchant account has
+    pre-authorization switched on, the currency is one Paystack will hold, and
+    the method can hold at all. Any one of them missing falls back to
+    charge-then-refund, which is slower and visible to the buyer but always
+    works. Falling back is never silent -- describe_for_buyer says which one
+    applies before they pay.
     """
     if not settles_later:
         return CaptureModel.IMMEDIATE
 
     normalised = (method or "").strip().lower()
-    if preauth_enabled() and normalised in PREAUTH_CAPABLE_METHODS:
+    holdable_currency = (
+        currency or deployment_currency()
+    ).strip().upper() in PREAUTH_SUPPORTED_CURRENCIES
+
+    if (
+        preauth_enabled()
+        and holdable_currency
+        and normalised in PREAUTH_CAPABLE_METHODS
+    ):
         return CaptureModel.PREAUTH_CAPTURE
     return CaptureModel.CHARGE_REFUND
 

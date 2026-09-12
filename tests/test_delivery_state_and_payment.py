@@ -149,10 +149,36 @@ def test_without_confirmed_preauth_everything_falls_back(monkeypatch):
     assert capture_model_for("card", settles_later=True) is CaptureModel.CHARGE_REFUND
 
 
-def test_with_preauth_enabled_cards_hold(monkeypatch):
+def test_with_preauth_enabled_cards_hold_in_a_currency_paystack_will_hold(monkeypatch):
     monkeypatch.setattr("app.payments.preauth.preauth_enabled", lambda: True)
+    for method in ("card", "CARD", " Card "):
+        assert (
+            capture_model_for(method, settles_later=True, currency="ZAR")
+            is CaptureModel.PREAUTH_CAPTURE
+        ), method
+
+
+def test_naira_cannot_be_held_however_the_flag_is_set(monkeypatch):
+    """Paystack's preauthorization API takes ZAR only, and Markt charges in
+    naira. Switching the flag on without this guard would send a hold request
+    that Paystack answers with a real charge -- the buyer's money actually
+    leaving, right after we promised them it would only be held."""
+    monkeypatch.setattr("app.payments.preauth.preauth_enabled", lambda: True)
+    assert (
+        capture_model_for("card", settles_later=True, currency="NGN")
+        is CaptureModel.CHARGE_REFUND
+    )
+
+
+def test_the_deployments_own_currency_is_what_counts_when_none_is_given(monkeypatch):
+    """Callers that do not pass a currency must not accidentally get the
+    optimistic answer. The default is whatever this deployment charges in."""
+    monkeypatch.setattr("app.payments.preauth.preauth_enabled", lambda: True)
+    monkeypatch.setattr("app.payments.preauth.deployment_currency", lambda: "NGN")
+    assert capture_model_for("card", settles_later=True) is CaptureModel.CHARGE_REFUND
+
+    monkeypatch.setattr("app.payments.preauth.deployment_currency", lambda: "ZAR")
     assert capture_model_for("card", settles_later=True) is CaptureModel.PREAUTH_CAPTURE
-    assert capture_model_for("CARD", settles_later=True) is CaptureModel.PREAUTH_CAPTURE
 
 
 def test_methods_that_cannot_hold_still_fall_back(monkeypatch):
@@ -160,7 +186,10 @@ def test_methods_that_cannot_hold_still_fall_back(monkeypatch):
     monkeypatch.setattr("app.payments.preauth.preauth_enabled", lambda: True)
     for method in ("bank_transfer", "mobile_money", "wallet", "something_new", None):
         assert (
-            capture_model_for(method, settles_later=True) is CaptureModel.CHARGE_REFUND
+            # ZAR deliberately: otherwise this passes because of the currency
+            # guard and proves nothing about the method.
+            capture_model_for(method, settles_later=True, currency="ZAR")
+            is CaptureModel.CHARGE_REFUND
         ), method
 
 

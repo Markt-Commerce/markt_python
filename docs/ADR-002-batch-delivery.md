@@ -164,3 +164,58 @@ flow must be shippable and correct with batch entirely dark.
 4. **Radius vs. area membership.** The brief says radius-from-pickup; the code
    uses market→area membership. Membership is more honest with the data we have.
    Confirm we keep it.
+
+---
+
+## Amendment, 2026-09-12: Paystack cannot hold naira
+
+**This ADR's primary mechanism is not available on this deployment.**
+
+The decision above chose hold-max-capture-actual as primary, with
+charge-max-refund as the fallback for methods that cannot hold. Checking
+Paystack's Preauthorization API against the naira before building it:
+preauthorization accepts **ZAR only**. Markt charges in NGN
+(`PAYMENT_CURRENCY`), so no card on this account can hold funds, whatever
+`PAYSTACK_PREAUTH_ENABLED` is set to.
+
+So the fallback is, for now, the only model:
+
+| | Chosen | Actual |
+|---|---|---|
+| Card, batch | hold ceiling, capture actual | charge ceiling, refund difference |
+| Everything else, batch | charge ceiling, refund difference | unchanged |
+| Solo | charge the fixed fee | unchanged |
+
+**What changed in the code, and what did not.**
+
+Nothing about the money model changed: the ceiling is still the buyer's solo
+quote, a share is still capped so batching can never cost more than going
+alone, and the remainder still goes to the earliest joiners. What changed is
+only *how* the difference gets back to the buyer — a refund over days rather
+than a hold that quietly shrinks.
+
+`capture_model_for` now takes the currency into account alongside the flag and
+the method. That is a guard rather than a preference: switching the flag on in
+an NGN deployment without it would send a hold request that Paystack answers
+with an ordinary charge, so the buyer's money would actually leave immediately
+after we had promised them it would only be held — indistinguishable, from our
+side, from a preauth that worked. The `PREAUTH_CAPTURE` path stays in the
+code, tested, behind the currency check, because the gap is Paystack's and may
+close.
+
+**What this costs the buyer, honestly.** Under charge-then-refund a batching
+buyer is out the full solo fee for a few days before the difference returns.
+That is a materially worse offer than the one this ADR assumed, and it makes
+`describe_for_buyer`'s wording load-bearing rather than decorative: the buyer
+has to be told *before* paying that the money leaves and comes back.
+
+It also weakens the case for opting into a batch at all, since the saving now
+arrives days later than the cost. Worth revisiting whether the batch discount
+should instead be applied at checkout against a conservative estimate, with
+Markt absorbing the variance — which ADR-001 rejected as dishonest when the
+alternative was a clean hold, and which now competes against a worse
+alternative. **Not decided here**; flagged for the batch workstream.
+
+**Follow-up if a hold is genuinely wanted:** it needs either a processor that
+holds NGN, or a Paystack account configured in a currency they will hold.
+Both are commercial questions, not engineering ones.
