@@ -180,6 +180,11 @@ class PaymentService:
                 # clear a basket the buyer has since refilled.
                 PaymentService._clear_purchased_items_from_cart(session, order)
 
+                # The same moment, for the same reason. A chat offer is spent
+                # by buying, not by reaching the payment screen -- so a buyer
+                # who backs out to change a quantity still has theirs.
+                PaymentService._spend_chat_discount(session, order)
+
             session.flush()
 
             # Inside the transaction: a delivery that thinks it is unpaid, for
@@ -394,6 +399,49 @@ class PaymentService:
 
         PaymentService._invalidate_payment_cache(payment_id_for_cache)
         return True
+
+    @staticmethod
+    def _spend_chat_discount(session, order) -> None:
+        """Burn the chat offer this order was priced with, once, on payment.
+
+        Guarded by `already_completed` at the call site, so a duplicate or
+        late webhook cannot spend it twice for one order.
+
+        Never raises. The money has already moved; an offer that could not be
+        marked used is a bookkeeping problem to chase, not a reason to fail a
+        payment that went through.
+        """
+        discount_id = getattr(order, "chat_discount_id", None)
+        if not discount_id:
+            return
+        try:
+            from app.chats.models import ChatDiscount
+            from app.chats.services import DiscountService
+
+            discount = (
+                session.query(ChatDiscount)
+                .filter(ChatDiscount.id == discount_id)
+                .with_for_update()
+                .first()
+            )
+            if discount is None:
+                return
+            if discount.usage_count >= (discount.usage_limit or 1):
+                # Two unpaid orders can carry the same single-use offer -- the
+                # buyer went back, checked out again, and paid both. The
+                # second one is already priced and paid, so there is nothing
+                # to take back; it is recorded rather than silently ignored.
+                logger.warning(
+                    "Chat discount %s was already spent when order %s paid",
+                    discount_id,
+                    order.id,
+                )
+                return
+            DiscountService.consume(session, discount)
+        except Exception:
+            logger.exception(
+                "Could not spend chat discount %s for order %s", discount_id, order.id
+            )
 
     @staticmethod
     def _clear_purchased_items_from_cart(session, order) -> None:

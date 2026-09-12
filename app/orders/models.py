@@ -30,6 +30,29 @@ class Order(BaseModel, UniqueIdMixin):
     shipping_fee = db.Column(MONEY)
     tax = db.Column(MONEY)
     discount = db.Column(MONEY)
+    # Which chat offer produced that discount, so the offer can be spent when
+    # the order is paid rather than when it is created. Without the link there
+    # is no way, at payment time, to know what to spend.
+    #
+    # use_alter, with a name, because this constraint closes a loop:
+    # orders -> chat_discounts -> chat_messages -> chat_rooms ->
+    # buyer_requests -> order_items -> orders. Every one of those was already
+    # there; this column is what joined the ends. SQLAlchemy sorts tables
+    # topologically for create_all/drop_all and a cycle has no valid order, so
+    # the test suite's schema teardown died with CircularDependencyError.
+    #
+    # use_alter takes this one constraint out of the sort: the tables are
+    # created, then it is added by ALTER, and dropped the same way. The name
+    # is required for that and matches the migration's.
+    chat_discount_id = db.Column(
+        db.Integer,
+        db.ForeignKey(
+            "chat_discounts.id",
+            name="fk_orders_chat_discount_id",
+            use_alter=True,
+        ),
+        nullable=True,
+    )
     # Buyer-facing Service Fee (11.3, Phase 0: 2.5%, floor ₦25, ceiling
     # ₦1,000). Nullable: orders from the pre-existing order-first checkout
     # flow predate this fee and never set it.
