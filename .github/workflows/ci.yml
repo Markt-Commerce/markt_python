@@ -114,6 +114,7 @@ jobs:
           --ignore=tests/test_registration_verify_first.py
           --ignore=tests/test_shop_discovery.py
           --ignore=tests/test_unverified_account_safety.py
+          --ignore=tests/test_delivery_serviceability.py
 
   db-integration-tests:
     name: Database integration tests
@@ -209,4 +210,5 @@ jobs:
           pytest tests/test_registration_verify_first.py
           tests/test_shop_discovery.py
           tests/test_unverified_account_safety.py
+          tests/test_delivery_serviceability.py
           -v --tb=short

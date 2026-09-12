@@ -1,0 +1,258 @@
+"""Serviceability checks and quote issue/consumption."""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional, Tuple
+
+from app.libs.errors import APIError, ConflictError, NotFoundError, ValidationError
+from app.libs.geo import haversine_km, is_valid_coordinate
+from app.libs.session import session_scope
+
+from .fees import QuoteContext, get_strategy
+from .models import (
+    DeliveryLane,
+    DeliveryQuote,
+    QuoteStatus,
+    ServiceCity,
+    ServiceZone,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class NotServiceable(APIError):
+    """Delivery is not possible for this pair of points.
+
+    Carries a machine-readable reason so the client can say *which* end is the
+    problem. "Delivery unavailable" with no subject is the kind of message that
+    makes someone re-enter a perfectly good address five times.
+    """
+
+    def __init__(self, reason: str, message: str, payload: Optional[dict] = None):
+        super().__init__(
+            message,
+            422,
+            {"error_type": "not_serviceable", "reason": reason, **(payload or {})},
+        )
+
+
+class QuoteExpired(ConflictError):
+    def __init__(self, message="This delivery quote has expired."):
+        super().__init__(message)
+        self.payload = {"error_type": "quote_expired"}
+
+
+@dataclass(frozen=True)
+class Serviceability:
+    pickup_zone: ServiceZone
+    dropoff_zone: ServiceZone
+    lane: DeliveryLane
+    distance_km: float
+
+
+class ServiceabilityService:
+    """Whether we deliver between two points, and at what base rate."""
+
+    @staticmethod
+    def zone_for_point(session, lat: float, lng: float) -> Optional[ServiceZone]:
+        """The active zone containing a point, or None.
+
+        Nearest-centroid-within-radius. Crude on purpose -- see
+        ServiceZone's docstring. Overlapping zones resolve to the nearest
+        centroid, which is deterministic and explainable; it is not
+        necessarily *right*, and real boundary data replaces it here.
+        """
+        if not is_valid_coordinate(lat, lng):
+            return None
+
+        zones = (
+            session.query(ServiceZone)
+            .join(ServiceCity, ServiceZone.city_id == ServiceCity.id)
+            .filter(ServiceZone.is_active.is_(True), ServiceCity.is_active.is_(True))
+            .all()
+        )
+
+        best, best_distance = None, None
+        for zone in zones:
+            d = haversine_km(lat, lng, zone.centroid_lat, zone.centroid_lng)
+            if d <= zone.radius_km and (best_distance is None or d < best_distance):
+                best, best_distance = zone, d
+        return best
+
+    @staticmethod
+    def check(
+        session,
+        pickup: Tuple[float, float],
+        dropoff: Tuple[float, float],
+    ) -> Serviceability:
+        """Raise NotServiceable unless we serve this route, both ends."""
+        p_lat, p_lng = pickup
+        d_lat, d_lng = dropoff
+
+        if not is_valid_coordinate(p_lat, p_lng):
+            raise NotServiceable(
+                "pickup_unlocated",
+                "This shop hasn't set its location yet, so we can't arrange delivery from it.",
+            )
+        if not is_valid_coordinate(d_lat, d_lng):
+            raise NotServiceable(
+                "dropoff_unlocated",
+                "We need a delivery address before we can work out a fee.",
+            )
+
+        pickup_zone = ServiceabilityService.zone_for_point(session, p_lat, p_lng)
+        if pickup_zone is None:
+            raise NotServiceable(
+                "pickup_not_serviceable",
+                "We don't deliver from this shop's area yet.",
+            )
+
+        dropoff_zone = ServiceabilityService.zone_for_point(session, d_lat, d_lng)
+        if dropoff_zone is None:
+            raise NotServiceable(
+                "dropoff_not_serviceable",
+                "We don't deliver to this address yet.",
+                {"city_known": False},
+            )
+
+        lane = (
+            session.query(DeliveryLane)
+            .filter(
+                DeliveryLane.from_zone_id == pickup_zone.id,
+                DeliveryLane.to_zone_id == dropoff_zone.id,
+                DeliveryLane.is_active.is_(True),
+            )
+            .first()
+        )
+        if lane is None:
+            raise NotServiceable(
+                "no_lane",
+                "We don't deliver between these two areas yet.",
+                {
+                    "pickup_zone": pickup_zone.name,
+                    "dropoff_zone": dropoff_zone.name,
+                },
+            )
+
+        return Serviceability(
+            pickup_zone=pickup_zone,
+            dropoff_zone=dropoff_zone,
+            lane=lane,
+            distance_km=haversine_km(p_lat, p_lng, d_lat, d_lng),
+        )
+
+
+class QuoteService:
+    @staticmethod
+    def create(
+        buyer_id: int,
+        pickup: Tuple[float, float],
+        dropoff: Tuple[float, float],
+        *,
+        seller_id: Optional[int] = None,
+        item_count: int = 1,
+        total_weight_grams: int = 0,
+        precision: str = "approximate",
+    ) -> DeliveryQuote:
+        """Price one pickup -> dropoff and store it.
+
+        Raises NotServiceable rather than returning a fee nobody can honour.
+        """
+        with session_scope() as session:
+            check = ServiceabilityService.check(session, pickup, dropoff)
+
+            strategy = get_strategy()
+            breakdown = strategy.quote(
+                QuoteContext(
+                    distance_km=check.distance_km,
+                    pickup_zone_id=check.pickup_zone.id,
+                    dropoff_zone_id=check.dropoff_zone.id,
+                    lane_base_fee_minor=check.lane.base_fee_minor_override,
+                    item_count=item_count,
+                    total_weight_grams=total_weight_grams,
+                )
+            )
+
+            quote = DeliveryQuote(
+                buyer_id=buyer_id,
+                seller_id=seller_id,
+                pickup_zone_id=check.pickup_zone.id,
+                dropoff_zone_id=check.dropoff_zone.id,
+                pickup_lat=pickup[0],
+                pickup_lng=pickup[1],
+                dropoff_lat=dropoff[0],
+                dropoff_lng=dropoff[1],
+                distance_km=check.distance_km,
+                strategy=strategy.name,
+                strategy_version=strategy.version,
+                fee_minor=breakdown.total_minor,
+                breakdown=breakdown.as_json(),
+                precision=precision,
+                expires_at=DeliveryQuote.default_expiry(),
+            )
+            session.add(quote)
+            session.flush()
+
+            # Detach before the scope commits. session_scope expires every
+            # instance on commit, so a quote read after this call would issue
+            # a fresh SELECT -- and outside a request, where there is no live
+            # session, that raises DetachedInstanceError instead. Expunging
+            # while the attributes are loaded leaves a plain readable object,
+            # which is all any caller wants from this.
+            session.expunge(quote)
+            return quote
+
+    @staticmethod
+    def consume(session, quote_id: str, buyer_id: int, order_id: str) -> DeliveryQuote:
+        """Lock a quote to an order, exactly once.
+
+        Takes a row lock and re-checks expiry *inside* it. Reading
+        `is_usable` and then writing is a race: two checkout submissions a
+        few milliseconds apart would both see an active quote and both
+        attach it, and the second order would ride on a fee it never
+        reserved.
+        """
+        quote = (
+            session.query(DeliveryQuote)
+            .filter(DeliveryQuote.id == quote_id)
+            .with_for_update()
+            .first()
+        )
+        if quote is None:
+            raise NotFoundError("Delivery quote not found")
+        if quote.buyer_id != buyer_id:
+            # Not "forbidden": telling someone a quote exists but is not
+            # theirs is more than they need to know.
+            raise NotFoundError("Delivery quote not found")
+        if quote.status == QuoteStatus.CONSUMED:
+            if quote.order_id == order_id:
+                return quote  # idempotent retry of the same checkout
+            raise ConflictError("This delivery quote has already been used.")
+        if quote.is_expired:
+            quote.status = QuoteStatus.EXPIRED
+            raise QuoteExpired()
+
+        quote.status = QuoteStatus.CONSUMED
+        quote.consumed_at = datetime.utcnow()
+        quote.order_id = order_id
+        return quote
+
+    @staticmethod
+    def expire_stale() -> int:
+        """Housekeeping. Expiry is enforced at consumption, so this only keeps
+        the table honest for reads and reporting."""
+        with session_scope() as session:
+            return (
+                session.query(DeliveryQuote)
+                .filter(
+                    DeliveryQuote.status == QuoteStatus.ACTIVE,
+                    DeliveryQuote.expires_at < datetime.utcnow(),
+                )
+                .update(
+                    {DeliveryQuote.status: QuoteStatus.EXPIRED},
+                    synchronize_session=False,
+                )
+            )
