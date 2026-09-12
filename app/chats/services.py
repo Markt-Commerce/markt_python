@@ -1441,12 +1441,26 @@ class DiscountService:
                 message_content = DiscountService._generate_discount_message(
                     discount, room
                 )
+                # Everything the card in the chat needs to draw itself
+                # without a second request. `status` is the value at the
+                # moment of offering: it moves when the buyer responds, and
+                # the client reads the live one from the room's discount list
+                # rather than trusting this snapshot.
+                product = (
+                    session.query(Product).get(discount.product_id)
+                    if discount.product_id
+                    else None
+                )
                 message_data = {
                     "discount_id": discount.id,
                     "discount_type": discount.discount_type,
                     "discount_value": discount.discount_value,
                     "expires_at": discount.expires_at.isoformat(),
                     "product_id": discount.product_id,
+                    "product_name": getattr(product, "name", None),
+                    "minimum_order_amount": discount.minimum_order_amount,
+                    "discount_message": discount.discount_message,
+                    "status": discount.status,
                 }
 
                 chat_message = ChatMessage(
