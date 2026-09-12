@@ -69,6 +69,10 @@ class CheckoutSchema(Schema):
     # Only meaningful alongside a quote. The buyer asking to share a run with
     # other orders going the same way; never inferred on their behalf.
     batch_opt_in = fields.Bool(missing=False)
+    #: A discount this shop offered the buyer in chat. Scoped to the shop being
+    #: bought from and spent only if the order is actually created, so an
+    #: abandoned checkout leaves the offer usable.
+    discount_id = fields.Int(allow_none=True)
 
 
 class CheckoutResponseSchema(Schema):
