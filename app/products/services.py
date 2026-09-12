@@ -37,7 +37,12 @@ from app.socials.models import (
 )
 
 # app imports
-from .models import Product, ProductVariant, ProductInventory
+from .models import Product, ProductStatus, ProductVariant, ProductInventory
+
+# Matches LOW_STOCK_THRESHOLD in the seller dashboard. Defined here too
+# because the filter has to run against the whole inventory, not the page
+# the client happens to be holding.
+LOW_STOCK_THRESHOLD = 5
 from .constants import PRODUCT_FILTER_KEYS, OPTIONAL_PRODUCT_FIELDS
 from app.orders.models import OrderItem
 from app.media.services import media_service
@@ -1131,8 +1136,24 @@ class ProductService:
             return True
 
     @staticmethod
-    def get_seller_products(seller_id: int, page: int = 1, per_page: int = 20):
-        """Get products for a specific seller with pagination"""
+    def get_seller_products(
+        seller_id: int,
+        page: int = 1,
+        per_page: int = 20,
+        search: str = None,
+        status: str = None,
+        low_stock: bool = False,
+        low_stock_threshold: int = LOW_STOCK_THRESHOLD,
+    ):
+        """Get products for a specific seller with pagination.
+
+        Search and the filters are applied here rather than in the client
+        because they have to see the whole inventory. The seller dashboard
+        filtered the page it happened to be holding, which was fine while it
+        asked for 50 products and pretended that was everything -- the moment
+        it pages properly, "search" that only looks at the current page finds
+        nothing and says so confidently.
+        """
         try:
             with session_scope() as session:
                 # Query products for the seller
@@ -1151,6 +1172,30 @@ class ProductService:
                     .order_by(Product.created_at.desc())
                 )
 
+                if search:
+                    term = f"%{search.strip()}%"
+                    # Name and SKU: the two things a seller actually types
+                    # when hunting for one of their own products.
+                    query = query.filter(
+                        db.or_(Product.name.ilike(term), Product.sku.ilike(term))
+                    )
+
+                if status:
+                    try:
+                        # `Product.Status`, not the module-level ProductStatus.
+                        # They have identical members and are different
+                        # classes, and the column is mapped to this one — the
+                        # other binds as 'ProductStatus.DRAFT' and Postgres
+                        # rejects it.
+                        query = query.filter(Product.status == Product.Status(status))
+                    except ValueError:
+                        # An unknown status is a client bug, not a reason to
+                        # return the whole catalogue as though nothing was asked.
+                        raise ValidationError(f"Unknown product status: {status}")
+
+                if low_stock:
+                    query = query.filter(Product.stock < low_stock_threshold)
+
                 # Apply pagination
                 total = query.count()
                 products = query.offset((page - 1) * per_page).limit(per_page).all()
@@ -1166,12 +1211,24 @@ class ProductService:
                         "page": page,
                         "per_page": per_page,
                         "total": total,
+                        # PaginationSchema declares `total_items`, so `total`
+                        # alone was dropped in serialisation and the client
+                        # never learned how many products matched — it could
+                        # count pages but not results. Both are sent: `total`
+                        # for anything already reading it, `total_items` for
+                        # the schema.
+                        "total_items": total,
                         "total_pages": total_pages,
                         "has_next": has_next,
                         "has_prev": has_prev,
                     },
                 }
 
+        except ValidationError:
+            # A bad filter is the caller's mistake, not ours. Folding it into
+            # the 500 below tells the client we broke when what we mean is
+            # "that is not a status", and gives them nothing to correct.
+            raise
         except Exception as e:
             logger.error(f"Failed to get seller products: {e}")
             raise APIError("Failed to get seller products", 500)

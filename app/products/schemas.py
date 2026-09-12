@@ -1,4 +1,4 @@
-from marshmallow import Schema, fields, validate, ValidationError
+from marshmallow import EXCLUDE, Schema, fields, validate, ValidationError
 from app.libs.schemas import PaginationSchema
 from app.categories.schemas import CategorySchema
 from app.users.schemas import SellerSimpleSchema
@@ -102,6 +102,31 @@ class ProductSearchSchema(Schema):
     sort_by = fields.Str(
         required=False,
         validate=validate.OneOf(["newest", "popular", "price_asc", "price_desc"]),
+    )
+
+
+class SellerProductQueryArgs(Schema):
+    """Query arguments for GET /products/seller/my-products.
+
+    The route used the generic PaginationQueryArgs, which carries a `search`
+    field the service never received — so the seller dashboard did its own
+    filtering over whichever page it was holding. That is fine while the
+    client asks for 50 products and calls it the whole inventory, and wrong
+    the moment it pages properly.
+    """
+
+    class Meta:
+        unknown = EXCLUDE
+
+    page = fields.Int(load_default=1, validate=validate.Range(min=1))
+    per_page = fields.Int(load_default=20, validate=validate.Range(min=1, max=100))
+    search = fields.Str(description="Matches product name or SKU")
+    status = fields.Str(
+        validate=validate.OneOf([s.value for s in ProductStatus]),
+        description="Filter by product status",
+    )
+    low_stock = fields.Bool(
+        load_default=False, description="Only products below the low-stock threshold"
     )
 
 

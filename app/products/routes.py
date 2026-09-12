@@ -28,6 +28,7 @@ from .schemas import (
     ProductUpdateSchema,
     ProductSearchSchema,
     ProductSearchResultSchema,
+    SellerProductQueryArgs,
     BulkProductResultSchema,
     ProductShareLinkSchema,
 )
@@ -213,14 +214,24 @@ class ShareProduct(MethodView):
 class SellerProducts(MethodView):
     @login_required
     @seller_required
-    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.arguments(SellerProductQueryArgs, location="query")
     @bp.response(200, ProductSearchResultSchema)
     def get(self, args):
-        """Get seller's own products"""
+        """Get seller's own products.
+
+        `search`, `status` and `low_stock` are handled here rather than in the
+        client: the route already accepted a `search` param through the
+        generic pagination schema and silently dropped it, so the dashboard
+        filtered whichever page it was holding. That works only while the
+        client pretends one page is the whole inventory.
+        """
         return ProductService.get_seller_products(
             seller_id=current_user.seller_account.id,
             page=args.get("page", 1),
             per_page=args.get("per_page", 20),
+            search=args.get("search"),
+            status=args.get("status"),
+            low_stock=args.get("low_stock", False),
         )
 
 
