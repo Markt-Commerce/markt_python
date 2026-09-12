@@ -266,10 +266,54 @@ class BuyerProfileSchema(BuyerCreateSchema):
     created_at = fields.DateTime(dump_only=True)
 
 
+def shop_address_line(seller) -> dict:
+    """The shop's address as something a person can read.
+
+    `Seller.shop_address` is a free-form JSON column that was written by one
+    caller as ``{"street": ...}`` and read by nobody, so it had no agreed
+    shape and would have drifted the moment a second writer appeared. This
+    settles on ``{formatted, city, state}`` and keeps understanding the old
+    single-key form, because rows written before this exist.
+
+    The coordinate remains the authority on where the shop *is*; this is only
+    what gets shown. A buyer deciding whether to order from a shop two streets
+    away should not have to read a latitude.
+    """
+    raw = getattr(seller, "shop_address", None)
+    if isinstance(raw, dict):
+        formatted = (
+            raw.get("formatted")
+            or raw.get("street")
+            or raw.get("street_address")
+            or None
+        )
+        return {
+            "formatted": formatted,
+            "city": raw.get("city"),
+            "state": raw.get("state"),
+        }
+    return {"formatted": None, "city": None, "state": None}
+
+
+class ShopAddressSchema(Schema):
+    """Where a shop is, in words. Every field nullable: plenty of real places
+    come back from a geocoder with no city and no state, and a shop whose
+    seller has not set an address at all is normal rather than broken."""
+
+    formatted = fields.Str(allow_none=True)
+    city = fields.Str(allow_none=True)
+    state = fields.Str(allow_none=True)
+
+
 class SellerProfileSchema(Schema):
     id = fields.Int(dump_only=True)
     shop_name = fields.Str()
     shop_slug = fields.Str(dump_only=True)
+    shop_address = fields.Method("get_shop_address", dump_only=True)
+
+    def get_shop_address(self, obj):
+        return shop_address_line(obj)
+
     description = fields.Str()
     banner_url = fields.Str(dump_only=True, allow_none=True)
     verification_status = fields.Enum(
@@ -362,6 +406,11 @@ class SellerSimpleSchema(Schema):
     # shop is a business address, not a home one.
     shop_latitude = fields.Float(dump_only=True, allow_none=True)
     shop_longitude = fields.Float(dump_only=True, allow_none=True)
+    shop_address = fields.Method("get_shop_address", dump_only=True)
+
+    def get_shop_address(self, obj):
+        return shop_address_line(obj)
+
     verification_status = fields.Method("get_verification_status", dump_only=True)
     average_rating = fields.Method("get_average_rating", dump_only=True)
     total_products = fields.Method("get_total_products", dump_only=True)

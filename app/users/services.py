@@ -42,6 +42,7 @@ from app.orders.models import OrderItem
 
 # app imports
 from .models import User, Buyer, Seller, UserAddress, SellerVerificationStatus
+from .schemas import shop_address_line
 from .constants import (
     RESERVED_USERNAMES,
     PROFILE_SETUP_HREF,
@@ -1991,6 +1992,12 @@ class ShopService:
                     "banner_url": shop.banner_url,
                     "shop_slug": shop.shop_slug,
                     "description": shop.description,
+                    # Where the shop is, in words. This endpoint builds its
+                    # payload by hand rather than through a schema, so adding
+                    # the field to SellerProfileSchema did not reach it.
+                    "shop_address": shop_address_line(shop),
+                    "shop_latitude": shop.shop_latitude,
+                    "shop_longitude": shop.shop_longitude,
                     "categories": [
                         {
                             "id": sc.category.id,
