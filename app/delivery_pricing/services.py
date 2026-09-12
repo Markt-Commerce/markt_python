@@ -38,6 +38,11 @@ class NotServiceable(APIError):
     """
 
     def __init__(self, reason: str, message: str, payload: Optional[dict] = None):
+        # Kept on the exception as well as in the payload. Callers that catch
+        # this in Python -- combined quoting, for one -- were reaching for
+        # `exc.reason` and silently getting a generic fallback, turning "we
+        # don't deliver between these two areas" into "not serviceable".
+        self.reason = reason
         super().__init__(
             message,
             422,
@@ -197,6 +202,39 @@ class ServiceabilityService:
 
 
 class QuoteService:
+    @staticmethod
+    def price_only(
+        session,
+        pickup: Tuple[float, float],
+        dropoff: Tuple[float, float],
+        *,
+        item_count: int = 1,
+        total_weight_grams: int = 0,
+    ) -> int:
+        """What one leg would cost, without storing a quote.
+
+        For comparing options the buyer has not chosen yet -- pricing three
+        possible combinations should not leave three unusable quote rows
+        behind, and a quote row is a commitment with a fifteen-minute clock
+        on it.
+
+        Raises NotServiceable exactly as create() does, so a caller that
+        cannot serve one leg finds out the same way.
+        """
+        check = ServiceabilityService.check(session, pickup, dropoff)
+        strategy = get_strategy()
+        breakdown = strategy.quote(
+            QuoteContext(
+                distance_km=check.distance_km,
+                pickup_zone_id=check.pickup_zone.id,
+                dropoff_zone_id=check.dropoff_zone.id,
+                lane_base_fee_minor=check.lane.base_fee_minor_override,
+                item_count=item_count,
+                total_weight_grams=total_weight_grams,
+            )
+        )
+        return breakdown.total_minor
+
     @staticmethod
     def create(
         buyer_id: int,

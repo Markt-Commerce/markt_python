@@ -11,12 +11,15 @@ from flask_smorest import Blueprint, abort
 
 from app.libs.decorators import buyer_required
 from app.libs.errors import APIError
+from app.libs.geo import is_valid_coordinate
 from app.libs.session import read_scope, session_scope
 
 from .models import ServiceCity, ServiceZone
 from .logistics import apply_status
 from .order_delivery import OrderDelivery
 from .schemas import (
+    CombinedQuoteRequestSchema,
+    CombinedQuoteSchema,
     JobStatusAckSchema,
     JobStatusUpdateSchema,
     QuoteRequestSchema,
@@ -148,3 +151,93 @@ class JobStatusWebhook(MethodView):
             if applied:
                 delivery.last_status_at = data.get("occurred_at") or datetime.utcnow()
             return {"applied": applied, "state": delivery.state.value}
+
+
+@bp.route("/quote/combined")
+class CombinedQuote(MethodView):
+    @login_required
+    @buyer_required
+    @bp.arguments(CombinedQuoteRequestSchema)
+    @bp.response(200, CombinedQuoteSchema)
+    def post(self, data):
+        """Price one rider collecting from several shops for one buyer.
+
+        Answers 200 with `available: false` and a reason rather than an error
+        when the shops are too far apart or the trip saves nothing -- not
+        being able to share a delivery is an ordinary answer, not a failure,
+        and the client needs to say why.
+        """
+        from app.users.models import Seller
+
+        from .combined import Pickup, allocate, can_combine
+
+        dropoff = (data["dropoff_latitude"], data["dropoff_longitude"])
+        pickups = []
+
+        with read_scope() as session:
+            for seller_id in data["seller_ids"]:
+                seller = session.query(Seller).get(seller_id)
+                if seller is None:
+                    return {
+                        "available": False,
+                        "reason": "shop_not_found",
+                        "shares": [],
+                    }
+                if not is_valid_coordinate(seller.shop_latitude, seller.shop_longitude):
+                    return {
+                        "available": False,
+                        "reason": "pickup_unlocated",
+                        "shares": [],
+                    }
+                pickups.append((seller_id, seller.shop_latitude, seller.shop_longitude))
+
+        # Each leg priced on its own first: those are the ceilings, and the
+        # number the saving is measured against. Priced without storing --
+        # comparing options the buyer has not chosen should not leave unusable
+        # quote rows behind, each with its own fifteen-minute clock.
+        solo = {}
+        with read_scope() as session:
+            for seller_id, lat, lng in pickups:
+                try:
+                    solo[seller_id] = QuoteService.price_only(
+                        session, (lat, lng), dropoff
+                    )
+                except NotServiceable as exc:
+                    return {
+                        "available": False,
+                        "reason": getattr(exc, "reason", "not_serviceable"),
+                        "shares": [],
+                    }
+
+        legs = [
+            Pickup(seller_id=sid, lat=lat, lng=lng, solo_fee_minor=solo[sid])
+            for sid, lat, lng in pickups
+        ]
+        if not can_combine(legs):
+            return {"available": False, "reason": "shops_too_far_apart", "shares": []}
+
+        # The combined trip is priced from the shop furthest from the buyer:
+        # the rider has to reach it anyway, and collecting the nearer ones on
+        # the way is the part that costs almost nothing. Charging the longest
+        # leg once is both simple and never more than the parts.
+        combined_fee = max(solo.values())
+        quote = allocate(legs, combined_fee)
+        if not quote.worth_offering:
+            return {"available": False, "reason": "no_saving", "shares": []}
+
+        return {
+            "available": True,
+            "reason": None,
+            "combined_fee_minor": quote.combined_fee_minor,
+            "separate_fee_minor": quote.separate_fee_minor,
+            "saved_minor": quote.saved_minor,
+            "shares": [
+                {
+                    "seller_id": s.seller_id,
+                    "charged_minor": s.charged_minor,
+                    "solo_fee_minor": s.solo_fee_minor,
+                    "saved_minor": s.saved_minor,
+                }
+                for s in quote.shares
+            ],
+        }

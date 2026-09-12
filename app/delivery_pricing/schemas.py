@@ -84,3 +84,34 @@ class JobStatusUpdateSchema(Schema):
 class JobStatusAckSchema(Schema):
     applied = fields.Bool()
     state = fields.Str(allow_none=True)
+
+
+class CombinedPickupShareSchema(Schema):
+    seller_id = fields.Int()
+    charged_minor = fields.Int()
+    solo_fee_minor = fields.Int()
+    saved_minor = fields.Int()
+
+
+class CombinedQuoteSchema(Schema):
+    """What one rider collecting from several nearby shops would cost."""
+
+    available = fields.Bool()
+    #: Why not, when it isn't. The client says something specific rather than
+    #: hiding the option with no explanation.
+    reason = fields.Str(allow_none=True)
+    combined_fee_minor = fields.Int(allow_none=True)
+    separate_fee_minor = fields.Int(allow_none=True)
+    saved_minor = fields.Int(allow_none=True)
+    shares = fields.Nested(CombinedPickupShareSchema, many=True)
+
+
+class CombinedQuoteRequestSchema(Schema):
+    class Meta:
+        unknown = EXCLUDE
+
+    seller_ids = fields.List(
+        fields.Int(), required=True, validate=validate.Length(min=2, max=5)
+    )
+    dropoff_latitude = fields.Float(required=True, validate=validate.Range(-90, 90))
+    dropoff_longitude = fields.Float(required=True, validate=validate.Range(-180, 180))
