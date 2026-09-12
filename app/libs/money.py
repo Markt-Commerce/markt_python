@@ -75,3 +75,24 @@ def to_subunit(value: Numberish) -> int:
     if amount is None:
         raise ValueError("Cannot convert None to a currency subunit")
     return int(amount * 100)
+
+
+def from_subunit(minor: Optional[int]) -> Optional[Decimal]:
+    """Kobo -> naira, the inverse of :func:`to_subunit`.
+
+    Delivery prices in integer kobo end to end, because a fee that gets split
+    across several buyers has to divide without leaving a fraction of a kobo
+    unaccounted for. Orders store naira in NUMERIC(12,2). This is the one
+    place that crosses between them, so there is exactly one line to audit if
+    a fee is ever a kobo out.
+
+    Exact by construction: an integer number of kobo always has an exact 2dp
+    naira representation, so nothing is rounded here and nothing can be lost.
+    """
+    if minor is None:
+        return None
+    if not isinstance(minor, int) or isinstance(minor, bool):
+        # bool is an int subclass, and `from_subunit(True)` meaning one kobo
+        # is never what anyone meant.
+        raise TypeError(f"Minor units must be an int, got {type(minor).__name__}")
+    return (Decimal(minor) / 100).quantize(CENTS, rounding=ROUND_HALF_UP)

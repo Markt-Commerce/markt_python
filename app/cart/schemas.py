@@ -56,6 +56,14 @@ class CheckoutSchema(Schema):
     idempotency_key = fields.Str(
         allow_none=True
     )  # Optional idempotency key for retry safety
+    # From POST /delivery/quote. Optional: clients that do not send one get
+    # the flat-rate estimate, so older app versions keep working. When it is
+    # present the buyer has been shown a real price and the order is held to
+    # exactly that number.
+    delivery_quote_id = fields.Str(allow_none=True)
+    # Only meaningful alongside a quote. The buyer asking to share a run with
+    # other orders going the same way; never inferred on their behalf.
+    batch_opt_in = fields.Bool(missing=False)
 
 
 class CheckoutResponseSchema(Schema):

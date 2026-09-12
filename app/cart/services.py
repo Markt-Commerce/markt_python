@@ -12,7 +12,7 @@ from sqlalchemy.orm import joinedload
 from external.redis import redis_client
 from external.database import db
 from app.libs.session import session_scope
-from app.libs.money import to_money
+from app.libs.money import to_money, from_subunit
 from app.products.models import Product
 from app.libs.errors import (
     NotFoundError,
@@ -357,9 +357,20 @@ class CartService:
 
             # Calculate order totals
             subtotal = cart.subtotal()
-            shipping_fee = CartService._calculate_shipping_fee(
-                cart, shipping_normalized
-            )
+            # A quote id means the buyer was shown a real, distance-based
+            # price and accepted it. Without one we fall back to the flat
+            # estimate, because existing clients do not send it yet and a
+            # checkout that started working last week must not stop.
+            quote_id = checkout_data.get("delivery_quote_id")
+            if quote_id:
+                # Zero, not None: the totals below are computed before the
+                # order has an id to consume the quote against, and they are
+                # recomputed once it does.
+                shipping_fee = to_money(0)
+            else:
+                shipping_fee = CartService._calculate_shipping_fee(
+                    cart, shipping_normalized
+                )
             tax = CartService._calculate_tax(subtotal, shipping_normalized)
             discount = CartService._calculate_discount(subtotal, cart.coupon_code)
             total = subtotal + shipping_fee + tax - discount
@@ -387,6 +398,23 @@ class CartService:
             session.add(order)
             session.flush()
             order.order_number = order.generate_order_number()
+
+            # Inside this transaction, deliberately. The quote is consumed,
+            # the snapshot written and the order created together or not at
+            # all -- an expired or already-used quote must leave no order
+            # behind, and an order must never exist with a delivery nobody
+            # reserved a price for.
+            if quote_id:
+                shipping_fee = CartService._attach_delivery(
+                    session,
+                    order,
+                    cart,
+                    quote_id=quote_id,
+                    buyer_id=user.buyer_account.id,
+                    batch_opt_in=bool(checkout_data.get("batch_opt_in", False)),
+                )
+                order.shipping_fee = shipping_fee
+                order.total = subtotal + shipping_fee + tax - discount
 
             # Create order items from cart items
             for cart_item in cart.items:
@@ -572,8 +600,88 @@ class CartService:
                         )
 
     @staticmethod
+    def _attach_delivery(
+        session,
+        order: Order,
+        cart: Cart,
+        *,
+        quote_id: str,
+        buyer_id: int,
+        batch_opt_in: bool,
+    ) -> Decimal:
+        """Consume a delivery quote and snapshot it onto the order.
+
+        Returns the shipping fee in naira. Must be called inside the order's
+        own transaction -- see the call site for why.
+
+        The snapshot is the point. The quote row records what we quoted; this
+        records what this order was actually sold, and the two stop being the
+        same thing the moment a fee strategy is retuned or a zone is redrawn.
+        Copying the numbers means a six-month-old order can still explain its
+        own delivery fee without us having to reconstruct the world as it was
+        when the buyer checked out.
+        """
+        from app.delivery_pricing.services import QuoteService
+        from app.delivery_pricing.order_delivery import OrderDelivery
+
+        # A quote prices one pickup against one dropoff. A basket spanning two
+        # markets is two separate deliveries (rerouting and delivery are both
+        # within-market, ADR 18.2), so one quote cannot cover it -- and
+        # accepting it anyway would charge the buyer for one journey and make
+        # Markt eat the other. Refused rather than silently undercharged;
+        # quoting a multi-market basket properly is its own piece of work.
+        if CartService.count_distinct_deliveries(cart) > 1:
+            raise ValidationError(
+                "This basket has items from more than one market, which needs "
+                "a delivery quote per market. Please check out from one market "
+                "at a time for now."
+            )
+
+        quote = QuoteService.consume(session, quote_id, buyer_id, order.id)
+
+        delivery = OrderDelivery()
+        delivery.order_id = order.id
+        delivery.quote_id = quote.id
+        delivery.fee_minor = quote.fee_minor
+        delivery.breakdown = quote.breakdown
+        delivery.distance_km = quote.distance_km
+        delivery.strategy = quote.strategy
+        delivery.strategy_version = quote.strategy_version
+        delivery.pickup_lat = quote.pickup_lat
+        delivery.pickup_lng = quote.pickup_lng
+        delivery.dropoff_lat = quote.dropoff_lat
+        delivery.dropoff_lng = quote.dropoff_lng
+        # What this buyer would pay alone, which is the ceiling any batched
+        # share is capped at later. Recorded now because after a batch closes
+        # there is no way to work out what going solo would have cost.
+        delivery.solo_fee_minor = quote.fee_minor
+        delivery.batch_opt_in = batch_opt_in
+        session.add(delivery)
+
+        logger.info(
+            "Order %s took delivery quote %s (%s kobo, %s v%s)",
+            order.id,
+            quote.id,
+            quote.fee_minor,
+            quote.strategy,
+            quote.strategy_version,
+        )
+        return from_subunit(quote.fee_minor)
+
+    @staticmethod
     def _calculate_shipping_fee(cart: Cart, shipping_address: Optional[Dict]) -> float:
-        """1.1/10.3: flat fee per market the cart's items come from
+        """The fallback estimate, for checkouts that carry no delivery quote.
+
+        Superseded by _attach_delivery above wherever the client sends a
+        quote id: that path prices the actual distance, holds the buyer to
+        the number they were shown, and records how it was arrived at. This
+        one stays because older app builds do not send a quote yet, and a
+        checkout that worked yesterday has to keep working. Retire it once
+        the mobile clients in the wild all quote.
+
+        Everything below describes that older behaviour.
+
+        1.1/10.3: flat fee per market the cart's items come from
         (Phase 0: "flat fee per market->area pair, not zone/distance-
         based"). Was a hardcoded flat ₦10 regardless of cart contents --
         shared by both checkout flows (this one and
