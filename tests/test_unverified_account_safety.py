@@ -265,3 +265,86 @@ def test_verifying_is_what_signs_you_in(client, created, sent):
 
     # And the session it opened actually works.
     assert client.get(f"{API}/profile").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Signing in with an unfinished signup
+# ---------------------------------------------------------------------------
+
+
+def test_signing_in_unverified_sends_a_fresh_code(client, created, sent):
+    """It is an unfinished signup, not a failed sign-in.
+
+    Someone who closed the app before entering the code has no way back in
+    otherwise — the old response told them to "use the email verification
+    endpoint", which is not a thing anyone holding a phone can do.
+    """
+    email = _email()
+    assert _register(client, created, email).status_code == 201
+    before = len([m for m in sent if m["email"] == email])
+
+    # Past the resend cooldown register's own send started.
+    with patch("app.users.verification.assert_can_send", return_value=None):
+        resp = client.post(
+            f"{API}/login",
+            json={"email": email, "password": "Passw0rdy", "account_type": "buyer"},
+        )
+
+    assert resp.status_code == 403, resp.get_data(as_text=True)
+    body = resp.get_json()
+    assert body["error_type"] == "unverified_email"
+    assert body["email"] == email
+    assert body["code_sent"] is True
+    assert len([m for m in sent if m["email"] == email]) == before + 1
+
+
+def test_the_wrong_password_does_not_send_anything(client, created, sent):
+    """The send sits behind the password check, so it cannot be used to mail
+    somebody else's inbox."""
+    email = _email()
+    assert _register(client, created, email).status_code == 201
+    before = len([m for m in sent if m["email"] == email])
+
+    resp = client.post(
+        f"{API}/login",
+        json={"email": email, "password": "NotThePassword1", "account_type": "buyer"},
+    )
+
+    assert resp.status_code in (400, 401), resp.get_data(as_text=True)
+    assert resp.get_json().get("error_type") != "unverified_email"
+    assert len([m for m in sent if m["email"] == email]) == before
+
+
+def test_a_rate_limited_resend_says_so_rather_than_claiming_one_is_coming(
+    client, created, sent
+):
+    """Register has just sent one, so the 60-second cooldown refuses this.
+    `code_sent: false` is what tells the code screen to offer "resend"
+    instead of promising something that never arrives."""
+    email = _email()
+    assert _register(client, created, email).status_code == 201
+
+    resp = client.post(
+        f"{API}/login",
+        json={"email": email, "password": "Passw0rdy", "account_type": "buyer"},
+    )
+
+    assert resp.status_code == 403
+    assert resp.get_json()["code_sent"] is False
+
+
+def test_a_verified_account_signs_in_normally(client, created, sent):
+    email = _email()
+    assert _register(client, created, email).status_code == 201
+    code = [m for m in sent if m["email"] == email][-1]["code"]
+    client.post(
+        f"{API}/email-verification/verify",
+        json={"email": email, "verification_code": code},
+    )
+
+    resp = client.post(
+        f"{API}/login",
+        json={"email": email, "password": "Passw0rdy", "account_type": "buyer"},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert resp.get_json()["access_token"]

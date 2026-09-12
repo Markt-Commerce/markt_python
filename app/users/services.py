@@ -325,10 +325,19 @@ class AuthService:
             else:
                 raise AuthError("Invalid account type")
 
-            # Check email verification for new accounts
+            # Signing in with an account that never verified is not an error,
+            # it is an unfinished signup. Someone who closed the app before
+            # entering the code has no way back in otherwise -- the old
+            # response told them to "use the email verification endpoint",
+            # which is not a thing anyone holding a phone can do.
+            #
+            # So the route sends a fresh code off the back of this and the
+            # client shows the code screen. The send lives there rather than
+            # here because it opens its own session and commits -- doing that
+            # inside this transaction is how you get a half-written login.
             if not user.email_verified:
                 raise UnverifiedEmailError(
-                    "Please verify your email address before logging in. Use the email verification endpoint to send a verification code.",
+                    "Your email address hasn't been verified yet.",
                     payload={"email": user.email},
                 )
 
