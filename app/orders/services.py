@@ -28,6 +28,7 @@ from app.users.models import Buyer
 from app.products.services import ProductService
 
 # app imports
+from .snapshot import product_snapshot
 from .models import (
     Order,
     OrderStatus,
@@ -102,6 +103,7 @@ class OrderService:
 
                 # Create order items for each product
                 for item in cart.items:
+                    snap_name, snap_image = product_snapshot(item.product)
                     order_item = OrderItem(
                         order_id=order.id,
                         product_id=item.product_id,
@@ -109,6 +111,8 @@ class OrderService:
                         seller_id=item.product.seller_id,  # Critical - track seller
                         quantity=item.quantity,
                         price=item.product_price,
+                        product_name=snap_name,
+                        product_image_url=snap_image,
                         status=OrderItem.Status.PENDING,
                     )
                     session.add(order_item)
@@ -181,6 +185,12 @@ class OrderService:
             fulfilment_preference = FulfilmentPreference.AUTO
 
         for item in snapshot["items"]:
+            # The payment-first snapshot is written before the order exists and
+            # does not carry these, so they are read now. That is still before
+            # the buyer can see the order, and the product cannot have changed
+            # between paying and this line running.
+            product = session.query(Product).get(item["product_id"])
+            snap_name, snap_image = product_snapshot(product)
             order_item = OrderItem(
                 order_id=order.id,
                 product_id=item["product_id"],
@@ -188,6 +198,8 @@ class OrderService:
                 seller_id=item["seller_id"],
                 quantity=item["quantity"],
                 price=item["price"],
+                product_name=snap_name,
+                product_image_url=snap_image,
                 status=OrderItem.Status.PROCESSING,
                 fulfilment_preference=fulfilment_preference,
             )

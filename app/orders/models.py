@@ -140,6 +140,18 @@ class OrderItem(BaseModel, StatusMixin):
     seller_id = db.Column(db.Integer, db.ForeignKey("sellers.id"))
     quantity = db.Column(db.Integer)
     price = db.Column(MONEY)
+    # What was actually bought, frozen at the moment of buying.
+    #
+    # `price` has always been a snapshot; the name and the photo were not --
+    # they were read live off the product through the relationship. So a
+    # seller who edited a listing after a sale changed what the buyer saw in
+    # their own order history, and the app now lets sellers change photos,
+    # which is precisely the bait-and-switch that makes this worth storing.
+    #
+    # Nullable, and read with the live product as a fallback: orders placed
+    # before this shipped have no snapshot and must still render.
+    product_name = db.Column(db.String(255), nullable=True)
+    product_image_url = db.Column(db.String(500), nullable=True)
     # When this item was marked DELIVERED -- starts the settlement hold
     # (Phase 0: 12h). Set by whichever path transitions the item, never by
     # WalletService itself.
