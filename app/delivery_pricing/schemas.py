@@ -38,6 +38,15 @@ class QuoteSchema(Schema):
     expires_at = fields.DateTime(dump_only=True)
     strategy = fields.Str(dump_only=True)
     strategy_version = fields.Str(dump_only=True)
+    #: Whether sharing a run is on offer at all. The client cannot know --
+    #: it is a deployment flag -- and offering a choice that does not exist
+    #: is worse than not offering it.
+    batch_available = fields.Method("get_batch_available", dump_only=True)
+
+    def get_batch_available(self, obj):
+        from .batch import batch_enabled
+
+        return batch_enabled()
 
 
 class ServiceabilityQuerySchema(Schema):

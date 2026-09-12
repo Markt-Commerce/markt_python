@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -10,6 +11,7 @@ from typing import Optional, Tuple
 from app.libs.errors import APIError, ConflictError, NotFoundError, ValidationError
 from app.libs.geo import haversine_km, is_valid_coordinate
 from app.libs.session import session_scope
+from external.redis import redis_client
 
 from .fees import QuoteContext, get_strategy
 from .models import (
@@ -21,6 +23,10 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: One hour. Long enough that the constant re-asking costs nothing,
+#: short enough that switching a city on does not need a cache flush.
+SERVICEABILITY_CACHE_TTL = 3600
 
 
 class NotServiceable(APIError):
@@ -55,6 +61,51 @@ class Serviceability:
 
 class ServiceabilityService:
     """Whether we deliver between two points, and at what base rate."""
+
+    @staticmethod
+    def serviceable_summary(session, lat: float, lng: float) -> dict:
+        """Cached answer to "do we deliver here at all".
+
+        Cached because it is the one delivery call that runs constantly and
+        answers the same thing every time: the app asks on every address
+        change and every cart view, while the served-area map changes a few
+        times a year. Without this, every keystroke-adjacent address change
+        is a full table scan of every active zone.
+
+        Keyed on coordinates rounded to 4 decimal places -- about 11 metres,
+        far finer than a zone boundary, so two lookups that round together
+        genuinely have the same answer. Rounding is also what makes the cache
+        useful at all: raw GPS never repeats.
+
+        Deliberately short-lived anyway. Switching a city on should take
+        effect within the hour without anyone flushing anything, and a stale
+        "we don't deliver here" is the expensive kind of wrong.
+        """
+        key = f"delivery:serviceable:{round(lat, 4)}:{round(lng, 4)}"
+        try:
+            cached = redis_client.get(key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            # A cache that cannot be read is not a reason to refuse to
+            # answer; fall through to the database.
+            logger.debug("Serviceability cache unavailable", exc_info=True)
+
+        zone = ServiceabilityService.zone_for_point(session, lat, lng)
+        result = (
+            {"serviceable": False, "city": None, "zone": None}
+            if zone is None
+            else {
+                "serviceable": True,
+                "city": zone.city.name if zone.city else None,
+                "zone": zone.name,
+            }
+        )
+        try:
+            redis_client.setex(key, SERVICEABILITY_CACHE_TTL, json.dumps(result))
+        except Exception:
+            logger.debug("Could not cache serviceability", exc_info=True)
+        return result
 
     @staticmethod
     def zone_for_point(session, lat: float, lng: float) -> Optional[ServiceZone]:

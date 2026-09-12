@@ -47,16 +47,9 @@ class ServiceableCheck(MethodView):
         signing up for should be able to find out if we reach them.
         """
         with read_scope() as session:
-            zone = ServiceabilityService.zone_for_point(
+            return ServiceabilityService.serviceable_summary(
                 session, args["latitude"], args["longitude"]
             )
-            if zone is None:
-                return {"serviceable": False, "city": None, "zone": None}
-            return {
-                "serviceable": True,
-                "city": zone.city.name if zone.city else None,
-                "zone": zone.name,
-            }
 
 
 @bp.route("/quote")
