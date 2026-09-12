@@ -1182,7 +1182,12 @@ class ProductService:
 
                 if status:
                     try:
-                        query = query.filter(Product.status == ProductStatus(status))
+                        # `Product.Status`, not the module-level ProductStatus.
+                        # They have identical members and are different
+                        # classes, and the column is mapped to this one — the
+                        # other binds as 'ProductStatus.DRAFT' and Postgres
+                        # rejects it.
+                        query = query.filter(Product.status == Product.Status(status))
                     except ValueError:
                         # An unknown status is a client bug, not a reason to
                         # return the whole catalogue as though nothing was asked.
@@ -1206,6 +1211,13 @@ class ProductService:
                         "page": page,
                         "per_page": per_page,
                         "total": total,
+                        # PaginationSchema declares `total_items`, so `total`
+                        # alone was dropped in serialisation and the client
+                        # never learned how many products matched — it could
+                        # count pages but not results. Both are sent: `total`
+                        # for anything already reading it, `total_items` for
+                        # the schema.
+                        "total_items": total,
                         "total_pages": total_pages,
                         "has_next": has_next,
                         "has_prev": has_prev,

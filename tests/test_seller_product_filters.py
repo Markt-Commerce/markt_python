@@ -16,7 +16,7 @@ import pytest
 
 from app.libs.errors import ValidationError
 from app.products import services
-from app.products.models import ProductStatus
+from app.products.models import Product, ProductStatus
 from app.products.services import LOW_STOCK_THRESHOLD, ProductService
 
 
@@ -92,6 +92,34 @@ def test_every_real_status_is_accepted():
     for status in ProductStatus:
         chain, _ = _run(status=status.value)
         assert any("status" in str(f).lower() for f in chain.filters)
+
+
+def test_status_uses_the_enum_the_column_is_mapped_to():
+    """There are two enums with identical members: a module-level
+    `ProductStatus` and the nested `Product.Status` the column actually uses.
+
+    Filtering with the wrong one binds as the string 'ProductStatus.DRAFT'
+    and Postgres rejects it — a 500 that only appears against a real
+    database, which is exactly how it got past the first run of these tests.
+    """
+    assert ProductStatus is not Product.Status
+    chain, _ = _run(status="draft")
+    bound = [
+        f.right.value
+        for f in chain.filters
+        if hasattr(f, "right") and hasattr(f.right, "value")
+    ]
+    assert (
+        Product.Status.DRAFT in bound
+    ), "the filter must bind Product.Status, not the module-level enum"
+
+
+def test_the_pagination_carries_a_usable_count():
+    """PaginationSchema declares `total_items`; the service used to emit only
+    `total`, so serialisation dropped it and the client could count pages but
+    never results."""
+    _, result = _run()
+    assert "total_items" in result["pagination"]
 
 
 def test_low_stock_filters_on_the_threshold():
