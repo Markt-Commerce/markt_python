@@ -123,6 +123,16 @@ class CartService:
             if product.status.value != "active":
                 raise ValidationError("Product is not available for purchase")
 
+            # A user who sells and buys is one account with two modes, so
+            # nothing stopped a seller adding their own product in buyer mode
+            # -- they could pay themselves, minus Markt's fee, and the order
+            # would then open a fulfilment window against the very shop that
+            # placed it. Checked on the server because the app's own guard is
+            # a courtesy: the endpoint is the thing that has to hold.
+            seller_account = getattr(user, "seller_account", None)
+            if seller_account is not None and product.seller_id == seller_account.id:
+                raise ValidationError("This is your own product.")
+
             # Handle variant_id properly - convert 0 to None for products without variants
             if variant_id == 0:
                 variant_id = None
