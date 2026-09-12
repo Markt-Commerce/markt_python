@@ -286,3 +286,35 @@ def test_a_delivery_that_cannot_be_attached_never_voids_a_paid_order(monkeypatch
     session = _Session()
     PaymentService._attach_paid_delivery(session, _PaidOrder(), _paid_snapshot())
     assert session.added == []  # nothing attached, and crucially no raise
+
+
+# --- money into a JSON column ----------------------------------------------
+
+
+def test_decimals_survive_a_json_column():
+    """Decimal is not JSON serializable, and the payment-first checkout puts a
+    dict full of money into one. Unfixed, this raised at flush time -- from
+    inside SQLAlchemy, after the request had done all its work, with a
+    traceback naming the serializer rather than the money."""
+    import json
+    from app.libs.money import json_safe
+
+    snapshot = {
+        "subtotal": Decimal("10000.00"),
+        "shipping_fee": Decimal("500.00"),
+        "items": [{"price": Decimal("5000.00"), "quantity": 2}],
+        "nested": {"deep": [{"fee": Decimal("0.01")}]},
+    }
+    # The real assertion: it serialises at all.
+    round_tripped = json.loads(json.dumps(json_safe(snapshot)))
+    assert round_tripped["subtotal"] == 10000.0
+    assert round_tripped["shipping_fee"] == 500.0
+    assert round_tripped["items"][0]["price"] == 5000.0
+    assert round_tripped["nested"]["deep"][0]["fee"] == 0.01
+
+
+def test_json_safe_leaves_everything_else_alone():
+    from app.libs.money import json_safe
+
+    original = {"s": "text", "i": 3, "f": 1.5, "b": True, "n": None, "l": [1, "two"]}
+    assert json_safe(original) == original

@@ -96,3 +96,23 @@ def from_subunit(minor: Optional[int]) -> Optional[Decimal]:
         # is never what anyone meant.
         raise TypeError(f"Minor units must be an int, got {type(minor).__name__}")
     return (Decimal(minor) / 100).quantize(CENTS, rounding=ROUND_HALF_UP)
+
+
+def json_safe(value):
+    """Recursively make a structure safe to store in a JSON column.
+
+    Decimal is not JSON serializable, so a dict carrying money straight into a
+    JSON column raises at flush time -- after the request has done its work,
+    from inside SQLAlchemy, with a traceback that names the serializer rather
+    than the money. Converts through :func:`money_to_float`, which is exact at
+    the 2dp NUMERIC(12,2) holds.
+
+    Only Decimals are touched; everything else is passed through unchanged.
+    """
+    if isinstance(value, Decimal):
+        return money_to_float(value)
+    if isinstance(value, dict):
+        return {k: json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+    return value

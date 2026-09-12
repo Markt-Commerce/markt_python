@@ -15,7 +15,7 @@ from external.redis import redis_client
 from app.libs.session import session_scope
 from decimal import Decimal
 
-from app.libs.money import to_money, to_subunit, from_subunit
+from app.libs.money import to_money, to_subunit, from_subunit, json_safe
 from app.libs.errors import (
     NotFoundError,
     ValidationError,
@@ -641,28 +641,43 @@ class PaymentService:
                 method=PaymentMethod.CARD,
                 status=PaymentStatus.PENDING,
                 gateway_response={},
-                pending_checkout_data={
-                    "items": items_snapshot,
-                    "shipping_address": shipping_normalized,
-                    "fulfilment_preference": checkout_data.get(
-                        "fulfilment_preference", "auto"
-                    ),
-                    # Carried so completion can attach the delivery to the
-                    # order it finally creates.
-                    "delivery_quote_id": delivery_quote_id,
-                    "batch_opt_in": bool(checkout_data.get("batch_opt_in", False)),
-                    **breakdown,
-                },
+                # Through json_safe: this is a JSON column, the snapshot is
+                # full of money, and Decimal does not serialise. Without it
+                # the whole payment-first checkout fails at flush time.
+                pending_checkout_data=json_safe(
+                    {
+                        "items": items_snapshot,
+                        "shipping_address": shipping_normalized,
+                        "fulfilment_preference": checkout_data.get(
+                            "fulfilment_preference", "auto"
+                        ),
+                        # Carried so completion can attach the delivery to the
+                        # order it finally creates.
+                        "delivery_quote_id": delivery_quote_id,
+                        "batch_opt_in": bool(checkout_data.get("batch_opt_in", False)),
+                        **breakdown,
+                    }
+                ),
                 idempotency_key=idempotency_key or str(uuid.uuid4()),
             )
             session.add(payment)
             session.flush()
 
-            PaymentService._initialize_paystack_transaction_for_checkout(
-                payment,
-                buyer.user.email,
-                platform=checkout_data.get("platform", "web"),
-            )
+            try:
+                PaymentService._initialize_paystack_transaction_for_checkout(
+                    payment,
+                    buyer.user.email,
+                    platform=checkout_data.get("platform", "web"),
+                )
+            except Exception:
+                # The reservations were taken before this point and are held in
+                # their own transaction, so the rollback about to happen will
+                # not free them. They would lapse on their own at the TTL, but
+                # that is up to ten minutes of stock held for a checkout that
+                # already failed -- long enough for the next buyer to be told
+                # an in-stock item is unavailable.
+                InventoryService.release_reservations(reserved_ids)
+                raise
 
             PaymentService._cache_payment(payment)
             return payment
