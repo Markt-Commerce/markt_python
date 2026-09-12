@@ -187,8 +187,32 @@ class UserLogin(MethodView):
                 logger.warning(f"gamification daily_login emit failed: {e}")
             return user
         except UnverifiedEmailError as e:
-            # Return structured payload that frontend can detect easily
-            abort(e.status_code, **e.to_dict())
+            # An unfinished signup, not a failed one. Send a fresh code so the
+            # client can go straight to the code screen with something already
+            # on its way, rather than telling the user to do something no
+            # phone can do.
+            #
+            # Safe from an unauthenticated endpoint: login_user checks the
+            # password before it reaches this, so only someone who knows it
+            # can trigger a send, and verification.assert_can_send still
+            # applies its cooldown and hourly cap.
+            #
+            # `code_sent` reports what actually happened -- a rate limit or a
+            # mail outage means the code screen should offer "resend" rather
+            # than claim one is coming.
+            sent = AuthService.try_send_email_verification(
+                (e.payload or {}).get("email")
+            )
+            # Re-raised rather than aborted. flask-smorest's `abort` keeps
+            # only `message`/`errors` and silently drops everything else, so
+            # the "structured payload the frontend can detect" this used to
+            # pass never once reached a client -- which is why the app was
+            # reduced to substring-matching the message text. Raising lets it
+            # reach main.errors.handle_error, which serialises the payload.
+            raise UnverifiedEmailError(
+                e.message,
+                payload={**(e.payload or {}), "code_sent": bool(sent)},
+            )
         except AuthError as e:
             abort(e.status_code, message=e.message)
 
