@@ -15,7 +15,7 @@ from external.redis import redis_client
 from app.libs.session import session_scope
 from decimal import Decimal
 
-from app.libs.money import to_money, to_subunit
+from app.libs.money import to_money, to_subunit, from_subunit
 from app.libs.errors import (
     NotFoundError,
     ValidationError,
@@ -254,6 +254,8 @@ class PaymentService:
             )
             payment.order_id = order.id
 
+            PaymentService._attach_paid_delivery(session, order, snapshot)
+
             failed_reservation_ids = set(
                 InventoryService.confirm_reservations(
                     session,
@@ -332,6 +334,66 @@ class PaymentService:
 
         PaymentService._invalidate_payment_cache(payment_id_for_cache)
         return True
+
+    @staticmethod
+    def _attach_paid_delivery(session, order, snapshot: Dict[str, Any]) -> None:
+        """Attach the delivery to an order built from a paid checkout.
+
+        Runs inside the completion transaction, so the order and its delivery
+        commit together or not at all.
+
+        Nothing here is allowed to fail the completion. The buyer has paid;
+        the order must exist. A delivery that could not be attached is logged
+        loudly and left for an operator, because the alternative -- rolling
+        back an order someone has already been charged for -- is worse than
+        any bookkeeping gap.
+        """
+        quote_id = (snapshot or {}).get("delivery_quote_id")
+        if not quote_id:
+            return
+
+        try:
+            from app.delivery_pricing.services import QuoteService
+            from app.delivery_pricing.order_delivery import OrderDelivery
+
+            quote = QuoteService.consume(
+                session,
+                quote_id,
+                order.buyer_id,
+                order.id,
+                # Already paid. See consume() for why expiry stops applying
+                # at this point.
+                allow_expired=True,
+            )
+
+            delivery = OrderDelivery()
+            delivery.order_id = order.id
+            delivery.quote_id = quote.id
+            delivery.fee_minor = quote.fee_minor
+            delivery.breakdown = quote.breakdown
+            delivery.distance_km = quote.distance_km
+            delivery.strategy = quote.strategy
+            delivery.strategy_version = quote.strategy_version
+            delivery.pickup_lat = quote.pickup_lat
+            delivery.pickup_lng = quote.pickup_lng
+            delivery.dropoff_lat = quote.dropoff_lat
+            delivery.dropoff_lng = quote.dropoff_lng
+            delivery.solo_fee_minor = quote.fee_minor
+            delivery.batch_opt_in = bool(snapshot.get("batch_opt_in", False))
+            session.add(delivery)
+            logger.info(
+                "Order %s took delivery quote %s (%s kobo)",
+                order.id,
+                quote.id,
+                quote.fee_minor,
+            )
+        except Exception:
+            logger.exception(
+                "Could not attach delivery quote %s to paid order %s -- the "
+                "order stands and needs a delivery record created by hand",
+                quote_id,
+                order.id,
+            )
 
     @staticmethod
     def _emit_payment_confirmed(payment: Payment):
@@ -478,9 +540,15 @@ class PaymentService:
 
         with session_scope() as session:
             if idempotency_key:
+                # Scoped to the buyer, like checkout_cart's equivalent lookup.
+                # Unscoped, a key that was guessed or leaked from another
+                # account returned that account's Payment -- and a Payment
+                # carries pending_checkout_data, which holds their shipping
+                # address. A retry key is not a credential and must never be
+                # able to act as one.
                 existing = (
                     session.query(Payment)
-                    .filter_by(idempotency_key=idempotency_key)
+                    .filter_by(idempotency_key=idempotency_key, buyer_id=buyer_id)
                     .first()
                 )
                 if existing:
@@ -503,10 +571,29 @@ class PaymentService:
             )
 
             subtotal = cart.subtotal()
-            shipping_fee = CartService._calculate_shipping_fee(
-                cart, shipping_normalized
-            )
             delivery_count = CartService.count_distinct_deliveries(cart)
+
+            # A quote is read here, not consumed: this flow charges the buyer
+            # before any order exists, and a quote is attached to an order.
+            # complete_checkout_payment consumes it once there is something to
+            # attach it to. Reading it now is what makes the buyer pay the fee
+            # they were actually shown.
+            delivery_quote_id = checkout_data.get("delivery_quote_id")
+            if delivery_quote_id:
+                from app.delivery_pricing.services import QuoteService
+
+                if delivery_count > 1:
+                    raise ValidationError(
+                        "This basket has items from more than one market, "
+                        "which needs a delivery quote per market. Please check "
+                        "out from one market at a time for now."
+                    )
+                quote = QuoteService.peek(session, delivery_quote_id, buyer_id)
+                shipping_fee = from_subunit(quote.fee_minor)
+            else:
+                shipping_fee = CartService._calculate_shipping_fee(
+                    cart, shipping_normalized
+                )
             # No tax/discount line here: Phase 0 deferred VAT (the old
             # flow's hardcoded 5% charge is a placeholder that contradicts
             # that decision) and there's no coupon system to discount
@@ -560,6 +647,10 @@ class PaymentService:
                     "fulfilment_preference": checkout_data.get(
                         "fulfilment_preference", "auto"
                     ),
+                    # Carried so completion can attach the delivery to the
+                    # order it finally creates.
+                    "delivery_quote_id": delivery_quote_id,
+                    "batch_opt_in": bool(checkout_data.get("batch_opt_in", False)),
                     **breakdown,
                 },
                 idempotency_key=idempotency_key or str(uuid.uuid4()),

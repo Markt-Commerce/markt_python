@@ -206,8 +206,46 @@ class QuoteService:
             return quote
 
     @staticmethod
-    def consume(session, quote_id: str, buyer_id: int, order_id: str) -> DeliveryQuote:
+    def peek(session, quote_id: str, buyer_id: int) -> DeliveryQuote:
+        """Read a quote without consuming it.
+
+        For the payment-first checkout, where the buyer pays before any order
+        exists. The fee has to be known to charge the right amount, but there
+        is nothing yet to attach the quote to -- so this validates and reads,
+        and consume() runs later when the order is created.
+
+        Deliberately not a lock: holding a row lock across a call to Paystack
+        would pin it for the length of a network round trip to a third party.
+        """
+        quote = (
+            session.query(DeliveryQuote).filter(DeliveryQuote.id == quote_id).first()
+        )
+        if quote is None or quote.buyer_id != buyer_id:
+            raise NotFoundError("Delivery quote not found")
+        if quote.status == QuoteStatus.CONSUMED:
+            raise ConflictError("This delivery quote has already been used.")
+        if quote.is_expired:
+            raise QuoteExpired()
+        return quote
+
+    @staticmethod
+    def consume(
+        session,
+        quote_id: str,
+        buyer_id: int,
+        order_id: str,
+        *,
+        allow_expired: bool = False,
+    ) -> DeliveryQuote:
         """Lock a quote to an order, exactly once.
+
+        `allow_expired` is for the one case where refusing an expired quote
+        would be the wrong answer: the buyer has already paid. A quote expires
+        to stop a stale price being used to *start* a purchase, not to void one
+        that has completed. Between paying and the webhook landing, a slow
+        gateway can easily outlast the fifteen-minute window -- and taking
+        someone's money and then refusing to record what they bought is not a
+        defensible way to enforce a TTL. The expiry is logged instead.
 
         Takes a row lock and re-checks expiry *inside* it. Reading
         `is_usable` and then writing is a race: two checkout submissions a
@@ -232,8 +270,16 @@ class QuoteService:
                 return quote  # idempotent retry of the same checkout
             raise ConflictError("This delivery quote has already been used.")
         if quote.is_expired:
-            quote.status = QuoteStatus.EXPIRED
-            raise QuoteExpired()
+            if not allow_expired:
+                quote.status = QuoteStatus.EXPIRED
+                raise QuoteExpired()
+            logger.warning(
+                "Quote %s was consumed %s after expiring, for order %s -- "
+                "honouring it because the buyer has already paid",
+                quote.id,
+                datetime.utcnow() - quote.expires_at,
+                order_id,
+            )
 
         quote.status = QuoteStatus.CONSUMED
         quote.consumed_at = datetime.utcnow()

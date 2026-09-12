@@ -205,3 +205,84 @@ def test_a_single_market_basket_is_fine(consumed_quote):
     # Several items, one market: one journey, one quote.
     fee = _attach(_Session(), _Cart("mkt_a", "mkt_a", "mkt_a"))
     assert fee == Decimal("700.00")
+
+
+# --- the paid path ----------------------------------------------------------
+# Payment-first checkout charges before any order exists, so the quote is read
+# at payment time and consumed when the order is finally built.
+
+
+def _paid_snapshot(**kw):
+    snap = {"delivery_quote_id": "QT_1", "batch_opt_in": False}
+    snap.update(kw)
+    return snap
+
+
+class _PaidOrder:
+    id = "ORD_PAID_1"
+    buyer_id = 1
+
+
+def test_a_checkout_with_no_quote_attaches_nothing(monkeypatch):
+    from app.payments.services import PaymentService
+
+    session = _Session()
+    PaymentService._attach_paid_delivery(
+        session, _PaidOrder(), _paid_snapshot(delivery_quote_id=None)
+    )
+    assert session.added == []
+
+
+def test_the_paid_order_gets_the_delivery_it_paid_for(monkeypatch):
+    from app.delivery_pricing import services as quote_services
+    from app.payments.services import PaymentService
+
+    monkeypatch.setattr(
+        quote_services.QuoteService,
+        "consume",
+        staticmethod(lambda *a, **kw: _Quote()),
+    )
+    session = _Session()
+    PaymentService._attach_paid_delivery(
+        session, _PaidOrder(), _paid_snapshot(batch_opt_in=True)
+    )
+
+    (delivery,) = session.added
+    assert delivery.order_id == _PaidOrder.id
+    assert delivery.fee_minor == _Quote.fee_minor
+    assert delivery.solo_fee_minor == _Quote.fee_minor
+    assert delivery.batch_opt_in is True
+
+
+def test_an_expired_quote_is_still_honoured_once_the_money_is_taken(monkeypatch):
+    """The buyer has paid. A quote expires to stop a stale price starting a
+    purchase, not to void one that completed -- and a slow gateway can easily
+    outlast the fifteen-minute window."""
+    from app.delivery_pricing import services as quote_services
+    from app.payments.services import PaymentService
+
+    seen = {}
+
+    def _consume(session, quote_id, buyer_id, order_id, *, allow_expired=False):
+        seen["allow_expired"] = allow_expired
+        return _Quote()
+
+    monkeypatch.setattr(quote_services.QuoteService, "consume", staticmethod(_consume))
+    PaymentService._attach_paid_delivery(_Session(), _PaidOrder(), _paid_snapshot())
+    assert seen["allow_expired"] is True
+
+
+def test_a_delivery_that_cannot_be_attached_never_voids_a_paid_order(monkeypatch):
+    """The order must exist: the buyer has been charged. A missing delivery
+    row is a bookkeeping gap an operator can close; rolling back an order
+    someone already paid for is not recoverable."""
+    from app.delivery_pricing import services as quote_services
+    from app.payments.services import PaymentService
+
+    def _boom(*a, **kw):
+        raise RuntimeError("quote row vanished")
+
+    monkeypatch.setattr(quote_services.QuoteService, "consume", staticmethod(_boom))
+    session = _Session()
+    PaymentService._attach_paid_delivery(session, _PaidOrder(), _paid_snapshot())
+    assert session.added == []  # nothing attached, and crucially no raise
