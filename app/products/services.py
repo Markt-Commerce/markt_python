@@ -316,6 +316,55 @@ class ProductService:
                         )
                         session.add(variant)
 
+                # Handle media updates if provided.
+                #
+                # ProductUpdateSchema has always advertised media_ids -- it is
+                # in the OpenAPI docs -- and this function silently dropped it,
+                # so a seller could never add a photo to a listing after
+                # creating it. Adding and improving photos after launch is
+                # ordinary selling behaviour, not an edge case.
+                #
+                # Absent means "leave the images alone"; an empty list means
+                # "remove them all". Those have to differ, or a caller
+                # updating only the price would wipe the photos.
+                if "media_ids" in update_data:
+                    media_ids = update_data["media_ids"] or []
+
+                    # Media is owned by a User; this function is given a
+                    # Seller. The seller's own user is who must own the photo.
+                    owner_user_id = getattr(product.seller, "user_id", None)
+
+                    # Verified before anything is deleted, so a bad id cannot
+                    # leave the product with no images at all.
+                    verified = []
+                    for media_id in media_ids:
+                        media = session.query(Media).get(media_id)
+                        if not media:
+                            raise ValidationError(f"Media {media_id} not found")
+                        if media.user_id != owner_user_id:
+                            raise ValidationError(
+                                f"Media {media_id} does not belong to you"
+                            )
+                        verified.append(media)
+
+                    session.query(ProductImage).filter_by(
+                        product_id=product_id
+                    ).delete()
+
+                    for idx, media in enumerate(verified):
+                        session.add(
+                            ProductImage(
+                                product_id=product.id,
+                                media_id=media.id,
+                                sort_order=idx,
+                                # The order the seller sent them in is the
+                                # order they meant, and the first is the one
+                                # shown in listings.
+                                is_featured=(idx == 0),
+                                alt_text=media.alt_text or f"Product image {idx + 1}",
+                            )
+                        )
+
                 # Handle category updates if provided
                 if "category_ids" in update_data:
                     # Remove existing category relationships

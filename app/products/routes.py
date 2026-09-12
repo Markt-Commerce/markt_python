@@ -64,6 +64,10 @@ class ProductDetail(MethodView):
         return ProductService.get_product(product_id)
 
     @login_required
+    # Without this, a buyer-only account reaches current_user.seller_account.id
+    # on a None and the refusal arrives as a 500. Same decorator the create
+    # and bulk endpoints above already use.
+    @seller_required
     @bp.arguments(ProductUpdateSchema)
     @bp.response(200, ProductSchema)
     def put(self, product_data, product_id):
@@ -76,6 +80,7 @@ class ProductDetail(MethodView):
         )
 
     @login_required
+    @seller_required
     @bp.response(204)
     def delete(self, product_id):
         """Delete product (owner only)"""
