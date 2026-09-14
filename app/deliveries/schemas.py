@@ -204,6 +204,11 @@ class DeliveryRunStopDetailSchema(Schema):
     seller_id = fields.Integer()
     seller_name = fields.String(allow_none=True)
     shop_address = fields.String(allow_none=True)
+    # Seller.shop_latitude/shop_longitude already exist for market-claim
+    # sanity-checking (see users/models.py) -- exposed here so the rider
+    # app can plot a real pickup pin instead of nothing.
+    lat = fields.Float(allow_none=True)
+    lng = fields.Float(allow_none=True)
     status = fields.String(validate=validate.OneOf(["pending", "arrived", "picked_up"]))
     arrived_at = fields.String(allow_none=True)
     picked_up_at = fields.String(allow_none=True)
@@ -213,6 +218,10 @@ class DeliveryRunOrderAddressSchema(Schema):
     street_address = fields.String(allow_none=True)
     city = fields.String(allow_none=True)
     state = fields.String(allow_none=True)
+    # Address.latitude/longitude already exist (orders/models.py) --
+    # exposed here for the same reason as the stop's lat/lng above.
+    lat = fields.Float(allow_none=True)
+    lng = fields.Float(allow_none=True)
 
 
 class DeliveryRunOrderDetailSchema(Schema):

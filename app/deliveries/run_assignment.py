@@ -281,6 +281,8 @@ class DeliveryRunAssignmentService:
                                 "street_address": shipping.street_address,
                                 "city": shipping.city,
                                 "state": shipping.state,
+                                "lat": shipping.latitude,
+                                "lng": shipping.longitude,
                             }
                             if shipping
                             else None
@@ -307,6 +309,8 @@ class DeliveryRunAssignmentService:
                         "shop_address": (
                             stop.seller.shop_address if stop.seller else None
                         ),
+                        "lat": stop.seller.shop_latitude if stop.seller else None,
+                        "lng": stop.seller.shop_longitude if stop.seller else None,
                         "status": stop.status.value,
                         "arrived_at": (
                             stop.arrived_at.isoformat() if stop.arrived_at else None
