@@ -370,7 +370,12 @@ def test_get_run_detail_builds_stops_and_orders(mock_accepted):
     )
     stop = SimpleNamespace(
         seller_id=7,
-        seller=SimpleNamespace(shop_name="Rice Shop", shop_address="Stall 4"),
+        seller=SimpleNamespace(
+            shop_name="Rice Shop",
+            shop_address="Stall 4",
+            shop_latitude=6.45,
+            shop_longitude=3.39,
+        ),
         status=DeliveryRunStopStatus.ARRIVED,
         arrived_at=None,
         picked_up_at=None,
@@ -384,7 +389,11 @@ def test_get_run_detail_builds_stops_and_orders(mock_accepted):
         order_number="1001",
         buyer=SimpleNamespace(buyername="Ada"),
         shipping_address=SimpleNamespace(
-            street_address="1 Main St", city="Ibadan", state="Oyo"
+            street_address="1 Main St",
+            city="Ibadan",
+            state="Oyo",
+            latitude=7.38,
+            longitude=3.90,
         ),
     )
 
@@ -421,6 +430,8 @@ def test_get_run_detail_builds_stops_and_orders(mock_accepted):
             "seller_id": 7,
             "seller_name": "Rice Shop",
             "shop_address": "Stall 4",
+            "lat": 6.45,
+            "lng": 3.39,
             "status": DeliveryRunStopStatus.ARRIVED.value,
             "arrived_at": None,
             "picked_up_at": None,
@@ -435,7 +446,85 @@ def test_get_run_detail_builds_stops_and_orders(mock_accepted):
                 "street_address": "1 Main St",
                 "city": "Ibadan",
                 "state": "Oyo",
+                "lat": 7.38,
+                "lng": 3.90,
             },
+            "pod_status": DeliveryRunOrderPodStatus.PENDING.value,
+            "delivered_at": None,
+        }
+    ]
+
+
+@patch("app.deliveries.pickup._accepted_assignment")
+def test_get_run_detail_handles_missing_seller_and_order(mock_accepted):
+    """A stop with no loaded seller, and a run_order whose Order lookup
+    misses, shouldn't blow up building lat/lng (or anything else) --
+    everything for that row should just come back None."""
+    mock_accepted.return_value = SimpleNamespace()
+
+    run = SimpleNamespace(
+        id="RUN_1",
+        status=DeliveryRunStatus.PICKUP_IN_PROGRESS,
+        market=None,
+        area=None,
+        price_per_order=None,
+    )
+    stop = SimpleNamespace(
+        seller_id=7,
+        seller=None,
+        status=DeliveryRunStopStatus.PENDING,
+        arrived_at=None,
+        picked_up_at=None,
+    )
+    run_order = SimpleNamespace(
+        order_id="ORD_1",
+        pod_status=DeliveryRunOrderPodStatus.PENDING,
+        delivered_at=None,
+    )
+
+    session = MagicMock()
+
+    def run_query(m):
+        m.options.return_value.filter_by.return_value.first.return_value = run
+
+    def stop_query(m):
+        m.options.return_value.filter_by.return_value.all.return_value = [stop]
+
+    def run_order_query(m):
+        m.filter_by.return_value.all.return_value = [run_order]
+
+    def order_query(m):
+        m.options.return_value.get.return_value = None
+
+    session.query.side_effect = _query_side_effect(
+        DeliveryRun=run_query,
+        DeliveryRunStop=stop_query,
+        DeliveryRunOrder=run_order_query,
+        Order=order_query,
+    )
+
+    with patch("app.deliveries.run_assignment.session_scope") as mock_scope:
+        mock_scope.return_value.__enter__.return_value = session
+        result = DeliveryRunAssignmentService.get_run_detail("DEL_1", "RUN_1")
+
+    assert result["stops"] == [
+        {
+            "seller_id": 7,
+            "seller_name": None,
+            "shop_address": None,
+            "lat": None,
+            "lng": None,
+            "status": DeliveryRunStopStatus.PENDING.value,
+            "arrived_at": None,
+            "picked_up_at": None,
+        }
+    ]
+    assert result["orders"] == [
+        {
+            "order_id": "ORD_1",
+            "order_number": None,
+            "buyer_name": None,
+            "delivery_address": None,
             "pod_status": DeliveryRunOrderPodStatus.PENDING.value,
             "delivered_at": None,
         }
