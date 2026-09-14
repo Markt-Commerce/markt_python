@@ -79,9 +79,11 @@ class DetailedHealthCheck(MethodView):
 
         # Application metrics
         health_status["components"]["application"] = {
-            "uptime": time.time() - current_app.start_time
-            if hasattr(current_app, "start_time")
-            else None,
+            "uptime": (
+                time.time() - current_app.start_time
+                if hasattr(current_app, "start_time")
+                else None
+            ),
             "active_connections": self._get_active_connections(),
             "request_count": self._get_request_count(),
         }
@@ -230,9 +232,11 @@ class StatusEndpoint(MethodView):
             "timestamp": time.time(),
             "version": "1.0.0",
             "environment": current_app.config.get("ENV", "development"),
-            "uptime": time.time() - current_app.start_time
-            if hasattr(current_app, "start_time")
-            else None,
+            "uptime": (
+                time.time() - current_app.start_time
+                if hasattr(current_app, "start_time")
+                else None
+            ),
             "business_metrics": self._get_business_metrics(),
             "system_metrics": self._get_system_metrics(),
             "dependencies": self._get_dependency_status(),

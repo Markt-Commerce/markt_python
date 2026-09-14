@@ -2,6 +2,7 @@
 Real-time event tasks for async socket emissions
 This module handles socket events asynchronously to decouple them from API responses
 """
+
 import logging
 from datetime import datetime
 from celery import current_task

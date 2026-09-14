@@ -1,5 +1,7 @@
 # python imports
 import random
+import re
+import uuid
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -12,12 +14,26 @@ from sqlalchemy import func, and_, or_
 from external.redis import redis_client
 from external.database import db
 from app.libs.session import session_scope
-from app.libs.errors import AuthError, NotFoundError, APIError, UnverifiedEmailError
+from app.libs.errors import (
+    AuthError,
+    NotFoundError,
+    APIError,
+    ConflictError,
+    UnverifiedEmailError,
+)
 from app.libs.pagination import Paginator
+from app.libs.geo import (
+    RADIUS_LADDER_KM,
+    bounding_box,
+    haversine_km,
+    is_valid_coordinate,
+)
 from app.libs.email_service import email_service
 
 from app.products.models import Product
 from app.socials.models import Post, PostStatus, Follow, ProductView
+from .models import SocialAccount
+from . import verification
 from app.media.services import media_service
 from app.media.models import Media, MediaVariantType, MediaVariant
 from app.categories.models import Category, SellerCategory
@@ -26,6 +42,7 @@ from app.orders.models import OrderItem
 
 # app imports
 from .models import User, Buyer, Seller, UserAddress, SellerVerificationStatus
+from .schemas import shop_address_line
 from .constants import (
     RESERVED_USERNAMES,
     PROFILE_SETUP_HREF,
@@ -38,21 +55,137 @@ from .constants import (
 logger = logging.getLogger(__name__)
 
 
+def _release_unverified_account(session, user) -> None:
+    """Free an address held by an account that never proved it owns it.
+
+    Only ever called for an account with `email_verified` false, which cannot
+    sign in and cannot transact -- so there is nothing here worth preserving
+    and nobody to ask. The profile rows go first because they hold foreign
+    keys into users.
+
+    Kept narrow on purpose: it deletes the identity and the two profile rows
+    and nothing else. If an unverified account ever manages to acquire orders
+    or a wallet, this raises rather than cascading, because deleting those is
+    not a decision this function should be making.
+    """
+    from app.orders.models import Order
+
+    if user.is_buyer:
+        buyer = session.query(Buyer).filter_by(user_id=user.id).first()
+        if buyer:
+            has_orders = (
+                session.query(Order).filter(Order.buyer_id == buyer.id).first()
+                is not None
+            )
+            if has_orders:
+                raise ConflictError("Email already registered")
+            session.delete(buyer)
+
+    if user.is_seller:
+        seller = session.query(Seller).filter_by(user_id=user.id).first()
+        if seller:
+            session.query(SellerCategory).filter_by(seller_id=seller.id).delete()
+            session.delete(seller)
+
+    session.query(UserAddress).filter_by(user_id=user.id).delete()
+    session.delete(user)
+    session.flush()
+
+
+def unique_username(session, seed: Optional[str]) -> str:
+    """A free username derived from a display name or an email address.
+
+    `username` is unique NOT NULL, but neither an OAuth provider nor the new
+    first-screen registration gives us one -- so one has to be minted.
+    Suffixed and retried on collision rather than trusting a single attempt:
+    two people called "Ada Obi" will collide, and so will two ada@ addresses
+    at different domains.
+    """
+    base = re.sub(r"[^a-zA-Z0-9_]", "", (seed or "").split("@")[0]) or "markt"
+    base = base[:14].lower() or "markt"
+    if len(base) < 3:
+        base = f"{base}user"
+
+    for _ in range(12):
+        candidate = f"{base}{random.randint(1000, 9999)}"
+        if not session.query(User).filter(User.username == candidate).first():
+            return candidate
+
+    # Vanishingly unlikely; a uuid tail is still better than raising at
+    # someone mid sign-in.
+    return f"{base}{uuid.uuid4().hex[:8]}"
+
+
+def shop_slug_for(session, shop_name: str, seller_id=None) -> str:
+    """A unique URL slug for a shop name.
+
+    `shop_slug` is a unique column that nothing ever wrote -- registration
+    left it NULL for every seller ever created, so no shop had a canonical
+    URL. Postgres allows many NULLs in a unique column, which is why this
+    never surfaced as an error.
+    """
+    base = re.sub(r"[^a-z0-9]+", "-", (shop_name or "").lower()).strip("-")[:90]
+    if len(base) < 2:
+        base = "shop"
+
+    for attempt in range(12):
+        candidate = base if attempt == 0 else f"{base}-{random.randint(100, 9999)}"
+        clash = session.query(Seller).filter(Seller.shop_slug == candidate).first()
+        if not clash or (seller_id is not None and clash.id == seller_id):
+            return candidate
+
+    return f"{base}-{uuid.uuid4().hex[:8]}"
+
+
 class AuthService:
     @staticmethod
     def register_user(data):
-        with session_scope() as session:
-            # Check existing user
-            if session.query(User).filter(User.email == data["email"]).first():
-                raise AuthError("Email already registered")
+        """Create the account from whatever the first screen collected.
 
-            if session.query(User).filter(User.username == data["username"]).first():
-                raise AuthError("Username already taken")
+        Everything except email, password and role is optional now. The
+        profile is filled in afterwards through the authenticated PATCH
+        endpoints -- see app/users/onboarding.py for why the order changed.
+        """
+        with session_scope() as session:
+            # An address is only *taken* once someone has proved they own it.
+            #
+            # Creating the account before verification is the standard shape --
+            # the code has to attach to something, and holding a half-finished
+            # signup only in memory is what made closing the app lose
+            # everything. The risk it introduces is squatting: sign up with
+            # someone else's address and they can never register.
+            #
+            # This closes that. An existing account that never verified has no
+            # claim on the address, so the person arriving now takes it. They
+            # lose nothing either way: an unverified account cannot sign in
+            # (login refuses it) and cannot transact (see verified_required).
+            #
+            # A verified account is untouchable, which is the case that
+            # matters.
+            existing = session.query(User).filter(User.email == data["email"]).first()
+            if existing:
+                if existing.email_verified or existing.deleted_at is not None:
+                    raise ConflictError("Email already registered")
+                logger.info(
+                    "Reclaiming unverified account %s for %s",
+                    existing.id,
+                    data["email"],
+                )
+                _release_unverified_account(session, existing)
+
+            # A client that chose a username must still get it, and must still
+            # be told when it is taken. One that sent none gets a minted one.
+            username = (data.get("username") or "").strip()
+            if username:
+                if session.query(User).filter(User.username == username).first():
+                    raise ConflictError("Username already taken")
+            else:
+                username = unique_username(session, data["email"])
 
             # Create user
             user = User(
                 email=data["email"],
-                username=data["username"],
+                username=username,
                 phone_number=data.get("phone_number"),
                 is_buyer=(data["account_type"] == "buyer"),
                 is_seller=(data["account_type"] == "seller"),
@@ -66,29 +199,37 @@ class AuthService:
                 address = UserAddress(user_id=user.id, **data["address"])
                 session.add(address)
 
-            # Create buyer/seller profile
+            # Create the role's profile row, empty if the details have not been
+            # asked for yet. The row has to exist either way: `is_buyer` with
+            # no Buyer row is the state every "Buyer account not found" bug
+            # comes from, and the PATCH endpoints need something to update.
+            buyer_data = data.get("buyer_data") or {}
+            seller_data = data.get("seller_data") or {}
+
             if data["account_type"] == "buyer":
                 buyer = Buyer(
                     user_id=user.id,
-                    buyername=data["buyer_data"]["buyername"],
-                    shipping_address=data["buyer_data"].get("shipping_address"),
+                    buyername=buyer_data.get("buyername"),
+                    shipping_address=buyer_data.get("shipping_address"),
                 )
                 session.add(buyer)
             else:
+                shop_name = seller_data.get("shop_name")
                 seller = Seller(
                     user_id=user.id,
-                    shop_name=data["seller_data"]["shop_name"],
-                    description=data["seller_data"]["description"],
-                    policies=data["seller_data"].get("policies", {}),
+                    shop_name=shop_name,
+                    description=seller_data.get("description"),
+                    policies=seller_data.get("policies", {}),
+                    # Only once there is a name to derive it from; the shop
+                    # screen sets it later otherwise.
+                    shop_slug=shop_slug_for(session, shop_name) if shop_name else None,
                 )
                 session.add(seller)
                 session.flush()  # Get the seller ID
 
                 # Handle category relationships
-                if "category_ids" in data["seller_data"]:
-                    for idx, category_id in enumerate(
-                        data["seller_data"]["category_ids"]
-                    ):
+                if seller_data.get("category_ids"):
+                    for idx, category_id in enumerate(seller_data["category_ids"]):
                         # Verify category exists
                         category = session.query(Category).get(category_id)
                         if not category:
@@ -107,13 +248,38 @@ class AuthService:
             UserService._cache_current_role(user.id, user.current_role)
 
             session.commit()
-            return user
+
+            email = user.email
+
+        # Outside the transaction, and deliberately best-effort: the code is
+        # sent here so it is waiting when the verification screen opens, but a
+        # mail outage must not destroy an account that is already committed.
+        # The verification screen can always resend.
+        AuthService.try_send_email_verification(email)
+        return user
+
+    @staticmethod
+    def try_send_email_verification(email: str) -> bool:
+        """send_email_verification, but a failure is logged rather than raised.
+
+        For the paths where the code is a convenience -- sent alongside
+        something else that has already succeeded -- rather than the thing the
+        caller asked for.
+        """
+        try:
+            return AuthService.send_email_verification(email)
+        except Exception as e:  # noqa: BLE001 - deliberately swallowed
+            logger.warning("Could not send verification code to %s: %s", email, e)
+            return False
 
     @staticmethod
     def login_user(email, password, account_type=None):
         with session_scope() as session:
             user = session.query(User).filter(User.email == email).first()
-            if not user or not user.check_password(password):
+            # Deleted accounts are indistinguishable from non-existent ones
+            # here on purpose -- "Invalid credentials" rather than confirming
+            # that an account once existed at this address.
+            if not user or user.deleted_at or not user.check_password(password):
                 raise AuthError("Invalid credentials")
 
             # Check if user is active
@@ -160,10 +326,19 @@ class AuthService:
             else:
                 raise AuthError("Invalid account type")
 
-            # Check email verification for new accounts
+            # Signing in with an account that never verified is not an error,
+            # it is an unfinished signup. Someone who closed the app before
+            # entering the code has no way back in otherwise -- the old
+            # response told them to "use the email verification endpoint",
+            # which is not a thing anyone holding a phone can do.
+            #
+            # So the route sends a fresh code off the back of this and the
+            # client shows the code screen. The send lives there rather than
+            # here because it opens its own session and commits -- doing that
+            # inside this transaction is how you get a half-written login.
             if not user.email_verified:
                 raise UnverifiedEmailError(
-                    "Please verify your email address before logging in. Use the email verification endpoint to send a verification code.",
+                    "Your email address hasn't been verified yet.",
                     payload={"email": user.email},
                 )
 
@@ -238,8 +413,13 @@ class AuthService:
 
     @staticmethod
     def generate_verification_code():
-        """Generate a 6-digit verification code"""
-        return str(random.randint(100000, 999999))
+        """A 6-digit code from a cryptographically secure source.
+
+        See app/users/verification.py: this used `random.randint`, a Mersenne
+        Twister, whose state is recoverable from enough outputs. Fine for
+        shuffling a feed, not for a credential.
+        """
+        return verification.generate_code()
 
     @staticmethod
     def send_email_verification(email: str):
@@ -251,6 +431,10 @@ class AuthService:
 
             if user.email_verified:
                 raise AuthError("Email already verified")
+
+            # Refuse before generating: an unlimited resend is a free way to
+            # use Markt's mail quota to send someone email they did not ask for.
+            verification.assert_can_send(user.email)
 
             # Generate verification code
             verification_code = AuthService.generate_verification_code()
@@ -272,6 +456,10 @@ class AuthService:
                 redis_client.delete_verification_code(user.email)
                 raise AuthError("Failed to send verification email")
 
+            # Only counted once the mail actually went out, so a provider
+            # outage does not burn the user's hourly allowance.
+            verification.record_send(user.email)
+
             return True
 
     @staticmethod
@@ -285,17 +473,158 @@ class AuthService:
             if user.email_verified:
                 raise AuthError("Email already verified")
 
-            # Verify code from Redis
+            # A 6-digit code with unlimited attempts is a 1-in-a-million guess
+            # repeated as fast as requests can be sent. Nothing counted before.
+            verification.assert_can_attempt(user.email)
+
             if not redis_client.verify_verification_code(user.email, verification_code):
-                raise AuthError("Invalid or expired verification code")
+                remaining = verification.record_failure(user.email)
+                raise AuthError(
+                    "That code isn't right."
+                    + (
+                        f" {remaining} attempt{'s' if remaining != 1 else ''} left."
+                        if remaining
+                        else " Please request a new one."
+                    )
+                )
 
             # Mark email as verified
             user.email_verified = True
 
             # Clean up verification code from Redis
             redis_client.delete_verification_code(user.email)
+            # Counters cleared so a later email change starts fresh.
+            verification.clear(user.email)
 
-            return True
+            # Returned rather than True: the route issues this account's
+            # credentials off the back of it, because this is the moment the
+            # account becomes usable.
+            return user
+
+
+class SocialAuthService:
+    """Sign-in with a verified third-party identity.
+
+    The token is verified before anything here runs (app/users/oauth.py); this
+    decides which Markt account a verified identity belongs to.
+
+    Three cases, in priority order:
+
+    1. **Known identity** -- (provider, sub) already linked. Sign that user in.
+       Checked first so a user who changed their email still lands on their own
+       account.
+    2. **Email collision** -- no link yet, but the address belongs to an
+       existing account. Auto-linked *only* when the provider asserts the email
+       is verified. If it does not, we refuse with 409 and make them prove
+       ownership with their password. An unverified provider email is an
+       account-takeover vector: sign up to that provider with someone else's
+       address and you would inherit their Markt account.
+    3. **New user** -- create the account, with no password. `password_hash` is
+       already nullable, so an OAuth-only user needs no placeholder secret.
+    """
+
+    PROVIDERS = ("google", "apple")
+
+    @staticmethod
+    def _unique_username(session, seed: Optional[str]) -> str:
+        """Kept as an alias: this was a SocialAuthService detail until email
+        registration needed the same thing."""
+        return unique_username(session, seed)
+
+    @staticmethod
+    def authenticate(identity: Dict[str, Any], *, name_hint: Optional[str] = None):
+        """Return (user, created) for a verified provider identity."""
+        provider = identity["provider"]
+        if provider not in SocialAuthService.PROVIDERS:
+            raise ValidationError(f"Unsupported provider: {provider}")
+
+        sub = identity["sub"]
+        email = (identity.get("email") or "").strip().lower() or None
+        # Apple sends the name once, beside the token, never inside it.
+        display_name = identity.get("name") or name_hint
+
+        with session_scope() as session:
+            # 1. Known identity.
+            link = (
+                session.query(SocialAccount)
+                .filter_by(provider=provider, provider_sub=sub)
+                .first()
+            )
+            if link:
+                link.last_used_at = datetime.utcnow()
+                user = session.query(User).get(link.user_id)
+                if not user:
+                    # The account was deleted but the link outlived it. Treat
+                    # the identity as new rather than 500-ing on a dangling row.
+                    session.delete(link)
+                else:
+                    user.last_login_at = datetime.utcnow()
+                    session.flush()
+                    return user, False
+
+            # 2. Email collision.
+            if email:
+                existing = session.query(User).filter(User.email == email).first()
+                if existing:
+                    if not identity.get("email_verified"):
+                        raise ConflictError(
+                            "An account already uses that email. Sign in with "
+                            "your password to connect this provider."
+                        )
+                    session.add(
+                        SocialAccount(
+                            user_id=existing.id,
+                            provider=provider,
+                            provider_sub=sub,
+                            email_at_link=email,
+                            name_at_link=display_name,
+                            email_verified_at_link=True,
+                            last_used_at=datetime.utcnow(),
+                        )
+                    )
+                    existing.last_login_at = datetime.utcnow()
+                    # A provider that verified the address is better evidence
+                    # than our own unfinished email loop.
+                    existing.email_verified = True
+                    session.flush()
+                    return existing, False
+
+            # 3. New user.
+            if not email:
+                # Every provider we support sends one; refusing beats inventing
+                # a placeholder address that can never receive mail.
+                raise ValidationError(
+                    "That sign-in did not share an email address, which Markt "
+                    "needs to create your account."
+                )
+
+            user = User(
+                email=email,
+                username=SocialAuthService._unique_username(
+                    session, display_name or email
+                ),
+                # No password. This account signs in through the provider
+                # until the user sets one.
+                password_hash=None,
+                email_verified=bool(identity.get("email_verified")),
+            )
+            session.add(user)
+            session.flush()
+
+            session.add(
+                SocialAccount(
+                    user_id=user.id,
+                    provider=provider,
+                    provider_sub=sub,
+                    email_at_link=email,
+                    name_at_link=display_name,
+                    email_verified_at_link=bool(identity.get("email_verified")),
+                    last_used_at=datetime.utcnow(),
+                )
+            )
+            user.last_login_at = datetime.utcnow()
+            session.flush()
+            return user, True
 
 
 class UserService:
@@ -370,6 +699,25 @@ class UserService:
             if not user:
                 raise AuthError("User not found")
 
+            if "username" in data:
+                wanted = data["username"].strip()
+                if wanted.lower() != (user.username or "").lower():
+                    # Case-insensitive, and reserved names refused, so this
+                    # cannot become a back door around check-username.
+                    if wanted.lower() in {n.lower() for n in RESERVED_USERNAMES}:
+                        raise ConflictError("This username is reserved")
+                    taken = (
+                        session.query(User)
+                        .filter(
+                            func.lower(User.username) == wanted.lower(),
+                            User.id != user.id,
+                        )
+                        .first()
+                    )
+                    if taken:
+                        raise ConflictError("Username already taken")
+                    user.username = wanted
+
             if "phone_number" in data:
                 user.phone_number = data["phone_number"]
             if "profile_picture" in data:
@@ -379,7 +727,37 @@ class UserService:
                 pass
 
             session.commit()
-            return user
+
+        UserService._maybe_emit_profile_completed(user_id)
+        return user
+
+    @staticmethod
+    def _is_profile_complete(user) -> bool:
+        """A profile counts as 'completed' for gamification once the user adds
+        the optional-at-signup fields the app nudges them to fill: a phone
+        number and a non-default profile picture."""
+        if not user:
+            return False
+        has_phone = bool(user.phone_number and str(user.phone_number).strip())
+        pic = user.profile_picture
+        has_photo = bool(pic and pic != "default.jpg")
+        return has_phone and has_photo
+
+    @staticmethod
+    def _maybe_emit_profile_completed(user_id):
+        """Emit the profile.completed signal (idempotent +50) when the profile
+        is complete. Safe to call after any profile update — the underlying
+        award is granted at most once via ref_id=user_id."""
+        try:
+            with session_scope() as session:
+                user = session.query(User).get(user_id)
+                complete = UserService._is_profile_complete(user)
+            if complete:
+                from app.signals import profile_completed
+
+                profile_completed.send("users", user_id=user_id)
+        except Exception as e:
+            logger.warning(f"gamification profile_completed emit failed: {e}")
 
     @staticmethod
     def update_buyer_profile(user_id, data):
@@ -392,9 +770,13 @@ class UserService:
                 buyer.buyername = data["buyername"]
             if "shipping_address" in data:
                 buyer.shipping_address = data["shipping_address"]
+            if "refund_preference" in data:
+                buyer.refund_preference = data["refund_preference"]
 
             session.commit()
-            return buyer
+
+        UserService._maybe_emit_profile_completed(user_id)
+        return buyer
 
     @staticmethod
     def update_seller_profile(user_id, data):
@@ -405,10 +787,33 @@ class UserService:
 
             if "shop_name" in data:
                 seller.shop_name = data["shop_name"]
+                # Registration no longer has a shop name to derive this from,
+                # so the shop screen is where a slug first becomes possible.
+                # Only minted once: a shop that renames keeps its URL, because
+                # changing it silently breaks every link already shared.
+                if not seller.shop_slug:
+                    seller.shop_slug = shop_slug_for(
+                        session, data["shop_name"], seller_id=seller.id
+                    )
             if "description" in data:
                 seller.description = data["description"]
             if "policies" in data:
                 seller.policies = data["policies"]
+            if "shop_address" in data:
+                seller.shop_address = data["shop_address"]
+
+            # Only written as a pair, and only when both are usable. A lone
+            # latitude is not a location, and (0, 0) is what a failed geocode
+            # looks like rather than a shop in the Gulf of Guinea.
+            if "shop_latitude" in data and "shop_longitude" in data:
+                lat, lng = data["shop_latitude"], data["shop_longitude"]
+                if is_valid_coordinate(lat, lng):
+                    seller.shop_latitude = lat
+                    seller.shop_longitude = lng
+                else:
+                    raise ValidationError(
+                        "That doesn't look like a valid shop location."
+                    )
 
             # Handle category updates
             if "category_ids" in data:
@@ -431,7 +836,9 @@ class UserService:
                     session.add(seller_category)
 
             session.commit()
-            return seller
+
+        UserService._maybe_emit_profile_completed(user_id)
+        return seller
 
     @staticmethod
     def list_users(args):
@@ -515,9 +922,9 @@ class UserService:
 
             return {
                 "available": not exists,
-                "message": "Username is already taken"
-                if exists
-                else "Username available",
+                "message": (
+                    "Username is already taken" if exists else "Username available"
+                ),
             }
 
     @staticmethod
@@ -589,6 +996,9 @@ class UserService:
                 user.profile_picture = media.get_url()  # Original URL for now
                 session.commit()
 
+            # A photo is often the final step to a complete profile — check now.
+            UserService._maybe_emit_profile_completed(user_id)
+
             return {
                 "success": True,
                 "media": media,
@@ -598,6 +1008,63 @@ class UserService:
         except Exception as e:
             logger.error(f"Failed to upload profile picture: {e}")
             raise AuthError(f"Failed to upload profile picture: {str(e)}")
+
+    @staticmethod
+    def upload_shop_banner(user_id: str, file_stream, filename: str):
+        """Upload and set a shop's cover image (idempotent: replaces the old).
+
+        Deliberately a near-twin of upload_profile_picture rather than a
+        shared generic: the two differ in where the URL lands and what the
+        old-media cleanup keys off, and folding them together would mean a
+        branch on "which kind of image is this" inside every step.
+        """
+        from io import BytesIO
+        from urllib.parse import urlparse
+
+        if not isinstance(file_stream, BytesIO):
+            file_stream = BytesIO(file_stream.read())
+
+        with session_scope() as session:
+            seller = session.query(Seller).filter_by(user_id=user_id).first()
+            if not seller:
+                raise AuthError("Seller account not found")
+
+            # Drop the previous banner first so replacing one does not leak a
+            # file in S3 and a row in media for every re-upload.
+            if seller.banner_url:
+                storage_key = urlparse(seller.banner_url).path.lstrip("/")
+                old_media = (
+                    session.query(Media).filter_by(storage_key=storage_key).first()
+                )
+                if old_media:
+                    try:
+                        media_service.delete_media(old_media)
+                    except Exception as e:  # noqa: BLE001
+                        # A stale object in S3 is not worth failing the
+                        # upload the user is waiting on.
+                        logger.warning("Could not delete old shop banner: %s", e)
+                    session.query(MediaVariant).filter_by(
+                        media_id=old_media.id
+                    ).delete()
+                    session.delete(old_media)
+                seller.banner_url = None
+
+        media = media_service.upload_image(
+            file_stream=file_stream,
+            filename=filename,
+            user_id=user_id,
+            alt_text="Shop banner",
+            caption="Shop banner",
+        )
+
+        with session_scope() as session:
+            seller = session.query(Seller).filter_by(user_id=user_id).first()
+            if not seller:
+                raise AuthError("Seller account not found")
+            seller.banner_url = media.get_url()
+            banner_url = seller.banner_url
+
+        return {"success": True, "media": media, "banner_url": banner_url}
 
     @staticmethod
     def upsert_user_address(user_id: str, address_data: Dict[str, Any]) -> UserAddress:
@@ -618,6 +1085,119 @@ class UserService:
 
             session.flush()
             return address
+
+
+class PublicProfileService:
+    """Read-only public view of another user.
+
+    Kept apart from UserService.get_user_profile, which returns the *owner's*
+    view including email, phone and address. Two audiences, two shapes -- the
+    thing that leaks PII is a single schema quietly serving both.
+    """
+
+    @staticmethod
+    def get_public_profile(
+        user_id: str, viewer_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        from app.socials.models import Follow, Post, PostStatus
+
+        with session_scope() as session:
+            user = session.query(User).get(user_id)
+            # getattr: deleted_at ships on the account-deletion branch. A
+            # deleted account must not be browsable once that lands.
+            if not user or getattr(user, "deleted_at", None) is not None:
+                raise NotFoundError("User not found")
+
+            is_self = bool(viewer_id and viewer_id == user_id)
+
+            if not user.is_active and not is_self:
+                raise NotFoundError("User not found")
+
+            # Counts are public here because they are already public in the
+            # feed -- product cards carry the seller's follower_count today.
+            # Hiding them on the profile would be inconsistent rather than
+            # private.
+            #
+            # UserSettings.privacy_public_profile exists and defaults to False,
+            # but nothing reads it. Gating on it as-written would hide every
+            # profile by default, including sellers', which would break the
+            # shop links this endpoint exists to serve. What it should actually
+            # gate is a product decision, so it is left alone rather than given
+            # invented semantics here.
+
+            followers_count = (
+                session.query(func.count(Follow.follower_id))
+                .filter(Follow.followee_id == user_id)
+                .scalar()
+                or 0
+            )
+            following_count = (
+                session.query(func.count(Follow.followee_id))
+                .filter(Follow.follower_id == user_id)
+                .scalar()
+                or 0
+            )
+            posts_count = (
+                session.query(func.count(Post.id))
+                .filter(Post.user_id == user_id, Post.status == PostStatus.ACTIVE)
+                .scalar()
+                or 0
+            )
+
+            is_followed = False
+            if viewer_id and not is_self:
+                is_followed = (
+                    session.query(Follow)
+                    .filter_by(follower_id=viewer_id, followee_id=user_id)
+                    .first()
+                    is not None
+                )
+
+            shop = None
+            seller = user.seller_account
+            if seller and seller.is_active:
+                products_count = (
+                    session.query(func.count(Product.id))
+                    .filter(
+                        Product.seller_id == seller.id,
+                        Product.status == Product.Status.ACTIVE,
+                    )
+                    .scalar()
+                    or 0
+                )
+                avg_rating = None
+                if seller.total_raters:
+                    avg_rating = round(
+                        (seller.total_rating or 0) / seller.total_raters, 2
+                    )
+                shop = {
+                    "id": seller.id,
+                    "shop_name": seller.shop_name,
+                    "shop_slug": seller.shop_slug,
+                    "description": seller.description,
+                    "products_count": products_count,
+                    "average_rating": avg_rating,
+                    "total_raters": seller.total_raters or 0,
+                    "verification_status": (
+                        seller.verification_status.value
+                        if seller.verification_status
+                        else None
+                    ),
+                }
+
+            return {
+                "id": user.id,
+                "username": user.username,
+                "profile_picture": user.profile_picture,
+                "is_seller": bool(user.is_seller),
+                "joined_at": (user.created_at.isoformat() if user.created_at else None),
+                "followers_count": followers_count,
+                "following_count": following_count,
+                "posts_count": posts_count,
+                "is_followed": is_followed,
+                "is_self": is_self,
+                "shop": shop,
+            }
 
 
 class AccountService:
@@ -664,11 +1244,26 @@ class AccountService:
             if user.is_seller:
                 raise AuthError("Seller account already exists")
 
+            # Seed the shop's location from the address the user already gave
+            # us. A shop with no coordinates never appears in a proximity
+            # search at all -- it only shows on the widest rungs -- and asking
+            # a buyer who has already typed their address to type it again
+            # just to open a shop is the kind of second ask that makes people
+            # abandon. Editable afterwards in shop settings, and only used
+            # when the stored pair is actually usable.
+            address = session.query(UserAddress).filter_by(user_id=user.id).first()
+            lat = getattr(address, "latitude", None)
+            lng = getattr(address, "longitude", None)
+            located = is_valid_coordinate(lat, lng)
+
             seller = Seller(
                 user_id=user.id,
                 shop_name=data["shop_name"],
                 description=data["description"],
                 policies=data.get("policies", {}),
+                shop_slug=shop_slug_for(session, data["shop_name"]),
+                shop_latitude=lat if located else None,
+                shop_longitude=lng if located else None,
             )
             session.add(seller)
             session.flush()  # Get the seller ID
@@ -801,16 +1396,371 @@ class AccountService:
             return False
 
 
+class AccountDeletionService:
+    """In-app account deletion (Apple App Store Review Guideline 5.1.1(v)).
+
+    Apple requires that an account created in the app can be *deleted* from
+    inside the app -- deactivation is explicitly not enough. What that has to
+    mean here is constrained by two things pulling in opposite directions:
+
+    * Everything personal about the user must go.
+    * Other people's records must stay intact. Deleting the User row outright
+      would orphan or cascade away posts other users replied to, reviews
+      products are rated on, chat threads the counterparty still needs, and
+      order/transaction history there are financial-record reasons to keep.
+
+    So the row survives as a tombstone with every personal field overwritten,
+    and authorship is presented as "Deleted user". The account can never be
+    signed into again: bearer tokens are stateless signed user ids (see
+    app.libs.auth_tokens), so the loaders in main.setup reject any user whose
+    deleted_at is set, and the password hash is destroyed regardless.
+
+    Deletion is refused outright while the user still has money or open
+    obligations in the system -- see check_blockers.
+    """
+
+    # Statuses that mean an order is still in flight and someone on the other
+    # side of it is owed goods or money.
+    OPEN_ORDER_STATUSES = (
+        "pending_payment",
+        "pending",
+        "processing",
+        "ready_for_delivery",
+        "shipped",
+    )
+
+    @staticmethod
+    def check_blockers(user_id: str) -> List[Dict[str, Any]]:
+        """Reasons this account cannot be deleted yet.
+
+        Returned to the client so the settings screen can explain the problem
+        and link to the fix, rather than just failing the delete.
+        """
+        from app.orders.models import Order, OrderStatus
+        from app.payments.models import Payment, PaymentStatus
+        from app.wallet.models import WalletAccount
+
+        blockers: List[Dict[str, Any]] = []
+
+        with session_scope() as session:
+            user = session.query(User).get(user_id)
+            if not user:
+                raise NotFoundError("User not found")
+
+            funded = (
+                session.query(WalletAccount)
+                .filter(
+                    WalletAccount.user_id == user_id,
+                    WalletAccount.available_balance > 0,
+                )
+                .all()
+            )
+            for account in funded:
+                blockers.append(
+                    {
+                        "code": "wallet_balance",
+                        "message": (
+                            f"You still have {account.currency} "
+                            f"{account.available_balance:,.2f} in your wallet. "
+                            "Withdraw it before deleting your account."
+                        ),
+                        "detail": {
+                            "currency": account.currency,
+                            "available_balance": round(account.available_balance, 2),
+                        },
+                    }
+                )
+
+            open_statuses = [
+                status
+                for status in OrderStatus
+                if status.value in AccountDeletionService.OPEN_ORDER_STATUSES
+            ]
+
+            if user.buyer_account:
+                open_buying = (
+                    session.query(Order)
+                    .filter(
+                        Order.buyer_id == user.buyer_account.id,
+                        Order.status.in_(open_statuses),
+                    )
+                    .count()
+                )
+                if open_buying:
+                    blockers.append(
+                        {
+                            "code": "open_orders_buying",
+                            "message": (
+                                f"You have {open_buying} order(s) still in "
+                                "progress. They must be delivered or "
+                                "cancelled first."
+                            ),
+                            "detail": {"count": open_buying},
+                        }
+                    )
+
+            if user.seller_account:
+                open_selling = (
+                    session.query(OrderItem)
+                    .join(Order, OrderItem.order_id == Order.id)
+                    .filter(
+                        OrderItem.seller_id == user.seller_account.id,
+                        Order.status.in_(open_statuses),
+                    )
+                    .count()
+                )
+                if open_selling:
+                    blockers.append(
+                        {
+                            "code": "open_orders_selling",
+                            "message": (
+                                f"You have {open_selling} item(s) sold but not "
+                                "yet delivered. Fulfil or cancel them first."
+                            ),
+                            "detail": {"count": open_selling},
+                        }
+                    )
+
+            pending_payments = (
+                session.query(Payment)
+                .filter(
+                    Payment.status == PaymentStatus.PENDING,
+                    Payment.buyer_id
+                    == (user.buyer_account.id if user.buyer_account else None),
+                )
+                .count()
+                if user.buyer_account
+                else 0
+            )
+            if pending_payments:
+                blockers.append(
+                    {
+                        "code": "pending_payments",
+                        "message": (
+                            f"You have {pending_payments} payment(s) still "
+                            "being confirmed. Try again shortly."
+                        ),
+                        "detail": {"count": pending_payments},
+                    }
+                )
+
+        return blockers
+
+    @staticmethod
+    def delete_account(user_id: str, password: str) -> Dict[str, Any]:
+        """Irreversibly anonymize the account and everything personal on it."""
+        from app.notifications.models import Notification, PushToken
+        from app.socials.models import Follow
+        from app.cart.models import Cart
+
+        blockers = AccountDeletionService.check_blockers(user_id)
+        if blockers:
+            raise ConflictError(
+                blockers[0]["message"],
+                payload={"blockers": blockers},
+            )
+
+        with session_scope() as session:
+            user = session.query(User).get(user_id)
+            if not user:
+                raise NotFoundError("User not found")
+            if user.deleted_at:
+                raise ConflictError("This account has already been deleted")
+
+            # Re-authenticate. Deletion is irreversible, so knowing the
+            # password -- not merely holding a 30-day bearer token off a
+            # possibly-unattended device -- is the bar.
+            if not user.password_hash or not user.check_password(password):
+                raise AuthError("Password is incorrect")
+
+            deleted_at = datetime.utcnow()
+            # The id is already opaque and non-personal, and reusing it keeps
+            # the tombstone's unique columns unique without a lookup table.
+            tombstone = user.id.replace("USR_", "").lower()
+
+            user.email = f"deleted-{tombstone}@deleted.markt.invalid"
+            user.username = f"deleted_user_{tombstone}"
+            user.phone_number = None
+            user.profile_picture = "default.jpg"
+            user.email_verified = False
+            user.is_active = False
+            user.deactivated_at = deleted_at
+            user.deleted_at = deleted_at
+            # Destroy the credential outright rather than rotating it: there
+            # must be no password that can ever open this account again.
+            user.password_hash = None
+
+            # Postal address and location are pure PII with nothing else
+            # pointing at them -- delete rather than blank.
+            session.query(UserAddress).filter_by(user_id=user_id).delete(
+                synchronize_session=False
+            )
+            # Device push tokens must go immediately or a deleted user keeps
+            # receiving notifications on their phone.
+            session.query(PushToken).filter_by(user_id=user_id).delete(
+                synchronize_session=False
+            )
+            session.query(Notification).filter_by(user_id=user_id).delete(
+                synchronize_session=False
+            )
+            # The social graph is personal to this user and carries no value
+            # for anyone else once the account is gone.
+            session.query(Follow).filter(
+                or_(Follow.follower_id == user_id, Follow.followee_id == user_id)
+            ).delete(synchronize_session=False)
+
+            if user.buyer_account:
+                # An abandoned cart is private and worthless post-deletion.
+                session.query(Cart).filter_by(buyer_id=user.buyer_account.id).delete(
+                    synchronize_session=False
+                )
+
+            seller = user.seller_account
+            if seller:
+                # Bank details are the most sensitive data on the account and
+                # there is no reason to keep any of it: settlement is already
+                # blocked by the open-order check above.
+                seller.payout_bank_code = None
+                seller.payout_account_number = None
+                seller.payout_account_name = None
+                seller.paystack_subaccount_code = None
+                seller.shop_address = None
+                seller.shop_latitude = None
+                seller.shop_longitude = None
+                seller.shop_name = f"Deleted shop {tombstone}"
+                seller.shop_slug = f"deleted-shop-{tombstone}"
+                seller.description = None
+                seller.is_active = False
+                seller.deactivated_at = deleted_at
+
+                # Nothing from a deleted seller should stay buyable. ARCHIVED
+                # rather than DELETED so existing order items still resolve
+                # the product they were bought from.
+                session.query(Product).filter(
+                    Product.seller_id == seller.id,
+                    Product.status != Product.Status.DELETED,
+                ).update({"status": Product.Status.ARCHIVED}, synchronize_session=False)
+
+            session.flush()
+
+        UserService._clear_cached_current_role(user_id)
+        logger.info("Account %s deleted (anonymized) by owner request", user_id)
+
+        return {
+            "deleted": True,
+            "user_id": user_id,
+            "message": (
+                "Your account has been deleted. Personal data has been removed."
+            ),
+        }
+
+
 class ShopService:
     """Service for shop/seller discovery and search"""
 
+    # How many shops inside the radius are ranked by true distance before
+    # paginating. Distance ordering happens in Python, so this is the ceiling
+    # on how much one browse request can read. 500 is far past what any
+    # Nigerian city currently holds within 10 km, and the ladder only widens
+    # when the narrower rungs came back empty.
+    NEARBY_RANK_CAP = 500
+
     @staticmethod
-    def search_shops(args, user_id=None):
+    def _within_ladder(query, lat, lng, per_page):
+        """Shops around a point, ranked by true distance, or (None, None).
+
+        Two passes, and both are load-bearing:
+
+        1. A bounding box, which a B-tree composite index can answer. This is
+           the only part the database can do -- Haversine is not an indexable
+           expression.
+        2. The circle, in Python. A box is a *superset* of the circle it
+           encloses: at the corners it reaches radius*sqrt(2), about 41%
+           further. Skipping this pass reports a shop 12 km away as being
+           "within 10 km", which is the kind of wrong that looks right.
+
+        The ladder widens when a rung is too thin to fill a page, rather than
+        stopping at the first rung that returns anything at all. One shop
+        within 10 km and twenty more at 12 km should not render as a
+        one-shop marketplace. It reports the rung it settled on so the UI can
+        say which area it is showing instead of implying everything is close.
+        """
+        located = query.filter(
+            Seller.shop_latitude.isnot(None),
+            Seller.shop_longitude.isnot(None),
+        )
+
+        widest = None
+        for rung in RADIUS_LADDER_KM:
+            min_lat, max_lat, min_lng, max_lng = bounding_box(lat, lng, rung)
+            rows = (
+                located.filter(
+                    Seller.shop_latitude.between(min_lat, max_lat),
+                    Seller.shop_longitude.between(min_lng, max_lng),
+                )
+                .limit(ShopService.NEARBY_RANK_CAP)
+                .all()
+            )
+
+            inside = [
+                shop
+                for shop in rows
+                if haversine_km(lat, lng, shop.shop_latitude, shop.shop_longitude)
+                <= rung
+            ]
+            if inside:
+                widest = (inside, rung)
+                if len(inside) >= per_page:
+                    break
+
+        if not widest:
+            return None, None
+
+        rows, _searched = widest
+        rows.sort(
+            key=lambda shop: haversine_km(
+                lat, lng, shop.shop_latitude, shop.shop_longitude
+            )
+        )
+
+        # The rung reported is the tightest one that actually contains every
+        # row, not the widest one searched. Two shops at 3 km and 30 km found
+        # while widening to 200 km are "within 50 km" -- saying 200 would be
+        # true of the search and misleading about the results.
+        furthest = haversine_km(
+            lat, lng, rows[-1].shop_latitude, rows[-1].shop_longitude
+        )
+        radius_km = next(
+            (rung for rung in RADIUS_LADDER_KM if furthest <= rung),
+            RADIUS_LADDER_KM[-1],
+        )
+        return rows, radius_km
+
+    @staticmethod
+    def search_shops(args, user_id=None, market_id=None):
         """Search for shops with filters and pagination"""
         try:
             with session_scope() as session:
                 # Build base query
-                query = session.query(Seller).join(User)
+                # joinedload: the loop below reads shop.user and
+                # shop.categories on every row, which lazy-loaded one query
+                # each per shop.
+                query = (
+                    session.query(Seller)
+                    .join(User)
+                    .options(
+                        joinedload(Seller.user),
+                        joinedload(Seller.categories).joinedload(
+                            SellerCategory.category
+                        ),
+                    )
+                )
+
+                # Market browsing (markets feature): server-determined from
+                # the URL path, not a client-supplied filter -- see
+                # app.markets.services.
+                if market_id is not None:
+                    query = query.filter(Seller.market_id == market_id)
 
                 # Apply filters
                 if args.get("search"):
@@ -824,7 +1774,23 @@ class ShopService:
                     )
 
                 if args.get("category"):
-                    query = query.filter(Seller.category == args["category"])
+                    # `Seller.category` does not exist and never has -- the
+                    # link is the seller_categories junction table. Every
+                    # request that passed this filter raised AttributeError,
+                    # which the broad `except` below turned into a 500 reading
+                    # "Failed to search shops". Matched on slug or name so the
+                    # chips in the UI can send either.
+                    wanted = args["category"]
+                    query = query.filter(
+                        Seller.categories.any(
+                            SellerCategory.category.has(
+                                db.or_(
+                                    Category.slug == wanted,
+                                    Category.name == wanted,
+                                )
+                            )
+                        )
+                    )
 
                 if args.get("verified_only"):
                     query = query.filter(
@@ -834,8 +1800,38 @@ class ShopService:
                 if args.get("active_only"):
                     query = query.filter(Seller.is_active == True)
 
-                # Apply sorting
+                # --- Proximity ---------------------------------------
+                # Only when the client actually sent a usable pair.
+                # `sort_by=nearby` with a denied location permission falls
+                # back to rating rather than erroring: a browse screen that
+                # breaks on a permission dialog is worse than one that is
+                # merely not sorted the way you asked.
+                lat, lng = args.get("latitude"), args.get("longitude")
+                near = is_valid_coordinate(lat, lng)
+                radius_km = None
+
+                page = args.get("page", 1)
+                per_page = min(args.get("per_page", 20), 100)
+                offset = (page - 1) * per_page
+
                 sort_by = args.get("sort_by", "rating")
+                if sort_by == "nearby" and not near:
+                    sort_by = "rating"
+
+                nearby_rows = None
+                if near:
+                    nearby_rows, radius_km = ShopService._within_ladder(
+                        query, lat, lng, per_page
+                    )
+                    if nearby_rows is None:
+                        # Nobody within even the widest rung. The list stops
+                        # being distance-restricted and says so, rather than
+                        # rendering an empty screen.
+                        near = False
+                        if sort_by == "nearby":
+                            sort_by = "rating"
+
+                # Apply sorting
                 if sort_by == "rating":
                     query = query.order_by(Seller.total_rating.desc())
                 elif sort_by == "name":
@@ -846,24 +1842,49 @@ class ShopService:
                     # This would need a join with follows table
                     query = query.order_by(Seller.created_at.desc())  # Fallback
 
-                # Get total count
-                total = query.count()
+                if sort_by == "nearby":
+                    # Already ranked by true distance across the whole radius
+                    # (see _within_ladder) -- slicing here rather than in SQL
+                    # is the whole point: ordering a SQL page by distance
+                    # afterwards would sort each page correctly and the list
+                    # as a whole wrongly.
+                    total = len(nearby_rows)
+                    # Bound named rather than sliced inline: black formats a
+                    # slice with an expression in it as `[offset : offset + n]`
+                    # and flake8 then flags E203 on the space it just added.
+                    page_end = offset + per_page
+                    shops = nearby_rows[offset:page_end]
+                else:
+                    total = query.count()
+                    shops = query.offset(offset).limit(per_page).all()
 
-                # Apply pagination
-                page = args.get("page", 1)
-                per_page = min(args.get("per_page", 20), 100)
-                offset = (page - 1) * per_page
-
-                shops = query.offset(offset).limit(per_page).all()
+                # Batched before the loop: _get_shop_stats was 4 queries per
+                # shop and _is_followed_by_user 1 more, so a 20-shop page cost
+                # ~100 round trips on top of the page query itself.
+                stats_by_shop = ShopService._batch_shop_stats(session, shops)
+                followed = ShopService._batch_is_followed(
+                    session, user_id, [s.user_id for s in shops if s.user_id]
+                )
 
                 # Enhance with additional data
                 enhanced_shops = []
                 for shop in shops:
+                    distance_km = None
+                    if near and shop.shop_latitude and shop.shop_longitude:
+                        distance_km = round(
+                            haversine_km(
+                                lat, lng, shop.shop_latitude, shop.shop_longitude
+                            ),
+                            1,
+                        )
+
                     shop_data = {
                         "id": shop.id,
                         "shop_name": shop.shop_name,
                         "shop_slug": shop.shop_slug,
                         "description": shop.description,
+                        "banner_url": shop.banner_url,
+                        "distance_km": distance_km,
                         "categories": [
                             {
                                 "id": sc.category.id,
@@ -876,27 +1897,38 @@ class ShopService:
                         "is_active": shop.is_active,
                         "total_rating": shop.total_rating,
                         "total_raters": shop.total_raters,
-                        "average_rating": shop.total_rating / shop.total_raters
-                        if shop.total_raters > 0
-                        else 0,
+                        "average_rating": (
+                            shop.total_rating / shop.total_raters
+                            if shop.total_raters > 0
+                            else 0
+                        ),
                         "user": {
                             "id": shop.user.id,
                             "username": shop.user.username,
                             "profile_picture": shop.user.profile_picture,
                         },
-                        "stats": ShopService._get_shop_stats(shop.id),
+                        "stats": stats_by_shop.get(
+                            shop.id,
+                            {
+                                "product_count": 0,
+                                "post_count": 0,
+                                "follower_count": 0,
+                            },
+                        ),
                     }
 
                     # Add follow status if user is authenticated
                     if user_id:
-                        shop_data["is_followed"] = ShopService._is_followed_by_user(
-                            shop.user_id, user_id
-                        )
+                        shop_data["is_followed"] = shop.user_id in followed
 
                     enhanced_shops.append(shop_data)
 
                 return {
                     "shops": enhanced_shops,
+                    "location": {
+                        "applied": near,
+                        "radius_km": radius_km,
+                    },
                     "pagination": {
                         "page": page,
                         "per_page": per_page,
@@ -956,8 +1988,18 @@ class ShopService:
                 shop_data = {
                     "id": shop.id,
                     "shop_name": shop.shop_name,
+                    # The shop page used to blow the seller's avatar up to
+                    # full width for its cover, so every shop showed the same
+                    # picture twice.
+                    "banner_url": shop.banner_url,
                     "shop_slug": shop.shop_slug,
                     "description": shop.description,
+                    # Where the shop is, in words. This endpoint builds its
+                    # payload by hand rather than through a schema, so adding
+                    # the field to SellerProfileSchema did not reach it.
+                    "shop_address": shop_address_line(shop),
+                    "shop_latitude": shop.shop_latitude,
+                    "shop_longitude": shop.shop_longitude,
                     "categories": [
                         {
                             "id": sc.category.id,
@@ -970,9 +2012,11 @@ class ShopService:
                     "is_active": shop.is_active,
                     "total_rating": shop.total_rating,
                     "total_raters": shop.total_raters,
-                    "average_rating": shop.total_rating / shop.total_raters
-                    if shop.total_raters > 0
-                    else 0,
+                    "average_rating": (
+                        shop.total_rating / shop.total_raters
+                        if shop.total_raters > 0
+                        else 0
+                    ),
                     "policies": shop.policies,
                     "user": {
                         "id": shop.user.id,
@@ -1051,9 +2095,11 @@ class ShopService:
                         ],
                         "total_rating": shop.total_rating,
                         "total_raters": shop.total_raters,
-                        "average_rating": shop.total_rating / shop.total_raters
-                        if shop.total_raters > 0
-                        else 0,
+                        "average_rating": (
+                            shop.total_rating / shop.total_raters
+                            if shop.total_raters > 0
+                            else 0
+                        ),
                         "user": {
                             "id": shop.user.id,
                             "username": shop.user.username,
@@ -1113,9 +2159,11 @@ class ShopService:
             media_items.append(
                 {
                     "url": url,
-                    "type": media.media_type.value
-                    if hasattr(media.media_type, "value")
-                    else media.media_type,
+                    "type": (
+                        media.media_type.value
+                        if hasattr(media.media_type, "value")
+                        else media.media_type
+                    ),
                     "alt_text": media.alt_text,
                 }
             )
@@ -1133,9 +2181,11 @@ class ShopService:
             product.images,
             key=lambda img: (
                 not getattr(img, "is_featured", False),
-                getattr(img, "sort_order", 0)
-                if getattr(img, "sort_order", None) is not None
-                else 0,
+                (
+                    getattr(img, "sort_order", 0)
+                    if getattr(img, "sort_order", None) is not None
+                    else 0
+                ),
             ),
         )
 
@@ -1166,6 +2216,71 @@ class ShopService:
                     return url
 
         return None
+
+    @staticmethod
+    def _batch_shop_stats(session, sellers):
+        """Product/post/follower counts for a page of shops, in 3 queries total.
+
+        _get_shop_stats issues four queries per shop, so a 20-shop directory
+        page cost ~80 on its own. These are GROUP BY aggregates keyed by id,
+        which is the same information in a fixed number of round trips.
+        """
+        if not sellers:
+            return {}
+
+        seller_ids = [s.id for s in sellers]
+        user_ids = [s.user_id for s in sellers if s.user_id]
+
+        product_counts = dict(
+            session.query(Product.seller_id, func.count(Product.id))
+            .filter(
+                Product.seller_id.in_(seller_ids),
+                Product.status == Product.Status.ACTIVE,
+            )
+            .group_by(Product.seller_id)
+            .all()
+        )
+
+        post_counts = {}
+        follower_counts = {}
+        if user_ids:
+            post_counts = dict(
+                session.query(Post.user_id, func.count(Post.id))
+                .filter(Post.user_id.in_(user_ids), Post.status == PostStatus.ACTIVE)
+                .group_by(Post.user_id)
+                .all()
+            )
+            follower_counts = dict(
+                session.query(Follow.followee_id, func.count(Follow.follower_id))
+                .filter(Follow.followee_id.in_(user_ids))
+                .group_by(Follow.followee_id)
+                .all()
+            )
+
+        return {
+            seller.id: {
+                "product_count": product_counts.get(seller.id, 0),
+                "post_count": post_counts.get(seller.user_id, 0),
+                "follower_count": follower_counts.get(seller.user_id, 0),
+            }
+            for seller in sellers
+        }
+
+    @staticmethod
+    def _batch_is_followed(session, user_id, shop_user_ids):
+        """Which of these shop owners the viewer follows -- one query, not one
+        per shop."""
+        if not user_id or not shop_user_ids:
+            return set()
+        rows = (
+            session.query(Follow.followee_id)
+            .filter(
+                Follow.follower_id == user_id,
+                Follow.followee_id.in_(list(shop_user_ids)),
+            )
+            .all()
+        )
+        return {r[0] for r in rows}
 
     @staticmethod
     def _get_shop_stats(shop_id):

@@ -123,4 +123,11 @@ networks:
 
 volumes:
   postgres-dev-data:
+    driver: local
+  # The redis service is pulled in with `extends:` from
+  # external/docker-compose.redis.yml, which mounts `redis-data` -- but an
+  # extended service does not inherit the other file's top-level volumes, so
+  # `docker compose -f docker-compose.dev.yml up` refused to start the whole
+  # project with "service redis refers to undefined volume redis-data".
+  redis-data:
     driver: local 

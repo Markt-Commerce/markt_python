@@ -62,5 +62,5 @@ class ValidationError(APIError):
 class ConflictError(APIError):
     """Resource conflict errors"""
 
-    def __init__(self, message="Conflict", status_code=409):
-        super().__init__(message, status_code)
+    def __init__(self, message="Conflict", status_code=409, payload=None):
+        super().__init__(message, status_code, payload)

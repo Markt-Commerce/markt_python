@@ -51,10 +51,13 @@ PAYMENT_GATEWAY=paystack
 # Production: https://api.yourdomain.com
 API_BASE_URL=http://localhost:8000
 
-# Frontend URL (where users are redirected after payment)
+# Web app URL (where browser/web users are redirected after payment)
 # Development: http://localhost:3000
-# Production: https://yourdomain.com or https://app.yourdomain.com
-FRONTEND_BASE_URL=http://localhost:3000
+# Production: https://marktcommerce.com/app
+WEB_APP_BASE_URL=http://localhost:3000
+
+# Mobile app deep link scheme (where mobile app users are redirected after payment)
+MOBILE_APP_SCHEME=markt://
 
 # AWS Configuration
 AWS_ACCESS_KEY=your_aws_access_key_here

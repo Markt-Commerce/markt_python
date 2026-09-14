@@ -29,6 +29,9 @@ class Database:
         with app.app_context():
             from app.users.models import User, Buyer, Seller, UserAddress
             from app.products.models import Product, ProductVariant, ProductInventory
+            from app.inventory.models import InventoryReservation
+            from app.fulfilment.models import FulfilmentAllocation
+            from app.markets.models import Market, Area
             from app.categories.models import (
                 Category,
                 ProductCategory,
@@ -40,6 +43,7 @@ class Database:
                 NicheCategory,
             )
             from app.orders.models import Order, Shipment
+            from app.orders.events import OrderEvent
             from app.payments.models import Payment, Transaction
             from app.socials.models import (
                 ProductReview,
@@ -71,12 +75,50 @@ class Database:
                 ChatDiscount,
             )
             from app.cart.models import Cart, CartItem
+            from app.moderation.models import ContentReport, UserBlock
             from app.deliveries.models import (
-                DeliveryUser, 
-                DeliveryLastLocation, 
-                DeliveryOrderAssignment, 
-                LocationUpdateRoom, 
-                )
+                DeliveryUser,
+                DeliveryLastLocation,
+                DeliveryOrderAssignment,
+                LocationUpdateRoom,
+                DeliveryRun,
+                DeliveryRunOrder,
+                DeliveryRunAssignment,
+                DeliveryRunStop,
+                DeliveryFailure,
+            )
+
+            # These three had drifted off the list. It works anyway at runtime
+            # -- registering a blueprint imports its models on the way -- but
+            # that is import order doing by accident what this list exists to
+            # do on purpose, and anything that builds metadata *without* the
+            # blueprints (db.create_all in a test, an autogenerate run) simply
+            # does not see them. browse_locations has a foreign key to users,
+            # so its absence made db.drop_all() unable to drop `users` at all.
+            from app.gamification.models import (
+                PointsLedger,
+                UserStats,
+                SellerStats,
+                Badge,
+                UserBadge,
+                TierConfig,
+                LeaderboardSnapshot,
+            )
+            from app.wallet.models import (
+                WalletAccount,
+                WalletEntry,
+                WithdrawalRequest,
+                WalletTopUp,
+            )
+            from app.location.models import BrowseLocation
+            from app.delivery_pricing.models import (
+                ServiceCity,
+                ServiceZone,
+                DeliveryLane,
+                DeliveryQuote,
+            )
+            from app.delivery_pricing.order_delivery import OrderDelivery
+            from app.users.addresses import SavedAddress  # noqa: F401
 
         # Import other models as needed
 
