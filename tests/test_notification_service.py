@@ -54,3 +54,10 @@ def test_every_email_enabled_type_has_a_deliverable_policy():
 def test_promotional_email_requires_marketing_consent():
     config = NotificationService.CHANNEL_CONFIG[NotificationType.PROMOTIONAL]
     assert config.get("marketing") is True
+
+
+def test_email_service_exposes_campaign_and_tracking_templates():
+    from app.libs.email_service import email_service
+
+    assert callable(email_service.send_promotional_campaign_email)
+    assert callable(email_service.send_order_tracking_email)

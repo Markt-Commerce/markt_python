@@ -137,18 +137,31 @@ def send_email_notification(self, notification_data: Dict):
             logger.info("Optional email notifications disabled for user %s", user_id)
             return
 
-        success = email_service.send_notification_email(
-            email=user.email,
-            title=notification_data.get("title", "Markt notification"),
-            message=notification_data.get("message", ""),
-            notification_type=notification_type,
-            metadata=notification_data.get("metadata_", {}),
-            transactional=transactional,
-            sender_profile=(
-                "marketing" if notification_enum == NotificationType.PROMOTIONAL
-                else "transactional" if transactional else "notification"
-            ),
-        )
+        metadata = notification_data.get("metadata_", {})
+        if notification_enum == NotificationType.PROMOTIONAL:
+            success = email_service.send_promotional_campaign_email(
+                user.email, {**metadata, "subject": notification_data.get("title"),
+                              "headline": notification_data.get("title"),
+                              "subheadline": notification_data.get("message")}
+            )
+        elif notification_enum in (NotificationType.ORDER_UPDATE, NotificationType.SHIPMENT_UPDATE) and metadata.get("tracking_steps"):
+            success = email_service.send_order_tracking_email(
+                user.email, {**metadata, "order_number": notification_data.get("reference_id"),
+                             "status": metadata.get("status", notification_data.get("title"))}
+            )
+        else:
+            success = email_service.send_notification_email(
+                email=user.email,
+                title=notification_data.get("title", "Markt notification"),
+                message=notification_data.get("message", ""),
+                notification_type=notification_type,
+                metadata=metadata,
+                transactional=transactional,
+                sender_profile=(
+                    "marketing" if notification_enum == NotificationType.PROMOTIONAL
+                    else "transactional" if transactional else "notification"
+                ),
+            )
         if success:
             logger.info("Email notification sent for notification %s", notification_data.get("id"))
         else:
