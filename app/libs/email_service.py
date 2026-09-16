@@ -1,4 +1,5 @@
 import logging
+import html
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -63,6 +64,72 @@ class EmailService:
         except Exception as e:
             logger.error(f"Failed to send email to {to_email}: {str(e)}")
             return False
+
+    def send_notification_email(
+        self,
+        email: str,
+        title: str,
+        message: str,
+        notification_type: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        transactional: bool = True,
+        sender_profile: Optional[str] = None,
+    ) -> bool:
+        """Send the common branded email for notification events.
+
+        Keeping this as a single resilient template means every new in-app
+        event can also have a useful email without another fragile method map.
+        Values are escaped because notification metadata can contain user text.
+        """
+        safe_title = html.escape(str(title or "Markt notification"))
+        safe_message = html.escape(str(message or ""))
+        metadata = metadata or {}
+        order_id = metadata.get("order_id") or metadata.get("order_number")
+        reference = (
+            f"<p style=\"color:#6b7280;font-size:13px\">Reference: "
+            f"{html.escape(str(order_id))}</p>" if order_id else ""
+        )
+        unsubscribe = ""
+        if not transactional and settings.EMAIL_UNSUBSCRIBE_URL:
+            unsubscribe = (
+                f'<a href="{html.escape(settings.EMAIL_UNSUBSCRIBE_URL, quote=True)}" '
+                'style="color:#B8371B">Manage preferences</a>'
+            )
+        html_content = f"""<!doctype html><html><body style="margin:0;background:#f6f7f9;font-family:Arial,sans-serif;color:#222">
+        <div style="max-width:600px;margin:32px auto;background:#fff;border-radius:16px;overflow:hidden;border:1px solid #ececec">
+          <div style="background:#E94C2A;padding:24px 32px;color:#fff;font-size:28px;font-weight:700">Markt</div>
+          <div style="padding:32px"><div style="font-size:12px;color:#B8371B;text-transform:uppercase;letter-spacing:1px;font-weight:700">{html.escape(str(notification_type).replace('_',' '))}</div>
+          <h1 style="font-size:24px;margin:10px 0 16px">{safe_title}</h1>
+          <p style="font-size:16px;line-height:1.6;white-space:pre-line">{safe_message}</p>{reference}
+          <p style="margin-top:32px;color:#6b7280;font-size:14px">Open the Markt app to view more details and take action.</p></div>
+          <div style="padding:20px 32px;background:#fafafa;color:#6b7280;font-size:12px">You’re receiving this because it relates to your Markt account. {unsubscribe}</div>
+        </div></body></html>"""
+        text_content = f"{title}\n\n{message}\n\nOpen the Markt app for details."
+        profile = sender_profile or ("transactional" if transactional else "marketing")
+        if profile == "notification":
+            from_email, from_name = (
+                settings.RESEND_NOTIFICATION_FROM_EMAIL,
+                settings.RESEND_NOTIFICATION_FROM_NAME,
+            )
+        elif profile == "marketing":
+            from_email, from_name = (
+                settings.RESEND_MARKETING_FROM_EMAIL,
+                settings.RESEND_MARKETING_FROM_NAME,
+            )
+        else:
+            from_email, from_name = (
+                settings.RESEND_TRANSACTIONAL_FROM_EMAIL,
+                settings.RESEND_TRANSACTIONAL_FROM_NAME,
+            )
+        return self.send_email(
+            to_email=email,
+            subject=f"{safe_title} · Markt",
+            html_content=html_content,
+            text_content=text_content,
+            from_email=from_email,
+            from_name=from_name,
+            reply_to=settings.EMAIL_REPLY_TO or None,
+        )
 
     def send_verification_email(
         self, email: str, verification_code: str, username: str

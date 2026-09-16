@@ -960,11 +960,32 @@ class CartService:
     @staticmethod
     def _notify_seller_cart_addition(seller_id: int, product_id: str, quantity: int):
         """Notify seller when product is added to cart"""
-        # TODO: Implement seller notification
-        # This could be useful for inventory management
+        try:
+            from app.users.models import Seller
+            with session_scope() as session:
+                seller = session.query(Seller).get(seller_id)
+                if seller and seller.user_id:
+                    NotificationService.create_notification(
+                        seller.user_id, NotificationType.CART_ITEM_ADDED,
+                        reference_type="product", reference_id=product_id,
+                        metadata_={"quantity": quantity},
+                    )
+        except Exception:
+            logger.exception("Failed to notify seller about cart addition")
 
     @staticmethod
     def _notify_seller_new_order(order: Order):
         """Notify seller about new order"""
-        # TODO: Implement seller notification
-        # This should trigger email/SMS notifications
+        try:
+            seller_users = {
+                item.seller.user_id for item in order.items
+                if item.seller and item.seller.user_id
+            }
+            for user_id in seller_users:
+                NotificationService.create_notification(
+                    user_id, NotificationType.ORDER_PLACED,
+                    reference_type="order", reference_id=str(order.id),
+                    metadata_={"status": order.status.value if order.status else "placed"},
+                )
+        except Exception:
+            logger.exception("Failed to notify seller about new order")

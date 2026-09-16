@@ -27,6 +27,24 @@ class DeliveryChannel(Enum):
 
 
 class NotificationService:
+    # Events that must reach the account owner even when they opted out of
+    # optional mail. These are service messages, not marketing.
+    TRANSACTIONAL_EMAIL_TYPES = {
+        NotificationType.ORDER_UPDATE,
+        NotificationType.SHIPMENT_UPDATE,
+        NotificationType.SYSTEM_ALERT,
+        NotificationType.REQUEST_OFFER,
+        NotificationType.OFFER_ACCEPTED,
+        NotificationType.ORDER_PLACED,
+        NotificationType.PAYMENT_SUCCESS,
+        NotificationType.PAYMENT_FAILED,
+        NotificationType.ITEM_UNFULFILLED,
+        NotificationType.ORDER_CANCELLED,
+        NotificationType.DELIVERY_FAILED,
+        NotificationType.REFUND_ISSUED,
+        NotificationType.SUBSTITUTION_APPROVAL_REQUIRED,
+    }
+
     # Notification templates
     TEMPLATES = {
         NotificationType.POST_LIKE: {
@@ -164,6 +182,34 @@ class NotificationService:
             "title": "Moderation action",
             "message": "A moderation action was taken: {action_type}",
         },
+        NotificationType.CHAT_MESSAGE: {
+            "title": "New message",
+            "message": "{username} sent you a message: {message}",
+        },
+        NotificationType.CHAT_OFFER: {
+            "title": "New offer",
+            "message": "{username} made an offer on {product_name}",
+        },
+        NotificationType.CHAT_OFFER_RESPONSE: {
+            "title": "Offer update",
+            "message": "{username} {response} your offer",
+        },
+        NotificationType.WALLET_TOPUP_COMPLETED: {
+            "title": "Wallet funded",
+            "message": "Your wallet was credited with {amount} {currency}",
+        },
+        NotificationType.WALLET_TOPUP_FAILED: {
+            "title": "Wallet top-up failed",
+            "message": "Your wallet top-up could not be completed. {message}",
+        },
+        NotificationType.WITHDRAWAL_COMPLETED: {
+            "title": "Withdrawal complete",
+            "message": "Your withdrawal of {amount} {currency} is complete",
+        },
+        NotificationType.WITHDRAWAL_FAILED: {
+            "title": "Withdrawal failed",
+            "message": "Your withdrawal could not be completed. {message}",
+        },
     }
 
     # Channel configuration by notification type
@@ -214,9 +260,11 @@ class NotificationService:
             "always_email": True,
         },
         NotificationType.PROMOTIONAL: {
-            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH, DeliveryChannel.EMAIL],
             "immediate_websocket": True,
             "push_when_offline": False,  # Don't spam with promotional push
+            "always_email": True,
+            "marketing": True,
         },
         NotificationType.SYSTEM_ALERT: {
             "channels": [DeliveryChannel.EMAIL, DeliveryChannel.PUSH],
@@ -408,7 +456,39 @@ class NotificationService:
             "push_when_offline": True,
             "always_email": True,  # Important moderation notification
         },
+        NotificationType.CHAT_MESSAGE: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True, "push_when_offline": True,
+        },
+        NotificationType.CHAT_OFFER: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True, "push_when_offline": True,
+        },
+        NotificationType.CHAT_OFFER_RESPONSE: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True, "push_when_offline": True,
+        },
+        NotificationType.WALLET_TOPUP_COMPLETED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH, DeliveryChannel.EMAIL],
+            "immediate_websocket": True, "push_when_offline": True, "always_email": True,
+        },
+        NotificationType.WALLET_TOPUP_FAILED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH, DeliveryChannel.EMAIL],
+            "immediate_websocket": True, "push_when_offline": True, "always_email": True,
+        },
+        NotificationType.WITHDRAWAL_COMPLETED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH, DeliveryChannel.EMAIL],
+            "immediate_websocket": True, "push_when_offline": True, "always_email": True,
+        },
+        NotificationType.WITHDRAWAL_FAILED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH, DeliveryChannel.EMAIL],
+            "immediate_websocket": True, "push_when_offline": True, "always_email": True,
+        },
     }
+
+    @staticmethod
+    def is_transactional_email(notification_type: NotificationType) -> bool:
+        return notification_type in NotificationService.TRANSACTIONAL_EMAIL_TYPES
 
     @staticmethod
     def create_notification(
@@ -476,6 +556,9 @@ class NotificationService:
                     if metadata_
                     else "moderation"
                 ),
+                "amount": metadata_.get("amount", 0) if metadata_ else 0,
+                "currency": metadata_.get("currency", "NGN") if metadata_ else "NGN",
+                "response": metadata_.get("response", "updated") if metadata_ else "updated",
             }
 
             message = template["message"].format(**format_data)

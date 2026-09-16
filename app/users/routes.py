@@ -75,7 +75,7 @@ from .services import (
     SellerAnalyticsService,
     SocialAuthService,
 )
-from .models import User
+from .models import User, UserSettings
 
 logger = logging.getLogger(__name__)
 
@@ -509,12 +509,30 @@ class UserSettings(MethodView):
     @bp.response(200, SettingsSchema)
     def get(self):
         """Get user settings"""
+        settings = current_user.settings
+        if not settings:
+            settings = UserSettings(user_id=current_user.id)
+            from external.database import db
+            db.session.add(settings)
+            db.session.commit()
+        return settings
 
     @login_required
     @bp.arguments(SettingsUpdateSchema)
     @bp.response(200, SettingsSchema)
     def patch(self, data):
         """Update user settings"""
+        settings = current_user.settings
+        if not settings:
+            settings = UserSettings(user_id=current_user.id)
+            from external.database import db
+            db.session.add(settings)
+        for field in ("email_notifications", "push_notifications", "sms_notifications", "marketing_notifications", "preferred_language"):
+            if field in data:
+                setattr(settings, field, data[field])
+        from external.database import db
+        db.session.commit()
+        return settings
 
 
 @bp.route("/address")
