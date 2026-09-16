@@ -144,9 +144,7 @@ class Config:
             "RESEND_MARKETING_FROM_NAME", default=self.RESEND_FROM_NAME
         )
         self.EMAIL_REPLY_TO = config("EMAIL_REPLY_TO", default="")
-        self.EMAIL_UNSUBSCRIBE_URL = config(
-            "EMAIL_UNSUBSCRIBE_URL", default=""
-        )
+        self.EMAIL_UNSUBSCRIBE_URL = config("EMAIL_UNSUBSCRIBE_URL", default="")
 
         # Build Redis URL
         REDIS_URL = f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"

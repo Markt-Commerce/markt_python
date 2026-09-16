@@ -20,12 +20,19 @@ def upgrade():
         "WHERE marketing_notifications IS NULL"
     )
     op.alter_column(
-        "user_settings", "marketing_notifications", nullable=False, server_default=sa.false()
+        "user_settings",
+        "marketing_notifications",
+        nullable=False,
+        server_default=sa.false(),
     )
     for label in (
-        "CHAT_MESSAGE", "CHAT_OFFER", "CHAT_OFFER_RESPONSE",
-        "WALLET_TOPUP_COMPLETED", "WALLET_TOPUP_FAILED",
-        "WITHDRAWAL_COMPLETED", "WITHDRAWAL_FAILED",
+        "CHAT_MESSAGE",
+        "CHAT_OFFER",
+        "CHAT_OFFER_RESPONSE",
+        "WALLET_TOPUP_COMPLETED",
+        "WALLET_TOPUP_FAILED",
+        "WITHDRAWAL_COMPLETED",
+        "WITHDRAWAL_FAILED",
     ):
         op.execute(f"ALTER TYPE notificationtype ADD VALUE IF NOT EXISTS '{label}'")
 

@@ -86,8 +86,10 @@ class EmailService:
         metadata = metadata or {}
         order_id = metadata.get("order_id") or metadata.get("order_number")
         reference = (
-            f"<p style=\"color:#6b7280;font-size:13px\">Reference: "
-            f"{html.escape(str(order_id))}</p>" if order_id else ""
+            f'<p style="color:#6b7280;font-size:13px">Reference: '
+            f"{html.escape(str(order_id))}</p>"
+            if order_id
+            else ""
         )
         unsubscribe = ""
         if not transactional and settings.EMAIL_UNSUBSCRIBE_URL:
@@ -131,18 +133,24 @@ class EmailService:
             reply_to=settings.EMAIL_REPLY_TO or None,
         )
 
-    def send_promotional_campaign_email(self, email: str, campaign: Dict[str, Any]) -> bool:
+    def send_promotional_campaign_email(
+        self, email: str, campaign: Dict[str, Any]
+    ) -> bool:
         """Send a commerce campaign email with a hero, categories and products."""
         headline = html.escape(str(campaign.get("headline", "Big deals, made for you")))
-        subheadline = html.escape(str(campaign.get("subheadline", "Discover something good today.")))
+        subheadline = html.escape(
+            str(campaign.get("subheadline", "Discover something good today."))
+        )
         cta = html.escape(str(campaign.get("cta_label", "Shop now")))
-        cta_url = html.escape(str(campaign.get("cta_url", settings.WEB_APP_BASE_URL)), quote=True)
+        cta_url = html.escape(
+            str(campaign.get("cta_url", settings.WEB_APP_BASE_URL)), quote=True
+        )
         hero_url = campaign.get("hero_url")
         hero = (
             f'<img src="{html.escape(str(hero_url), quote=True)}" alt="{headline}" '
             'style="display:block;width:100%;max-height:280px;object-fit:cover;border-radius:12px">'
-            if hero_url else
-            '<div style="background:#FFF1E9;border-radius:12px;padding:36px 24px;text-align:center">'
+            if hero_url
+            else '<div style="background:#FFF1E9;border-radius:12px;padding:36px 24px;text-align:center">'
             '<div style="font-size:12px;letter-spacing:2px;color:#B8371B;font-weight:700">MARKT PICKS</div>'
             f'<div style="font-size:32px;line-height:1.1;font-weight:800;margin-top:10px;color:#231F20">{headline}</div>'
             f'<div style="font-size:16px;margin-top:12px;color:#5f6368">{subheadline}</div></div>'
@@ -152,13 +160,23 @@ class EmailService:
             name = html.escape(str(product.get("name", "Product")))
             price = html.escape(str(product.get("price", "")))
             image = product.get("image_url")
-            image_html = (f'<img src="{html.escape(str(image), quote=True)}" alt="{name}" '
-                          'style="width:100%;height:130px;object-fit:contain">' if image else "")
+            image_html = (
+                f'<img src="{html.escape(str(image), quote=True)}" alt="{name}" '
+                'style="width:100%;height:130px;object-fit:contain">'
+                if image
+                else ""
+            )
             products += f'<td style="width:50%;padding:8px;vertical-align:top"><div style="border:1px solid #eee;border-radius:10px;padding:10px">{image_html}<div style="font-weight:700;font-size:14px">{name}</div><div style="color:#B8371B;font-size:16px;margin-top:6px">{price}</div></div></td>'
-        products_html = f'<table role="presentation" style="width:100%;border-collapse:collapse"><tr>{products}</tr></table>' if products else ""
-        html_content = f'''<!doctype html><html><body style="margin:0;background:#f6f7f9;font-family:Arial,sans-serif;color:#231F20"><div style="max-width:620px;margin:24px auto;background:#fff;border:1px solid #eee;border-radius:16px;overflow:hidden"><div style="padding:22px 28px;font-size:28px;font-weight:800">Markt<span style="color:#E94C2A">●</span></div><div style="padding:0 24px 28px">{hero}<div style="text-align:center;margin:24px 0"><a href="{cta_url}" style="display:inline-block;background:#E94C2A;color:#fff;text-decoration:none;font-weight:700;padding:14px 28px;border-radius:8px">{cta}</a></div>{products_html}</div><div style="padding:18px 28px;background:#fafafa;color:#6b7280;font-size:12px;text-align:center">You’re receiving Markt offers because you opted in to deals and recommendations. <a href="{html.escape(settings.EMAIL_UNSUBSCRIBE_URL, quote=True)}" style="color:#B8371B">Manage preferences</a></div></div></body></html>'''
+        products_html = (
+            f'<table role="presentation" style="width:100%;border-collapse:collapse"><tr>{products}</tr></table>'
+            if products
+            else ""
+        )
+        html_content = f"""<!doctype html><html><body style="margin:0;background:#f6f7f9;font-family:Arial,sans-serif;color:#231F20"><div style="max-width:620px;margin:24px auto;background:#fff;border:1px solid #eee;border-radius:16px;overflow:hidden"><div style="padding:22px 28px;font-size:28px;font-weight:800">Markt<span style="color:#E94C2A">●</span></div><div style="padding:0 24px 28px">{hero}<div style="text-align:center;margin:24px 0"><a href="{cta_url}" style="display:inline-block;background:#E94C2A;color:#fff;text-decoration:none;font-weight:700;padding:14px 28px;border-radius:8px">{cta}</a></div>{products_html}</div><div style="padding:18px 28px;background:#fafafa;color:#6b7280;font-size:12px;text-align:center">You’re receiving Markt offers because you opted in to deals and recommendations. <a href="{html.escape(settings.EMAIL_UNSUBSCRIBE_URL, quote=True)}" style="color:#B8371B">Manage preferences</a></div></div></body></html>"""
         return self.send_email(
-            email, str(campaign.get("subject", headline)), html_content,
+            email,
+            str(campaign.get("subject", headline)),
+            html_content,
             text_content=f"{headline}\n\n{subheadline}\n\n{cta_url}",
             from_email=settings.RESEND_MARKETING_FROM_EMAIL,
             from_name=settings.RESEND_MARKETING_FROM_NAME,
@@ -169,17 +187,31 @@ class EmailService:
         """Send a visual order-progress email, including pickup/delivery details."""
         order_number = html.escape(str(order_data.get("order_number", "")))
         status = str(order_data.get("status", "processing")).replace("_", " ").title()
-        steps = order_data.get("tracking_steps") or ["Order placed", "Confirmed", "Shipped", "Out for delivery", "Delivered"]
+        steps = order_data.get("tracking_steps") or [
+            "Order placed",
+            "Confirmed",
+            "Shipped",
+            "Out for delivery",
+            "Delivered",
+        ]
         current = int(order_data.get("current_step", 1))
         step_html = ""
         for index, step in enumerate(steps):
             active = index <= current
             color = "#E94C2A" if active else "#D9DDE2"
             step_html += f'<td style="width:{100 // len(steps)}%;text-align:center;color:{color};font-size:11px;font-weight:700"><div style="margin:auto;width:24px;height:24px;border-radius:50%;background:{color};color:#fff;line-height:24px">{"✓" if active else index + 1}</div><div style="margin-top:7px">{html.escape(str(step))}</div></td>'
-        details = html.escape(str(order_data.get("delivery_note", "We’ll keep you updated as your order moves.")))
-        html_content = f'''<!doctype html><html><body style="margin:0;background:#f6f7f9;font-family:Arial,sans-serif;color:#231F20"><div style="max-width:620px;margin:24px auto;background:#fff;border-radius:16px;overflow:hidden;border:1px solid #eee"><div style="background:#E94C2A;padding:24px 30px;color:#fff;font-size:28px;font-weight:800">Markt</div><div style="padding:30px"><div style="color:#B8371B;font-size:12px;font-weight:700;letter-spacing:1px">ORDER {order_number}</div><h1 style="font-size:26px;margin:10px 0">Your order is {html.escape(status.lower())}</h1><p style="color:#5f6368;line-height:1.6">{details}</p><table role="presentation" style="width:100%;margin:32px 0;border-collapse:collapse"><tr>{step_html}</tr></table><div style="background:#FFF1E9;border-radius:10px;padding:18px"><strong>Order number</strong><br>{order_number}</div><p style="font-size:13px;color:#6b7280;margin-top:30px">Open the Markt app to view full tracking details, contact support, or update your delivery information.</p></div><div style="padding:18px 30px;background:#fafafa;color:#6b7280;font-size:12px">This is a transactional update about your Markt order.</div></div></body></html>'''
+        details = html.escape(
+            str(
+                order_data.get(
+                    "delivery_note", "We’ll keep you updated as your order moves."
+                )
+            )
+        )
+        html_content = f"""<!doctype html><html><body style="margin:0;background:#f6f7f9;font-family:Arial,sans-serif;color:#231F20"><div style="max-width:620px;margin:24px auto;background:#fff;border-radius:16px;overflow:hidden;border:1px solid #eee"><div style="background:#E94C2A;padding:24px 30px;color:#fff;font-size:28px;font-weight:800">Markt</div><div style="padding:30px"><div style="color:#B8371B;font-size:12px;font-weight:700;letter-spacing:1px">ORDER {order_number}</div><h1 style="font-size:26px;margin:10px 0">Your order is {html.escape(status.lower())}</h1><p style="color:#5f6368;line-height:1.6">{details}</p><table role="presentation" style="width:100%;margin:32px 0;border-collapse:collapse"><tr>{step_html}</tr></table><div style="background:#FFF1E9;border-radius:10px;padding:18px"><strong>Order number</strong><br>{order_number}</div><p style="font-size:13px;color:#6b7280;margin-top:30px">Open the Markt app to view full tracking details, contact support, or update your delivery information.</p></div><div style="padding:18px 30px;background:#fafafa;color:#6b7280;font-size:12px">This is a transactional update about your Markt order.</div></div></body></html>"""
         return self.send_email(
-            email, f"Order {order_number} · {status} · Markt", html_content,
+            email,
+            f"Order {order_number} · {status} · Markt",
+            html_content,
             text_content=f"Order {order_number} is {status}. {details}",
             from_email=settings.RESEND_TRANSACTIONAL_FROM_EMAIL,
             from_name=settings.RESEND_TRANSACTIONAL_FROM_NAME,

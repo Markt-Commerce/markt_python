@@ -34,12 +34,17 @@ MIN_WITHDRAWAL_AMOUNT = Decimal("1000.00")
 
 class WalletService:
     @staticmethod
-    def _notify_wallet(user_id: str, notification_type, reference_id: str, metadata=None):
+    def _notify_wallet(
+        user_id: str, notification_type, reference_id: str, metadata=None
+    ):
         try:
             from app.notifications.services import NotificationService
+
             NotificationService.create_notification(
-                user_id=user_id, notification_type=notification_type,
-                reference_type="wallet", reference_id=str(reference_id),
+                user_id=user_id,
+                notification_type=notification_type,
+                reference_type="wallet",
+                reference_id=str(reference_id),
                 metadata_=metadata or {},
             )
         except Exception:
@@ -560,8 +565,11 @@ class WalletService:
                 withdrawal.status = WithdrawalStatus.FAILED
                 withdrawal.failure_reason = reason[:255]
         from app.notifications.models import NotificationType
+
         WalletService._notify_wallet(
-            user_id, NotificationType.WITHDRAWAL_FAILED, withdrawal_id,
+            user_id,
+            NotificationType.WITHDRAWAL_FAILED,
+            withdrawal_id,
             {"amount": amount, "currency": currency, "message": reason},
         )
 
@@ -581,11 +589,19 @@ class WalletService:
                 return False
             if withdrawal.status == WithdrawalStatus.COMPLETED:
                 return True
-            user_id, amount, currency, withdrawal_id = withdrawal.user_id, withdrawal.amount, withdrawal.currency, withdrawal.id
+            user_id, amount, currency, withdrawal_id = (
+                withdrawal.user_id,
+                withdrawal.amount,
+                withdrawal.currency,
+                withdrawal.id,
+            )
             withdrawal.status = WithdrawalStatus.COMPLETED
         from app.notifications.models import NotificationType
+
         WalletService._notify_wallet(
-            user_id, NotificationType.WITHDRAWAL_COMPLETED, withdrawal_id,
+            user_id,
+            NotificationType.WITHDRAWAL_COMPLETED,
+            withdrawal_id,
             {"amount": amount, "currency": currency},
         )
         return True
@@ -801,8 +817,11 @@ class WalletService:
             currency=currency,
         )
         from app.notifications.models import NotificationType
+
         WalletService._notify_wallet(
-            user_id, NotificationType.WALLET_TOPUP_COMPLETED, topup_ref,
+            user_id,
+            NotificationType.WALLET_TOPUP_COMPLETED,
+            topup_ref,
             {"amount": amount, "currency": currency},
         )
         return True
@@ -885,8 +904,11 @@ class WalletService:
                 if topup and topup.status == TopUpStatus.PENDING:
                     topup.status = TopUpStatus.FAILED
             from app.notifications.models import NotificationType
+
             WalletService._notify_wallet(
-                topup.user_id, NotificationType.WALLET_TOPUP_FAILED, topup_id,
+                topup.user_id,
+                NotificationType.WALLET_TOPUP_FAILED,
+                topup_id,
                 {"currency": currency, "message": gateway_data.get("status")},
             )
 

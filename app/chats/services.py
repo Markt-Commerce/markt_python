@@ -528,7 +528,9 @@ class ChatService:
                 )
                 if not room:
                     raise ForbiddenError("Access denied to this chat room")
-                recipient_id = room.seller_id if room.buyer_id == user_id else room.buyer_id
+                recipient_id = (
+                    room.seller_id if room.buyer_id == user_id else room.buyer_id
+                )
 
             ChatService._mark_messages_as_read(room_id, user_id)
 
@@ -826,8 +828,11 @@ class ChatService:
 
                 try:
                     NotificationService.create_notification(
-                        recipient_id, NotificationType.CHAT_MESSAGE, actor_id=user_id,
-                        reference_type="chat_room", reference_id=str(room_id),
+                        recipient_id,
+                        NotificationType.CHAT_MESSAGE,
+                        actor_id=user_id,
+                        reference_type="chat_room",
+                        reference_id=str(room_id),
                         metadata_={"message": content[:160]},
                     )
                 except Exception:
@@ -861,7 +866,9 @@ class ChatService:
 
                 if not room:
                     raise ForbiddenError("Access denied to this chat room")
-                recipient_id = room.seller_id if room.buyer_id == user_id else room.buyer_id
+                recipient_id = (
+                    room.seller_id if room.buyer_id == user_id else room.buyer_id
+                )
 
                 # Get product details
                 product = (
@@ -903,8 +910,11 @@ class ChatService:
 
                 try:
                     NotificationService.create_notification(
-                        recipient_id, NotificationType.CHAT_OFFER, actor_id=user_id,
-                        reference_type="chat_room", reference_id=str(room_id),
+                        recipient_id,
+                        NotificationType.CHAT_OFFER,
+                        actor_id=user_id,
+                        reference_type="chat_room",
+                        reference_id=str(room_id),
                         metadata_={"product_name": product.name},
                     )
                 except Exception:
@@ -953,7 +963,9 @@ class ChatService:
 
                 if not room or (room.buyer_id != user_id and room.seller_id != user_id):
                     raise ForbiddenError("Access denied to this offer")
-                recipient_id = room.seller_id if room.buyer_id == user_id else room.buyer_id
+                recipient_id = (
+                    room.seller_id if room.buyer_id == user_id else room.buyer_id
+                )
 
                 # Update offer status
                 offer.status = response  # "accepted" or "rejected"
@@ -976,12 +988,17 @@ class ChatService:
 
                 try:
                     NotificationService.create_notification(
-                        recipient_id, NotificationType.CHAT_OFFER_RESPONSE, actor_id=user_id,
-                        reference_type="chat_room", reference_id=str(room.id),
+                        recipient_id,
+                        NotificationType.CHAT_OFFER_RESPONSE,
+                        actor_id=user_id,
+                        reference_type="chat_room",
+                        reference_id=str(room.id),
                         metadata_={"response": response},
                     )
                 except Exception:
-                    logger.exception("Failed to create chat offer response notification")
+                    logger.exception(
+                        "Failed to create chat offer response notification"
+                    )
 
                 # Send real-time notification
                 # ChatSocketManager.send_message_to_room(room.id, {

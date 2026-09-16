@@ -513,6 +513,7 @@ class UserSettings(MethodView):
         if not settings:
             settings = UserSettings(user_id=current_user.id)
             from external.database import db
+
             db.session.add(settings)
             db.session.commit()
         return settings
@@ -526,11 +527,19 @@ class UserSettings(MethodView):
         if not settings:
             settings = UserSettings(user_id=current_user.id)
             from external.database import db
+
             db.session.add(settings)
-        for field in ("email_notifications", "push_notifications", "sms_notifications", "marketing_notifications", "preferred_language"):
+        for field in (
+            "email_notifications",
+            "push_notifications",
+            "sms_notifications",
+            "marketing_notifications",
+            "preferred_language",
+        ):
             if field in data:
                 setattr(settings, field, data[field])
         from external.database import db
+
         db.session.commit()
         return settings
 

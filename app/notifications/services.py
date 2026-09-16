@@ -260,7 +260,11 @@ class NotificationService:
             "always_email": True,
         },
         NotificationType.PROMOTIONAL: {
-            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH, DeliveryChannel.EMAIL],
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
             "immediate_websocket": True,
             "push_when_offline": False,  # Don't spam with promotional push
             "always_email": True,
@@ -458,31 +462,58 @@ class NotificationService:
         },
         NotificationType.CHAT_MESSAGE: {
             "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
-            "immediate_websocket": True, "push_when_offline": True,
+            "immediate_websocket": True,
+            "push_when_offline": True,
         },
         NotificationType.CHAT_OFFER: {
             "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
-            "immediate_websocket": True, "push_when_offline": True,
+            "immediate_websocket": True,
+            "push_when_offline": True,
         },
         NotificationType.CHAT_OFFER_RESPONSE: {
             "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
-            "immediate_websocket": True, "push_when_offline": True,
+            "immediate_websocket": True,
+            "push_when_offline": True,
         },
         NotificationType.WALLET_TOPUP_COMPLETED: {
-            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH, DeliveryChannel.EMAIL],
-            "immediate_websocket": True, "push_when_offline": True, "always_email": True,
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,
         },
         NotificationType.WALLET_TOPUP_FAILED: {
-            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH, DeliveryChannel.EMAIL],
-            "immediate_websocket": True, "push_when_offline": True, "always_email": True,
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,
         },
         NotificationType.WITHDRAWAL_COMPLETED: {
-            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH, DeliveryChannel.EMAIL],
-            "immediate_websocket": True, "push_when_offline": True, "always_email": True,
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,
         },
         NotificationType.WITHDRAWAL_FAILED: {
-            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH, DeliveryChannel.EMAIL],
-            "immediate_websocket": True, "push_when_offline": True, "always_email": True,
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,
         },
     }
 
@@ -558,7 +589,9 @@ class NotificationService:
                 ),
                 "amount": metadata_.get("amount", 0) if metadata_ else 0,
                 "currency": metadata_.get("currency", "NGN") if metadata_ else "NGN",
-                "response": metadata_.get("response", "updated") if metadata_ else "updated",
+                "response": metadata_.get("response", "updated")
+                if metadata_
+                else "updated",
             }
 
             message = template["message"].format(**format_data)

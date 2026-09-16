@@ -125,29 +125,47 @@ def send_email_notification(self, notification_data: Dict):
             None,
         )
         if not notification_enum:
-            logger.warning("Unknown notification type %s; email skipped", notification_type)
+            logger.warning(
+                "Unknown notification type %s; email skipped", notification_type
+            )
             return
         from app.notifications.services import NotificationService
+
         transactional = NotificationService.is_transactional_email(notification_enum)
         if notification_enum == NotificationType.PROMOTIONAL:
             if not user.settings or not user.settings.marketing_notifications:
                 logger.info("Promotional email disabled for user %s", user_id)
                 return
-        elif user.settings and not user.settings.email_notifications and not transactional:
+        elif (
+            user.settings
+            and not user.settings.email_notifications
+            and not transactional
+        ):
             logger.info("Optional email notifications disabled for user %s", user_id)
             return
 
         metadata = notification_data.get("metadata_", {})
         if notification_enum == NotificationType.PROMOTIONAL:
             success = email_service.send_promotional_campaign_email(
-                user.email, {**metadata, "subject": notification_data.get("title"),
-                              "headline": notification_data.get("title"),
-                              "subheadline": notification_data.get("message")}
+                user.email,
+                {
+                    **metadata,
+                    "subject": notification_data.get("title"),
+                    "headline": notification_data.get("title"),
+                    "subheadline": notification_data.get("message"),
+                },
             )
-        elif notification_enum in (NotificationType.ORDER_UPDATE, NotificationType.SHIPMENT_UPDATE) and metadata.get("tracking_steps"):
+        elif notification_enum in (
+            NotificationType.ORDER_UPDATE,
+            NotificationType.SHIPMENT_UPDATE,
+        ) and metadata.get("tracking_steps"):
             success = email_service.send_order_tracking_email(
-                user.email, {**metadata, "order_number": notification_data.get("reference_id"),
-                             "status": metadata.get("status", notification_data.get("title"))}
+                user.email,
+                {
+                    **metadata,
+                    "order_number": notification_data.get("reference_id"),
+                    "status": metadata.get("status", notification_data.get("title")),
+                },
             )
         else:
             success = email_service.send_notification_email(
@@ -158,14 +176,23 @@ def send_email_notification(self, notification_data: Dict):
                 metadata=metadata,
                 transactional=transactional,
                 sender_profile=(
-                    "marketing" if notification_enum == NotificationType.PROMOTIONAL
-                    else "transactional" if transactional else "notification"
+                    "marketing"
+                    if notification_enum == NotificationType.PROMOTIONAL
+                    else "transactional"
+                    if transactional
+                    else "notification"
                 ),
             )
         if success:
-            logger.info("Email notification sent for notification %s", notification_data.get("id"))
+            logger.info(
+                "Email notification sent for notification %s",
+                notification_data.get("id"),
+            )
         else:
-            logger.error("Failed to send email notification for notification %s", notification_data.get("id"))
+            logger.error(
+                "Failed to send email notification for notification %s",
+                notification_data.get("id"),
+            )
 
     except Exception as e:
         logger.error(f"Email notification failed: {str(e)}")
