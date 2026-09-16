@@ -111,6 +111,8 @@ class DeliveryRunAssignmentService:
                         "order_count": order_count,
                         "price_per_order": run.price_per_order,
                         "distance_meters": round(distance, 2),
+                        "lat": area.latitude,
+                        "lng": area.longitude,
                     }
                 )
 

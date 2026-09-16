@@ -179,6 +179,13 @@ class AvailableRunSchema(Schema):
     order_count = fields.Integer()
     price_per_order = fields.Float(allow_none=True)
     distance_meters = fields.Float()
+    # Area centroid (Area.latitude/longitude), not per-seller/per-buyer
+    # coordinates -- a rider hasn't committed to this run yet, so real
+    # pickup/dropoff addresses stay post-acceptance-only (get_run_detail).
+    # One representative pin per run is enough for the always-on dashboard
+    # map (REFACTOR_NOTES.md, "Always-on map dashboard", 2026-09-16).
+    lat = fields.Float(allow_none=True)
+    lng = fields.Float(allow_none=True)
 
 
 class DeliveryAvailableRunsResponseSchema(Schema):
