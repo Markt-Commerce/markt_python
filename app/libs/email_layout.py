@@ -203,3 +203,81 @@ def change_line(
 
 def _fmt(value: float) -> str:
     return f"{value:,.0f}" if float(value).is_integer() else f"{value:,.2f}"
+
+
+def progress(steps: List[str], current: int) -> str:
+    """Where the order has got to, as a row of dots joined by a rule.
+
+    Written as one table row per visual layer -- dots, then labels -- because
+    a dot with its label underneath would need a stacked cell, and Outlook
+    collapses those. Steps already passed are brand-coloured; the rest are
+    hairline grey, which is legible even when a client blocks colour.
+
+    `current` is an index into `steps`. Out-of-range values are clamped rather
+    than raising: a status this ladder does not know about should still send
+    an email.
+    """
+    if not steps:
+        return ""
+    current = max(0, min(current, len(steps) - 1))
+
+    dots = ""
+    labels = ""
+    for i, step in enumerate(steps):
+        done = i <= current
+        colour = BRAND if done else HAIRLINE
+        # The connector to the previous dot carries the colour of the step it
+        # leads into, so the line fills up as the order moves along.
+        if i:
+            dots += (
+                f'<td width="100%" style="padding:0;"><div style="height:2px;'
+                f'background:{colour};font-size:0;line-height:0;">&nbsp;</div></td>'
+            )
+        dots += (
+            f'<td width="14" style="padding:0;"><div style="width:14px;'
+            f"height:14px;border-radius:7px;background:{colour};"
+            f'font-size:0;line-height:0;">&nbsp;</div></td>'
+        )
+        labels += (
+            f'<td align="{"left" if i == 0 else "right" if i == len(steps) - 1 else "center"}"'
+            f' style="padding:6px 2px 0;color:{INK if done else MUTED};'
+            f"font-size:11px;line-height:15px;"
+            f'font-weight:{"600" if i == current else "400"};">{step}</td>'
+        )
+
+    return f"""
+      <tr><td style="padding:20px 24px 8px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+          <tr>{dots}</tr>
+        </table>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+          <tr>{labels}</tr>
+        </table>
+      </td></tr>"""
+
+
+def detail_rows(pairs: List[List[str]]) -> str:
+    """Label/value lines -- order number, date, totals.
+
+    Skips a pair whose value is empty, so a template can offer a field it does
+    not always have without leaving "Tracking:" followed by nothing.
+    """
+    rows = ""
+    for label, value in pairs:
+        if value in (None, ""):
+            continue
+        rows += f"""
+          <tr>
+            <td style="padding:6px 0;color:{MUTED};font-size:13px;">{label}</td>
+            <td align="right" style="padding:6px 0;color:{INK};font-size:13px;
+                                     font-weight:600;">{value}</td>
+          </tr>"""
+    if not rows:
+        return ""
+    return f"""
+      <tr><td style="padding:12px 24px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+               style="background:{PAGE};border-radius:10px;padding:8px 14px;">
+          {rows}
+        </table>
+      </td></tr>"""

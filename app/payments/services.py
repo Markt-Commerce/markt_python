@@ -1701,6 +1701,30 @@ class PaymentService:
         return WalletService.fail_withdrawal_transfer(reference, reason)
 
     @staticmethod
+    def _failure_reason(payment: Payment) -> str:
+        """The gateway's own words for why a payment failed.
+
+        Paystack puts a human-readable line in `gateway_response`; it is what
+        the buyer needs ("Insufficient funds" tells them what to do, "your
+        payment failed" does not). Shaped defensively because the column is
+        free-form JSON.
+        """
+        raw = payment.gateway_response
+        if isinstance(raw, dict):
+            for key in ("gateway_response", "message", "reason"):
+                value = raw.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            data = raw.get("data")
+            if isinstance(data, dict):
+                value = data.get("gateway_response")
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        elif isinstance(raw, str) and raw.strip():
+            return raw.strip()
+        return ""
+
+    @staticmethod
     def _send_payment_notifications(payment: Payment, status: PaymentStatus):
         """Send payment notifications"""
         try:
@@ -1708,7 +1732,17 @@ class PaymentService:
             buyer = order.buyer.user
 
             if status == PaymentStatus.COMPLETED:
-                # Notify buyer
+                # What both emails need, read here while the order is loaded.
+                items = [
+                    {
+                        "product_name": (item.product.name if item.product else "Item"),
+                        "quantity": item.quantity,
+                        "price": item.price,
+                    }
+                    for item in (order.items or [])
+                ]
+
+                # Notify buyer: their receipt.
                 NotificationService.create_notification(
                     user_id=buyer.id,
                     notification_type=NotificationType.PAYMENT_SUCCESS,
@@ -1716,23 +1750,37 @@ class PaymentService:
                     reference_id=payment.id,
                     metadata_={
                         "order_id": payment.order_id,
+                        "order_number": order.order_number,
                         "amount": payment.amount,
                         "currency": payment.currency,
+                        "reference": payment.transaction_id or "",
+                        "method": payment.method,
+                        "items": items,
                     },
                 )
 
-                # Notify seller
+                # Notify seller: they have sold something and need to pack it.
+                #
+                # This used to send the seller PAYMENT_SUCCESS, so a seller's
+                # "you made a sale" email was the buyer's receipt -- addressed
+                # to them, ending "keep this email as your receipt", and
+                # saying nothing about what to pack or that a rider is coming.
                 if order.items:
                     seller_id = order.items[0].product.seller.user_id
                     NotificationService.create_notification(
                         user_id=seller_id,
-                        notification_type=NotificationType.PAYMENT_SUCCESS,
-                        reference_type="payment",
-                        reference_id=payment.id,
+                        notification_type=NotificationType.ORDER_PLACED,
+                        reference_type="order",
+                        reference_id=payment.order_id,
                         metadata_={
+                            "role": "seller",
                             "order_id": payment.order_id,
+                            "order_number": order.order_number,
+                            "total": order.total,
                             "amount": payment.amount,
                             "currency": payment.currency,
+                            "buyer_name": getattr(buyer, "username", "") or "",
+                            "items": items,
                         },
                     )
 
@@ -1745,8 +1793,10 @@ class PaymentService:
                     reference_id=payment.id,
                     metadata_={
                         "order_id": payment.order_id,
+                        "order_number": order.order_number,
                         "amount": payment.amount,
                         "currency": payment.currency,
+                        "reason": PaymentService._failure_reason(payment),
                     },
                 )
 

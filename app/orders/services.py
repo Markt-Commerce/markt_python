@@ -401,6 +401,18 @@ class OrderService:
             except Exception as e:
                 logger.warning(f"Failed to queue order_status_changed event: {e}")
 
+            # Read these while the session is open: session_scope commits on
+            # exit and expires every instance, so `order.buyer` afterwards is
+            # a fresh query at best.
+            notify_user_id = order.buyer.user_id if order.buyer else None
+            notify_order_number = order.order_number
+
+        # Post-commit: tell the buyer where their order has got to.
+        if old_status != new_status:
+            OrderService._notify_status_change(
+                order_id, notify_user_id, notify_order_number, new_status
+            )
+
         # Post-commit: gamification points (award on delivery, reverse on
         # cancel/return of a previously-delivered order).
         if new_status == OrderStatus.DELIVERED and old_status != OrderStatus.DELIVERED:
@@ -413,6 +425,43 @@ class OrderService:
             OrderService._emit_gam_order_reversed(order_id)
 
         return order
+
+    # The statuses worth an email. A buyer who has paid hears nothing at all
+    # until the thing arrives -- no "it is packed", no "a rider has it" --
+    # which is the stretch of the order they are most anxious about and the
+    # one that generates "where is my order" messages.
+    #
+    # Cancelled, returned and failed are left out on purpose: they have their
+    # own notification types (ORDER_CANCELLED, REFUND_ISSUED) emitted from the
+    # paths that know *why*, and two emails about one cancellation is worse
+    # than one.
+    _NOTIFIED_STATUSES = (
+        OrderStatus.READY_FOR_DELIVERY,
+        OrderStatus.SHIPPED,
+        OrderStatus.DELIVERED,
+    )
+
+    @staticmethod
+    def _notify_status_change(order_id, user_id, order_number, new_status):
+        if not user_id or new_status not in OrderService._NOTIFIED_STATUSES:
+            return
+        try:
+            from app.notifications.services import NotificationService
+            from app.notifications.models import NotificationType
+
+            NotificationService.create_notification(
+                user_id=user_id,
+                notification_type=NotificationType.ORDER_UPDATE,
+                reference_type="order",
+                reference_id=order_id,
+                metadata_={
+                    "order_id": order_id,
+                    "order_number": order_number,
+                    "status": new_status.value,
+                },
+            )
+        except Exception as e:  # never let a notification break the order
+            logger.warning(f"Failed to notify status change for {order_id}: {e}")
 
     @staticmethod
     def _emit_gam_order_completed(order_id):

@@ -4,7 +4,7 @@ from typing import Dict, List
 
 from main.workers import celery_app
 from external.redis import redis_client
-from app.libs.session import session_scope
+from app.libs.session import session_scope, read_scope
 
 from .models import Notification, NotificationType
 
@@ -93,6 +93,64 @@ def send_push_notification(self, notification_data: Dict):
         logger.error(f"Push notification failed: {str(e)}")
 
 
+def _order_email_data(notification_data: Dict, meta: Dict) -> Dict:
+    """Fill in what the order emails read, from the DB where needed.
+
+    The previous version passed `reference_id` as `order_number`. That is an
+    order *id* (ORD_xxxx), so every order email showed the buyer an internal
+    identifier they cannot quote at anyone, and `items` was only ever present
+    if the caller happened to include it -- which no caller did, so the
+    confirmation email listed nothing bought.
+    """
+    data = {
+        "order_number": meta.get("order_number", ""),
+        "status": meta.get("status", ""),
+        "amount": meta.get("amount", 0),
+        "total": meta.get("total", meta.get("amount", 0)),
+        "items": meta.get("items", []),
+        "buyer_name": meta.get("buyer_name", ""),
+        "delivery_address": meta.get("delivery_address", ""),
+        "rider_name": meta.get("rider_name", ""),
+        "eta": meta.get("eta", ""),
+        "reference": meta.get("reference", ""),
+        "method": meta.get("method", ""),
+        "reason": meta.get("reason", ""),
+    }
+
+    order_id = meta.get("order_id") or notification_data.get("reference_id")
+    if not order_id or not str(order_id).startswith("ORD_"):
+        return data
+
+    # Hydrate anything the emitter did not carry. Best-effort: an email with
+    # the order number missing is worse than one without a line-item table,
+    # but neither is worth failing the send over.
+    try:
+        from app.orders.models import Order
+
+        with read_scope() as session:
+            order = session.query(Order).get(order_id)
+            if not order:
+                return data
+            data["order_number"] = data["order_number"] or order.order_number
+            data["total"] = data["total"] or order.total
+            data["status"] = data["status"] or (
+                order.status.value if order.status else ""
+            )
+            if not data["items"]:
+                data["items"] = [
+                    {
+                        "product_name": (item.product.name if item.product else "Item"),
+                        "quantity": item.quantity,
+                        "price": item.price,
+                    }
+                    for item in order.items
+                ]
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("Could not hydrate order %s for email: %s", order_id, e)
+
+    return data
+
+
 @celery_app.task(bind=True, queue="notifications")
 def send_email_notification(self, notification_data: Dict):
     """Send email notification for important alerts"""
@@ -108,6 +166,13 @@ def send_email_notification(self, notification_data: Dict):
         # A rider is not a User: they live in delivery_users with a DEL_ id,
         # have no UserSettings row, and their address is verified by the OTP
         # they signed in with rather than a separate confirmation step.
+        # Read the address *inside* the scope and keep the string, not the
+        # instance. session_scope commits on exit and SQLAlchemy expires every
+        # object it loaded, so `user.email` afterwards is either a second
+        # SELECT or a DetachedInstanceError -- and the surrounding
+        # `except Exception` would log that as "email notification failed"
+        # rather than as the bug it is.
+        recipient_email = None
         with session_scope() as session:
             if str(user_id).startswith("DEL_"):
                 from app.deliveries.models import DeliveryUser
@@ -116,6 +181,7 @@ def send_email_notification(self, notification_data: Dict):
                 if not rider or not rider.email:
                     logger.warning("Rider %s has no email address", user_id)
                     return
+                recipient_email = rider.email
             else:
                 user = session.query(User).get(user_id)
                 if not user or not user.email_verified:
@@ -126,6 +192,7 @@ def send_email_notification(self, notification_data: Dict):
                 if user.settings and not user.settings.email_notifications:
                     logger.info(f"Email notifications disabled for user {user_id}")
                     return
+                recipient_email = user.email
 
         # Map notification types to email methods
         email_methods = {
@@ -137,15 +204,18 @@ def send_email_notification(self, notification_data: Dict):
 
         email_method = email_methods.get(notification_type)
         if email_method:
-            # Prepare data for email
-            email_data = {
-                "order_number": notification_data.get("reference_id", ""),
-                "status": notification_data.get("metadata_", {}).get("status", ""),
-                "amount": notification_data.get("metadata_", {}).get("amount", 0),
-                "items": notification_data.get("metadata_", {}).get("items", []),
-            }
+            meta = notification_data.get("metadata_") or {}
 
-            success = email_method(user.email, email_data)
+            # A seller's "you sold something" email is not the buyer's "we
+            # have your order" email, and both hang off ORDER_PLACED.
+            if notification_type == NotificationType.ORDER_PLACED.value and (
+                meta.get("role") == "seller"
+            ):
+                email_method = email_service.send_seller_order_notification_email
+
+            email_data = _order_email_data(notification_data, meta)
+
+            success = email_method(recipient_email, email_data)
             if success:
                 logger.info(
                     f"Email notification sent for notification {notification_data['id']}"
