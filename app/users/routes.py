@@ -504,7 +504,11 @@ class UserList(MethodView):
 
 
 @bp.route("/settings")
-class UserSettings(MethodView):
+# Not `UserSettings`: that is the model, imported at the top of this file, and
+# a view with the same name shadows it -- so `UserSettings(user_id=...)` below
+# built a MethodView instead of a row and raised "takes no arguments". Any
+# user without a settings row got a 500 from both verbs.
+class UserSettingsView(MethodView):
     @login_required
     @bp.response(200, SettingsSchema)
     def get(self):
