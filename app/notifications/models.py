@@ -64,12 +64,28 @@ class NotificationType(Enum):
     WITHDRAWAL_COMPLETED = "withdrawal_completed"
     WITHDRAWAL_FAILED = "withdrawal_failed"
 
+    # Riders. Their own types rather than reusing the buyer/seller ones: a
+    # rider's "new delivery available" is not a buyer's "order update", and
+    # collapsing them would mean one channel policy and one wording for two
+    # audiences with nothing in common.
+    DELIVERY_AVAILABLE = "delivery_available"
+    DELIVERY_ASSIGNED = "delivery_assigned"
+    DELIVERY_EARNING_CREDITED = "delivery_earning_credited"
+
 
 class Notification(BaseModel):
     __tablename__ = "notifications"
 
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.String(12), db.ForeignKey("users.id"), nullable=False)
+    # Exactly one of user_id/delivery_user_id is set, like WalletAccount.
+    # DeliveryUser is a structurally separate table from User (delivery_users
+    # vs users, DEL_ vs USR_ ids), so a rider could not be notified at all --
+    # the FK refused the row, and every notification call swallows its own
+    # failure, so nothing said so.
+    user_id = db.Column(db.String(12), db.ForeignKey("users.id"), nullable=True)
+    delivery_user_id = db.Column(
+        db.String(12), db.ForeignKey("delivery_users.id"), nullable=True, index=True
+    )
     type = db.Column(db.Enum(NotificationType), nullable=False)
     title = db.Column(db.String(100))
     message = db.Column(db.Text, nullable=False)
@@ -83,13 +99,34 @@ class Notification(BaseModel):
     __table_args__ = (
         db.Index("idx_notification_user_unread", "user_id", "is_read"),
         db.Index("idx_notification_user_type", "user_id", "type"),
+        db.CheckConstraint(
+            "(user_id IS NOT NULL) <> (delivery_user_id IS NOT NULL)",
+            name="ck_notifications_single_owner",
+        ),
     )
 
     user = db.relationship("User", back_populates="notifications")
+    delivery_user = db.relationship("DeliveryUser")
+
+    @property
+    def owner_id(self) -> str:
+        """Whoever this notification is for, whichever column holds them."""
+        return self.user_id or self.delivery_user_id
 
     def to_dict(self):
         return {
             "id": self.id,
+            # Who it is for.
+            #
+            # This was missing, and deliver_notification -- the task that
+            # dispatches push and email -- reads notification_data["user_id"]
+            # first thing. So every queued delivery raised KeyError before it
+            # began: push and notification email have never been sent at all,
+            # while the websocket path kept working because it is called
+            # directly with the id rather than from this payload.
+            #
+            # owner_id, so a rider's notification carries the rider.
+            "user_id": self.owner_id,
             "type": self.type.value,
             "title": self.title,
             "message": self.message,
@@ -107,8 +144,25 @@ class PushToken(BaseModel):
     __tablename__ = "push_tokens"
 
     id = db.Column(db.Integer, primary_key=True)
+    # Same single-owner rule as Notification above: without this a rider's
+    # device could not register for push, so the rider app had nowhere to send
+    # a token even once it asked for one.
     user_id = db.Column(
-        db.String(12), db.ForeignKey("users.id"), nullable=False, index=True
+        db.String(12), db.ForeignKey("users.id"), nullable=True, index=True
+    )
+    delivery_user_id = db.Column(
+        db.String(12), db.ForeignKey("delivery_users.id"), nullable=True, index=True
     )
     token = db.Column(db.String(255), nullable=False, unique=True)
     platform = db.Column(db.String(20), nullable=True)  # ios / android
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "(user_id IS NOT NULL) <> (delivery_user_id IS NOT NULL)",
+            name="ck_push_tokens_single_owner",
+        ),
+    )
+
+    @property
+    def owner_id(self) -> str:
+        return self.user_id or self.delivery_user_id

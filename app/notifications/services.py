@@ -26,6 +26,40 @@ class DeliveryChannel(Enum):
     EMAIL = "email"
 
 
+class _Blanks(dict):
+    """Formatting that leaves unknown placeholders blank instead of raising."""
+
+    def __missing__(self, key):  # pragma: no cover - trivial
+        return ""
+
+
+def _owner_column(owner_id: str) -> str:
+    """The Notification column an id is stored in -- see
+    NotificationService._owner_filter for why the prefix is enough."""
+    return "delivery_user_id" if str(owner_id).startswith("DEL_") else "user_id"
+
+
+# The buyer-facing name for each order status. "ready_for_delivery" is a
+# column value, not something to put on someone's lock screen.
+_STATUS_WORDS = {
+    "pending_payment": "awaiting payment",
+    "processing": "confirmed",
+    "ready_for_delivery": "packed and waiting for a rider",
+    "shipped": "on its way to you",
+    "delivered": "delivered",
+    "cancelled": "cancelled",
+    "returned": "returned",
+    "failed": "failed",
+}
+
+
+def _human_status(status: str) -> str:
+    """A status a person can read. Unknown values lose their underscores
+    rather than being dropped, so a new status still reads as English."""
+    text = str(status or "").strip()
+    return _STATUS_WORDS.get(text.lower(), text.replace("_", " "))
+
+
 class NotificationService:
     # Events that must reach the account owner even when they opted out of
     # optional mail. These are service messages, not marketing.
@@ -69,7 +103,7 @@ class NotificationService:
         },
         NotificationType.ORDER_UPDATE: {
             "title": "Order update",
-            "message": "Your order #{order_id} status changed to {status}",
+            "message": "Your order #{order_id} is {status}",
         },
         NotificationType.SHIPMENT_UPDATE: {
             "title": "Shipment update",
@@ -156,6 +190,20 @@ class NotificationService:
         NotificationType.ORDER_PLACED: {
             "title": "New order",
             "message": "New order #{order_id} has been placed",
+        },
+        # Riders. Short, and leading with the money or the place, because
+        # these are read on a phone mounted to a handlebar.
+        NotificationType.DELIVERY_AVAILABLE: {
+            "title": "New delivery nearby",
+            "message": "A delivery is available near you. {pickup}",
+        },
+        NotificationType.DELIVERY_ASSIGNED: {
+            "title": "Delivery assigned",
+            "message": "You're on delivery {reference}. {pickup}",
+        },
+        NotificationType.DELIVERY_EARNING_CREDITED: {
+            "title": "You've been paid",
+            "message": "{amount} for delivery {reference} is in your wallet.",
         },
         NotificationType.PAYMENT_SUCCESS: {
             "title": "Payment successful",
@@ -352,6 +400,24 @@ class NotificationService:
             "immediate_websocket": True,
             "push_when_offline": False,
         },
+        # A rider who misses "a delivery is available" has lost the job to
+        # someone else, so it pushes whether or not the app is open -- the
+        # only type here that does. The other two are records, not summons.
+        NotificationType.DELIVERY_AVAILABLE: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "always_push": True,
+        },
+        NotificationType.DELIVERY_ASSIGNED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.DELIVERY_EARNING_CREDITED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
         NotificationType.ORDER_PLACED: {
             "channels": [
                 DeliveryChannel.WEBSOCKET,
@@ -518,6 +584,25 @@ class NotificationService:
     }
 
     @staticmethod
+    def _owner_filter(owner_id: str) -> Dict[str, str]:
+        """Which column this id belongs in.
+
+        Every method here takes one `user_id` that is really "whoever this is
+        for" -- a buyer or seller (`USR_`, the `User` table) or a rider
+        (`DEL_`, the structurally separate `DeliveryUser` table). The two id
+        formats never collide, so the prefix routes the write without a
+        second parameter at every call site. Same approach, deliberately, as
+        WalletService._owner_filter.
+        """
+        if str(owner_id).startswith("DEL_"):
+            return {"delivery_user_id": owner_id}
+        return {"user_id": owner_id}
+
+    @staticmethod
+    def is_rider(owner_id: str) -> bool:
+        return str(owner_id).startswith("DEL_")
+
+    @staticmethod
     def is_transactional_email(notification_type: NotificationType) -> bool:
         return notification_type in NotificationService.TRANSACTIONAL_EMAIL_TYPES
 
@@ -557,9 +642,15 @@ class NotificationService:
                     else "your product"
                 ),
                 "rating": metadata_.get("rating", 0) if metadata_ else 0,
-                "order_id": reference_id or "N/A",
-                "status": (
-                    metadata_.get("status", "updated") if metadata_ else "updated"
+                # The order *number* where the emitter carries one. The
+                # reference_id is an ORD_ id, which is what the buyer used to
+                # be shown -- in the notification list and, since the message
+                # is the push body, on their lock screen.
+                "order_id": (
+                    (metadata_ or {}).get("order_number") or reference_id or "N/A"
+                ),
+                "status": _human_status(
+                    (metadata_ or {}).get("status", "updated") or "updated"
                 ),
                 "message": metadata_.get("message", "") if metadata_ else "",
                 # Buyer request variables
@@ -587,18 +678,26 @@ class NotificationService:
                     if metadata_
                     else "moderation"
                 ),
-                "amount": metadata_.get("amount", 0) if metadata_ else 0,
-                "currency": metadata_.get("currency", "NGN") if metadata_ else "NGN",
-                "response": metadata_.get("response", "updated")
-                if metadata_
-                else "updated",
+                # Rider templates.
+                "pickup": (metadata_ or {}).get("pickup", ""),
+                "reference": (metadata_ or {}).get("reference", ""),
+                # Blank rather than 0: "credited with 0" is a number someone
+                # will act on, and a missing amount is a bug in the emitter,
+                # not a zero-value credit.
+                "amount": (metadata_ or {}).get("amount", ""),
+                "currency": (metadata_ or {}).get("currency", "NGN"),
+                "response": (metadata_ or {}).get("response", "updated"),
             }
 
-            message = template["message"].format(**format_data)
+            # A placeholder with nothing behind it used to raise KeyError
+            # here, and every caller swallows that -- so one template gaining
+            # a field the callers do not pass made its notifications vanish
+            # rather than read oddly. An empty string is the better failure.
+            message = template["message"].format_map(_Blanks(format_data)).strip()
 
             with session_scope() as session:
                 notification = Notification(
-                    user_id=user_id,
+                    **NotificationService._owner_filter(user_id),
                     type=notification_type,
                     title=template["title"],
                     message=message,
@@ -721,7 +820,7 @@ class NotificationService:
         try:
             with session_scope() as session:
                 query = session.query(Notification).filter(
-                    Notification.user_id == user_id
+                    getattr(Notification, _owner_column(user_id)) == user_id
                 )
 
                 if unread_only:
@@ -757,7 +856,8 @@ class NotificationService:
         try:
             with session_scope() as session:
                 query = session.query(Notification).filter(
-                    Notification.user_id == user_id, Notification.is_read == False
+                    getattr(Notification, _owner_column(user_id)) == user_id,
+                    Notification.is_read == False,
                 )
 
                 if notification_ids:
@@ -792,7 +892,8 @@ class NotificationService:
                 return (
                     session.query(Notification)
                     .filter(
-                        Notification.user_id == user_id, Notification.is_read == False
+                        getattr(Notification, _owner_column(user_id)) == user_id,
+                        Notification.is_read == False,
                     )
                     .count()
                 )
@@ -805,7 +906,7 @@ class NotificationService:
         """Mark notifications as seen (internal helper)"""
         try:
             session.query(Notification).filter(
-                Notification.user_id == user_id,
+                getattr(Notification, _owner_column(user_id)) == user_id,
                 Notification.id.in_(notification_ids),
                 Notification.is_seen == False,
             ).update({"is_seen": True}, synchronize_session=False)
@@ -830,13 +931,18 @@ class PushService:
         if not token:
             return
         with session_scope() as session:
+            owner = NotificationService._owner_filter(user_id)
             existing = session.query(PushToken).filter_by(token=token).first()
             if existing:
-                existing.user_id = user_id
+                # A device can change hands between a rider and a shopper
+                # account; clear the other column rather than leaving both set
+                # and tripping the single-owner constraint.
+                existing.user_id = owner.get("user_id")
+                existing.delivery_user_id = owner.get("delivery_user_id")
                 if platform:
                     existing.platform = platform
             else:
-                session.add(PushToken(user_id=user_id, token=token, platform=platform))
+                session.add(PushToken(token=token, platform=platform, **owner))
 
     @staticmethod
     def remove_token(token: str) -> None:
@@ -852,7 +958,11 @@ class PushService:
         with session_scope() as session:
             return [
                 t.token
-                for t in session.query(PushToken).filter_by(user_id=user_id).all()
+                for t in (
+                    session.query(PushToken)
+                    .filter_by(**NotificationService._owner_filter(user_id))
+                    .all()
+                )
             ]
 
     @staticmethod

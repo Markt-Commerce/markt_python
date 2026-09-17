@@ -4,6 +4,8 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 import resend
+
+from app.libs import email_layout as L
 from main.config import settings
 
 logger = logging.getLogger(__name__)
@@ -512,422 +514,318 @@ class EmailService:
         </html>
         """
 
+    # The buyer-facing ladder an order climbs. Deliberately four steps and
+    # not the seven OrderStatus values: "ready_for_delivery" and "shipped"
+    # are warehouse words, and a buyer only wants to know whether it is
+    # packed, moving, or here.
+    ORDER_STEPS = ["Confirmed", "Packed", "On the way", "Delivered"]
+
+    _STEP_FOR_STATUS = {
+        "pending_payment": 0,
+        "pending": 0,
+        "processing": 0,
+        "ready_for_delivery": 1,
+        "shipped": 2,
+        "delivered": 3,
+    }
+
+    # What the status means for the person who bought the thing, in the second
+    # person. The old email said "Order #X is now Ready For Delivery", which
+    # is the database's words shown to a customer.
+    _STATUS_COPY = {
+        "processing": ("Your order is confirmed", "The seller is getting it ready."),
+        "ready_for_delivery": (
+            "Your order is packed",
+            "It is waiting for a rider to collect it.",
+        ),
+        "shipped": (
+            "Your order is on the way",
+            "A rider has picked it up and is heading to you.",
+        ),
+        "delivered": ("Your order arrived", "Thanks for shopping on Markt."),
+        "cancelled": (
+            "Your order was cancelled",
+            "Any payment you made is being refunded.",
+        ),
+        "returned": ("Your return is confirmed", "Your refund is on its way."),
+        "failed": (
+            "Your order could not be completed",
+            "You have not been charged. Please try again.",
+        ),
+    }
+
     def _get_order_confirmation_template(self, order_data: Dict[str, Any]) -> str:
-        """Get order confirmation template"""
+        """Order confirmation: what was bought, what it cost, what happens next."""
         order_number = order_data.get("order_number", "")
-        total = order_data.get("total", 0)
-        items = order_data.get("items", [])
+        total = order_data.get("total", 0) or 0
+        items = order_data.get("items", []) or []
+        buyer_name = order_data.get("buyer_name", "")
+        address = order_data.get("delivery_address", "")
+        order_url = order_data.get("order_url", "")
 
-        items_html = ""
-        for item in items:
-            items_html += f"""
-            <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #eee;">{item.get('product_name', '')}</td>
-                <td style="padding: 10px; border-bottom: 1px solid #eee;">{item.get('quantity', 0)}</td>
-                <td style="padding: 10px; border-bottom: 1px solid #eee;">₦{item.get('price', 0):,.2f}</td>
-            </tr>
-            """
+        rows = [
+            [
+                str(item.get("product_name", "")),
+                str(item.get("quantity", 0)),
+                f"\u20a6{float(item.get('price', 0) or 0):,.2f}",
+            ]
+            for item in items
+        ]
 
-        return f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Order Confirmation</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                .header {{ text-align: center; margin-bottom: 30px; }}
-                .logo {{ color: #E94C2A; font-size: 32px; font-weight: bold; }}
-                .order-details {{ background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; }}
-                .items-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
-                .items-table th {{ background: #E94C2A; color: white; padding: 10px; text-align: left; }}
-                .footer {{ text-align: center; margin-top: 30px; color: #666; font-size: 14px; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <div class="logo">Markt</div>
-                </div>
+        greeting = f"Thanks{', ' + buyer_name if buyer_name else ''} \u2014 "
+        body = (
+            L.header("Order confirmed", "We have your order")
+            + L.progress(self.ORDER_STEPS, 0)
+            + L.note(
+                greeting + "the seller is getting your order ready. "
+                "We will email you when it is packed and again when a rider "
+                "picks it up."
+            )
+            + L.detail_rows(
+                [
+                    ["Order", f"#{order_number}"],
+                    ["Placed", datetime.now().strftime("%d %B %Y")],
+                    ["Delivering to", address],
+                    ["Total", f"\u20a6{float(total):,.2f}"],
+                ]
+            )
+            + L.table_block(["Item", "Qty", "Price"], rows, title="What you ordered")
+            + (L.button("Track this order", order_url) if order_url else "")
+        )
 
-                <h2>Order Confirmation</h2>
-
-                <p>Thank you for your order! We've received your order and it's being processed.</p>
-
-                <div class="order-details">
-                    <h3>Order Details</h3>
-                    <p><strong>Order Number:</strong> {order_number}</p>
-                    <p><strong>Order Date:</strong> {datetime.now().strftime('%B %d, %Y')}</p>
-                    <p><strong>Total Amount:</strong> ₦{total:,.2f}</p>
-                </div>
-
-                <h3>Order Items</h3>
-                <table class="items-table">
-                    <thead>
-                        <tr>
-                            <th>Product</th>
-                            <th>Quantity</th>
-                            <th>Price</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {items_html}
-                    </tbody>
-                </table>
-
-                <p>We'll send you updates as your order progresses.</p>
-
-                <div class="footer">
-                    <p>Best regards,<br>The Markt Team</p>
-                    <p>© 2025 Markt. All rights reserved.</p>
-                </div>
-            </div>
-        </body>
-        </html>
-        """
+        return L.shell(
+            title=f"Order #{order_number} confirmed",
+            preheader=(
+                f"\u20a6{float(total):,.2f} \u2014 we will let you know "
+                "when it is on the way."
+            ),
+            body=body,
+            footer_note="You are receiving this because you placed an order on Markt.",
+        )
 
     def _get_order_status_update_template(self, order_data: Dict[str, Any]) -> str:
-        """Get order status update template"""
+        """Where the order has got to, with the ladder drawn in."""
         order_number = order_data.get("order_number", "")
-        status = order_data.get("status", "")
-        status_display = status.replace("_", " ").title()
+        status = str(order_data.get("status", "") or "").lower()
+        order_url = order_data.get("order_url", "")
+        eta = order_data.get("eta", "")
+        rider_name = order_data.get("rider_name", "")
 
-        return f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Order Status Update</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                .header {{ text-align: center; margin-bottom: 30px; }}
-                .logo {{ color: #E94C2A; font-size: 32px; font-weight: bold; }}
-                .status-box {{
-                    background: #E94C2A;
-                    color: white;
-                    padding: 15px;
-                    border-radius: 8px;
-                    text-align: center;
-                    margin: 20px 0;
-                    font-size: 18px;
-                    font-weight: bold;
-                }}
-                .footer {{ text-align: center; margin-top: 30px; color: #666; font-size: 14px; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <div class="logo">Markt</div>
-                </div>
+        headline, explain = self._STATUS_COPY.get(
+            status,
+            ("Your order was updated", f"It is now {status.replace('_', ' ')}."),
+        )
 
-                <h2>Order Status Update</h2>
+        # A cancelled or failed order has left the ladder; drawing a tracker
+        # for it would imply it is still coming.
+        step = self._STEP_FOR_STATUS.get(status)
+        tracker = L.progress(self.ORDER_STEPS, step) if step is not None else ""
 
-                <p>Your order status has been updated!</p>
+        body = (
+            L.header(f"Order #{order_number}", headline)
+            + tracker
+            + L.note(explain)
+            + L.detail_rows(
+                [
+                    ["Order", f"#{order_number}"],
+                    ["Expected", eta],
+                    ["Your rider", rider_name],
+                ]
+            )
+            + (L.button("See your order", order_url) if order_url else "")
+        )
 
-                <div class="status-box">
-                    Order #{order_number} is now {status_display}
-                </div>
-
-                <p>We'll continue to keep you updated on your order progress.</p>
-
-                <div class="footer">
-                    <p>Best regards,<br>The Markt Team</p>
-                    <p>© 2025 Markt. All rights reserved.</p>
-                </div>
-            </div>
-        </body>
-        </html>
-        """
+        return L.shell(
+            title=headline,
+            preheader=f"{headline} \u2014 order #{order_number}.",
+            body=body,
+            footer_note="You are receiving this because you placed an order on Markt.",
+        )
 
     def _get_seller_order_notification_template(
         self, order_data: Dict[str, Any]
     ) -> str:
-        """Get seller order notification template"""
+        """Tell a seller they sold something, and what to do about it."""
         order_number = order_data.get("order_number", "")
-        total = order_data.get("total", 0)
-        items = order_data.get("items", [])
+        total = float(order_data.get("total", 0) or 0)
+        items = order_data.get("items", []) or []
+        buyer_name = order_data.get("buyer_name", "")
+        dashboard_url = order_data.get("dashboard_url", "")
 
-        items_html = ""
-        for item in items:
-            items_html += f"""
-            <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #eee;">{item.get('product_name', '')}</td>
-                <td style="padding: 10px; border-bottom: 1px solid #eee;">{item.get('quantity', 0)}</td>
-                <td style="padding: 10px; border-bottom: 1px solid #eee;">₦{item.get('price', 0):,.2f}</td>
-            </tr>
-            """
+        rows = [
+            [
+                str(item.get("product_name", "")),
+                str(item.get("quantity", 0)),
+                f"\u20a6{float(item.get('price', 0) or 0):,.2f}",
+            ]
+            for item in items
+        ]
 
-        return f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>New Order Received</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                .header {{ text-align: center; margin-bottom: 30px; }}
-                .logo {{ color: #E94C2A; font-size: 32px; font-weight: bold; }}
-                .order-details {{ background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; }}
-                .items-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
-                .items-table th {{ background: #E94C2A; color: white; padding: 10px; text-align: left; }}
-                .footer {{ text-align: center; margin-top: 30px; color: #666; font-size: 14px; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <div class="logo">Markt</div>
-                </div>
+        body = (
+            L.header("New order", f"You sold \u20a6{total:,.2f}")
+            + L.note(
+                "Mark it as packed once it is ready and a rider will be sent "
+                "to collect it. The sooner you do, the sooner you are paid."
+            )
+            + L.detail_rows(
+                [
+                    ["Order", f"#{order_number}"],
+                    ["Buyer", buyer_name],
+                    ["Total", f"\u20a6{total:,.2f}"],
+                ]
+            )
+            + L.table_block(["Item", "Qty", "Price"], rows, title="What to pack")
+            + (L.button("Open this order", dashboard_url) if dashboard_url else "")
+        )
 
-                <h2>New Order Received!</h2>
-
-                <p>Congratulations! You have received a new order.</p>
-
-                <div class="order-details">
-                    <h3>Order Details</h3>
-                    <p><strong>Order Number:</strong> {order_number}</p>
-                    <p><strong>Order Date:</strong> {datetime.now().strftime('%B %d, %Y')}</p>
-                    <p><strong>Total Amount:</strong> ₦{total:,.2f}</p>
-                </div>
-
-                <h3>Order Items</h3>
-                <table class="items-table">
-                    <thead>
-                        <tr>
-                            <th>Product</th>
-                            <th>Quantity</th>
-                            <th>Price</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {items_html}
-                    </tbody>
-                </table>
-
-                <p>Please process this order as soon as possible.</p>
-
-                <div class="footer">
-                    <p>Best regards,<br>The Markt Team</p>
-                    <p>© 2025 Markt. All rights reserved.</p>
-                </div>
-            </div>
-        </body>
-        </html>
-        """
+        return L.shell(
+            title=f"New order #{order_number}",
+            preheader=f"\u20a6{total:,.2f} \u2014 pack it to get a rider sent.",
+            body=body,
+            footer_note="You are receiving this because you sell on Markt.",
+        )
 
     def _get_payment_success_template(self, payment_data: Dict[str, Any]) -> str:
-        """Get payment success template"""
+        """Payment receipt."""
         order_number = payment_data.get("order_number", "")
-        amount = payment_data.get("amount", 0)
+        amount = float(payment_data.get("amount", 0) or 0)
+        reference = payment_data.get("reference", "")
+        method = payment_data.get("method", "")
+        order_url = payment_data.get("order_url", "")
 
-        return f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Payment Successful</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                .header {{ text-align: center; margin-bottom: 30px; }}
-                .logo {{ color: #E94C2A; font-size: 32px; font-weight: bold; }}
-                .success-box {{
-                    background: #d4edda;
-                    border: 1px solid #c3e6cb;
-                    color: #155724;
-                    padding: 15px;
-                    border-radius: 8px;
-                    text-align: center;
-                    margin: 20px 0;
-                }}
-                .footer {{ text-align: center; margin-top: 30px; color: #666; font-size: 14px; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <div class="logo">Markt</div>
-                </div>
+        body = (
+            L.header("Payment received", f"\u20a6{amount:,.2f} paid")
+            + L.detail_rows(
+                [
+                    ["Order", f"#{order_number}" if order_number else ""],
+                    ["Paid", datetime.now().strftime("%d %B %Y")],
+                    ["Method", str(method).replace("_", " ").title() if method else ""],
+                    ["Reference", reference],
+                ]
+            )
+            + L.note(
+                "Your order is with the seller now. We will email you when it "
+                "is packed and when it is on the way."
+            )
+            + (L.button("Track this order", order_url) if order_url else "")
+        )
 
-                <h2>Payment Successful!</h2>
-
-                <div class="success-box">
-                    <h3>Payment Confirmed</h3>
-                    <p>Your payment of ₦{amount:,.2f} for order #{order_number} has been processed successfully.</p>
-                </div>
-
-                <p>Your order is now being processed and you'll receive updates as it progresses.</p>
-
-                <div class="footer">
-                    <p>Best regards,<br>The Markt Team</p>
-                    <p>© 2025 Markt. All rights reserved.</p>
-                </div>
-            </div>
-        </body>
-        </html>
-        """
+        return L.shell(
+            title="Payment received",
+            preheader=f"\u20a6{amount:,.2f} paid for order #{order_number}.",
+            body=body,
+            footer_note="Keep this email as your receipt.",
+        )
 
     def _get_payment_failed_template(self, payment_data: Dict[str, Any]) -> str:
-        """Get payment failed template"""
+        """Payment failed -- say plainly that no money moved."""
         order_number = payment_data.get("order_number", "")
-        amount = payment_data.get("amount", 0)
+        amount = float(payment_data.get("amount", 0) or 0)
+        reason = payment_data.get("reason", "")
+        retry_url = payment_data.get("retry_url", "")
 
-        return f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Payment Failed</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                .header {{ text-align: center; margin-bottom: 30px; }}
-                .logo {{ color: #E94C2A; font-size: 32px; font-weight: bold; }}
-                .error-box {{
-                    background: #f8d7da;
-                    border: 1px solid #f5c6cb;
-                    color: #721c24;
-                    padding: 15px;
-                    border-radius: 8px;
-                    text-align: center;
-                    margin: 20px 0;
-                }}
-                .footer {{ text-align: center; margin-top: 30px; color: #666; font-size: 14px; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <div class="logo">Markt</div>
-                </div>
+        body = (
+            L.header("Payment failed", "We could not take that payment")
+            + L.note(
+                "You have not been charged. Your order is held for you \u2014 "
+                "trying again, or using a different card, is usually all it takes."
+            )
+            + L.detail_rows(
+                [
+                    ["Order", f"#{order_number}" if order_number else ""],
+                    ["Amount", f"\u20a6{amount:,.2f}"],
+                    ["Reason", str(reason) if reason else ""],
+                ]
+            )
+            + (L.button("Try payment again", retry_url) if retry_url else "")
+        )
 
-                <h2>Payment Failed</h2>
-
-                <div class="error-box">
-                    <h3>Payment Unsuccessful</h3>
-                    <p>We were unable to process your payment of ₦{amount:,.2f} for order #{order_number}.</p>
-                </div>
-
-                <p>Please try again or contact our support team if the issue persists.</p>
-
-                <div class="footer">
-                    <p>Best regards,<br>The Markt Team</p>
-                    <p>© 2025 Markt. All rights reserved.</p>
-                </div>
-            </div>
-        </body>
-        </html>
-        """
+        return L.shell(
+            title="Payment failed",
+            preheader=f"No charge was made \u2014 order #{order_number} is still held.",
+            body=body,
+            footer_note="If you were charged, reply to this email and we will look into it.",
+        )
 
     def _get_seller_analytics_report_template(self, report_data: Dict[str, Any]) -> str:
-        """Get seller analytics report template"""
-        period = report_data.get("period", "")
-        total_sales = report_data.get("total_sales", 0)
-        total_orders = report_data.get("total_orders", 0)
-        total_products = report_data.get("total_products", 0)
-        top_products = report_data.get("top_products", [])
+        """The seller's period report.
 
-        top_products_html = ""
-        for i, product in enumerate(top_products[:5], 1):
-            top_products_html += f"""
-            <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #eee;">{i}</td>
-                <td style="padding: 10px; border-bottom: 1px solid #eee;">{product.get('name', '')}</td>
-                <td style="padding: 10px; border-bottom: 1px solid #eee;">{product.get('sales', 0)}</td>
-                <td style="padding: 10px; border-bottom: 1px solid #eee;">₦{product.get('revenue', 0):,.2f}</td>
-            </tr>
-            """
+        Rewritten because the old one laid its figures out with `display:
+        grid`, which Gmail and Outlook do not support -- so the two-column
+        panel readers were meant to see collapsed into a stack of unstyled
+        divs, and the `<style>` block carrying the rest of it was stripped on
+        the way in.
 
-        return f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Your Markt Analytics Report</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                .header {{ text-align: center; margin-bottom: 30px; }}
-                .logo {{ color: #E94C2A; font-size: 32px; font-weight: bold; }}
-                .stats-grid {{
-                    display: grid;
-                    grid-template-columns: 1fr 1fr;
-                    gap: 20px;
-                    margin: 20px 0;
-                }}
-                .stat-box {{
-                    background: #f8f9fa;
-                    padding: 20px;
-                    border-radius: 8px;
-                    text-align: center;
-                    border-left: 4px solid #E94C2A;
-                }}
-                .stat-number {{ font-size: 24px; font-weight: bold; color: #E94C2A; }}
-                .items-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
-                .items-table th {{ background: #E94C2A; color: white; padding: 10px; text-align: left; }}
-                .footer {{ text-align: center; margin-top: 30px; color: #666; font-size: 14px; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <div class="logo">Markt</div>
-                </div>
-
-                <h2>Your Analytics Report - {period}</h2>
-
-                <p>Here's a summary of your performance on Markt for {period}:</p>
-
-                <div class="stats-grid">
-                    <div class="stat-box">
-                        <div class="stat-number">₦{total_sales:,.2f}</div>
-                        <div>Total Sales</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-number">{total_orders}</div>
-                        <div>Total Orders</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-number">{total_products}</div>
-                        <div>Active Products</div>
-                    </div>
-                </div>
-
-                <h3>Top Performing Products</h3>
-                <table class="items-table">
-                    <thead>
-                        <tr>
-                            <th>Rank</th>
-                            <th>Product</th>
-                            <th>Units Sold</th>
-                            <th>Revenue</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {top_products_html}
-                    </tbody>
-                </table>
-
-                <p>Keep up the great work! Continue optimizing your products and customer service to grow your business.</p>
-
-                <div class="footer">
-                    <p>Best regards,<br>The Markt Team</p>
-                    <p>© 2025 Markt. All rights reserved.</p>
-                </div>
-            </div>
-        </body>
-        </html>
+        The shape follows what a report like this is for: one number the
+        seller actually cares about, the supporting ones underneath with
+        something to compare each against, what sold, and a way back into the
+        shop. Comparisons appear only when the caller supplies the previous
+        period -- an invented delta would be worse than none.
         """
+        period = report_data.get("period", "")
+        shop_name = report_data.get("shop_name") or "your shop"
+        total_sales = float(report_data.get("total_sales", 0) or 0)
+        total_orders = int(report_data.get("total_orders", 0) or 0)
+        total_products = int(report_data.get("total_products", 0) or 0)
+        top_products = report_data.get("top_products") or []
+        dashboard_url = report_data.get("dashboard_url", "https://marktcommerce.com")
+
+        previous = report_data.get("previous") or {}
+        noun = "quarter" if period.strip().upper().startswith("Q") else "month"
+
+        body = L.header(period, f"How {shop_name} did")
+
+        if total_orders == 0:
+            # A report of nothing is the one most likely to read as a mistake,
+            # so it says plainly that nothing is broken and what usually helps.
+            body += L.lead_stat("No sales yet", period)
+            body += L.note(
+                f"Nothing sold this {noun}. That is usually a listing without "
+                "a photo or a price that has drifted -- both take a minute to "
+                "fix from your dashboard."
+            )
+            body += L.button("Open your shop", dashboard_url)
+            return L.shell(
+                f"Your Markt report - {period}",
+                f"No sales this {noun} - here is what usually helps.",
+                body,
+            )
+
+        body += L.lead_stat(
+            f"\u20a6{total_sales:,.2f}",
+            f"You earned in {period}",
+            L.change_line(
+                total_sales, previous.get("total_sales"), noun, prefix="\u20a6"
+            ),
+        )
+        body += L.stat_row(
+            "Orders",
+            f"{total_orders:,}",
+            L.change_line(total_orders, previous.get("total_orders"), noun),
+        )
+        body += L.stat_row(
+            "Average order",
+            f"\u20a6{(total_sales / total_orders):,.2f}",
+            f"Across every order this {noun}.",
+        )
+        body += L.stat_row("Live listings", f"{total_products:,}")
+
+        rows = [
+            [
+                p.get("name", ""),
+                f"{p.get('sales', 0):,}",
+                f"\u20a6{float(p.get('revenue', 0) or 0):,.2f}",
+            ]
+            for p in top_products[:5]
+        ]
+        body += L.table_block(["Product", "Sold", "Revenue"], rows, "What sold most")
+        body += L.button("Open your dashboard", dashboard_url)
+
+        return L.shell(
+            f"Your Markt report - {period}",
+            f"\u20a6{total_sales:,.2f} from {total_orders:,} orders in {period}.",
+            body,
+        )
 
 
 # Global email service instance

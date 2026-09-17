@@ -368,7 +368,7 @@ class WalletService:
         if amount is None or amount <= 0:
             return None
 
-        return WalletService.credit(
+        entry = WalletService.credit(
             delivery_user_id,
             amount,
             WalletReferenceType.DELIVERY_EARNING,
@@ -376,6 +376,30 @@ class WalletService:
             description=description or f"Delivery earning for {reference_id}",
             idempotency_key=f"delivery-earning:{reference_id}",
         )
+
+        # Tell them. A rider finishing a drop should not have to open the
+        # wallet to find out whether they were paid for it.
+        #
+        # Never raises: the money is already credited, and a notification that
+        # failed is not a reason to unwind a payout.
+        try:
+            from app.notifications.models import NotificationType
+            from app.notifications.services import NotificationService
+
+            NotificationService.create_notification(
+                delivery_user_id,
+                NotificationType.DELIVERY_EARNING_CREDITED,
+                reference_type="delivery_earning",
+                reference_id=str(reference_id),
+                metadata_={"amount": str(amount), "reference": reference_id},
+            )
+        except Exception:
+            logger.exception(
+                "Could not notify rider %s of earning %s",
+                delivery_user_id,
+                reference_id,
+            )
+        return entry
 
     @staticmethod
     def refund_order_to_wallet(
