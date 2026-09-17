@@ -1165,6 +1165,49 @@ class BuyerRequestService:
             )
 
     @staticmethod
+    def _sellers_in_buyers_city(session, request, sellers):
+        """Keep the sellers who could actually deliver to this buyer.
+
+        Returns the list unchanged when the buyer's location is unknown, or
+        when no seller resolves into a serviceable city -- a request that
+        reaches the wrong sellers is a poor notification, but one that reaches
+        nobody is a dead feature.
+        """
+        from app.delivery_pricing.services import city_id_for_point
+        from app.users.addresses import SavedAddress
+
+        # A request with no author has no location to scope by.
+        user_id = getattr(request, "user_id", None)
+        if not user_id:
+            return sellers
+
+        address = (
+            session.query(SavedAddress)
+            .filter(SavedAddress.user_id == user_id)
+            .order_by(
+                SavedAddress.is_default.desc(),
+                SavedAddress.last_used_at.desc().nullslast(),
+            )
+            .first()
+        )
+        if not address:
+            return sellers
+
+        buyer_city = city_id_for_point(session, address.latitude, address.longitude)
+        if buyer_city is None:
+            return sellers
+
+        near = [
+            s
+            for s in sellers
+            if s.shop_latitude is not None
+            and s.shop_longitude is not None
+            and city_id_for_point(session, s.shop_latitude, s.shop_longitude)
+            == buyer_city
+        ]
+        return near or sellers
+
+    @staticmethod
     def _notify_relevant_sellers(request: BuyerRequest):
         """Notify sellers who might respond to this request -- sellers with
         an active product in the request's primary category. This was a
@@ -1175,9 +1218,19 @@ class BuyerRequestService:
 
         Scoped to `request.market_id` + VERIFIED market membership when
         set -- only true for a REROUTE_ENGINE request (18.2: rerouting is
-        within-market only). A buyer-posted request has no market_id and
-        reaches every matching seller regardless of market, matching this
-        feature's general-purpose, social nature.
+        within-market only).
+
+        A buyer-posted request has no market_id, and used to reach every
+        matching seller in the country, capped at 50. Markt does not deliver
+        between cities -- a lane across two returns no_lane by design -- so a
+        seller in Lagos was being told about a buyer in Ibadan they could
+        never sell to, and the buyer's request was spent on sellers who could
+        not answer it. Those are now filtered to the buyer's own city, the
+        same unit delivery itself works in.
+
+        A buyer with no usable address falls back to the old behaviour rather
+        than being told nobody can help: unscoped is wrong, but silence is
+        worse.
         """
         with session_scope() as session:
             primary_rc = next((rc for rc in request.categories if rc.is_primary), None)
@@ -1203,7 +1256,11 @@ class BuyerRequestService:
                 )
 
             # Cap so one broad-category request can't fan out unboundedly.
+            # Read before the city filter, which narrows rather than widens.
             sellers = query.limit(50).all()
+            sellers = BuyerRequestService._sellers_in_buyers_city(
+                session, request, sellers
+            )
             seller_user_ids = [s.user_id for s in sellers if s.user_id]
             request_title = request.title
 
