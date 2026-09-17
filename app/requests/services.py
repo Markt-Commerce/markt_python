@@ -1238,9 +1238,44 @@ class BuyerRequestService:
 
     @staticmethod
     def _handle_request_expiration(request: BuyerRequest, session):
-        """Handle request expiration logic"""
-        # Similar to closure but with different notification
-        BuyerRequestService._handle_request_closure(request, session)
+        """Expire a request: close out its offers, and tell the buyer.
+
+        Two things were missing here. The background sweep
+        (handle_request_expiration) calls straight into this, bypassing
+        update_request_status -- which is the only place that assigned
+        RequestStatus.EXPIRED. So a request past its expires_at had its
+        pending offers rejected and then stayed OPEN forever: still listed,
+        still offerable, and swept again on every run.
+
+        And the buyer, whose request it is, was told nothing at all.
+        REQUEST_EXPIRED existed as a type, a template and a channel config,
+        and no line in the codebase created one.
+        """
+        # Status first. create_notification re-raises on failure, and
+        # _handle_request_closure notifies every seller who offered, so a
+        # single bad notification used to abort the sweep before the request
+        # was ever marked expired -- leaving it open again.
+        request.status = RequestStatus.EXPIRED
+
+        try:
+            BuyerRequestService._handle_request_closure(request, session)
+        except Exception as e:
+            logger.warning(
+                "Could not close out offers on expired request %s: %s", request.id, e
+            )
+
+        try:
+            NotificationService.create_notification(
+                user_id=request.buyer.user_id,
+                notification_type=NotificationType.REQUEST_EXPIRED,
+                reference_type="request",
+                reference_id=request.id,
+                metadata_={"request_title": request.title},
+            )
+        except Exception as e:  # a notification must not strand the sweep
+            logger.warning(
+                "Could not notify buyer that request %s expired: %s", request.id, e
+            )
 
     @staticmethod
     def _notify_status_change(
