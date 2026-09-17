@@ -650,6 +650,13 @@ class PaymentService:
             from app.delivery_pricing.dispatch import dispatch
 
             dispatch(order_id)
+
+            # And tell the riders nearby that it exists. Without this the
+            # only way to find a delivery is to be looking at the dashboard
+            # at the moment someone pays.
+            from app.deliveries.rider_alerts import alert_nearby_riders
+
+            alert_nearby_riders(order_id)
         except Exception:
             logger.exception(
                 "Dispatching the delivery for order %s failed outright", order_id

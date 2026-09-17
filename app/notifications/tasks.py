@@ -103,17 +103,29 @@ def send_email_notification(self, notification_data: Dict):
         user_id = notification_data["user_id"]
         notification_type = notification_data["type"]
 
-        # Get user email
+        # Get the recipient's email.
+        #
+        # A rider is not a User: they live in delivery_users with a DEL_ id,
+        # have no UserSettings row, and their address is verified by the OTP
+        # they signed in with rather than a separate confirmation step.
         with session_scope() as session:
-            user = session.query(User).get(user_id)
-            if not user or not user.email_verified:
-                logger.warning(f"User {user_id} not found or email not verified")
-                return
+            if str(user_id).startswith("DEL_"):
+                from app.deliveries.models import DeliveryUser
 
-            # Check user email notification settings
-            if user.settings and not user.settings.email_notifications:
-                logger.info(f"Email notifications disabled for user {user_id}")
-                return
+                rider = session.query(DeliveryUser).get(user_id)
+                if not rider or not rider.email:
+                    logger.warning("Rider %s has no email address", user_id)
+                    return
+            else:
+                user = session.query(User).get(user_id)
+                if not user or not user.email_verified:
+                    logger.warning(f"User {user_id} not found or email not verified")
+                    return
+
+                # Check user email notification settings
+                if user.settings and not user.settings.email_notifications:
+                    logger.info(f"Email notifications disabled for user {user_id}")
+                    return
 
         # Map notification types to email methods
         email_methods = {

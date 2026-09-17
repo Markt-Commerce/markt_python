@@ -26,6 +26,19 @@ class DeliveryChannel(Enum):
     EMAIL = "email"
 
 
+class _Blanks(dict):
+    """Formatting that leaves unknown placeholders blank instead of raising."""
+
+    def __missing__(self, key):  # pragma: no cover - trivial
+        return ""
+
+
+def _owner_column(owner_id: str) -> str:
+    """The Notification column an id is stored in -- see
+    NotificationService._owner_filter for why the prefix is enough."""
+    return "delivery_user_id" if str(owner_id).startswith("DEL_") else "user_id"
+
+
 class NotificationService:
     # Notification templates
     TEMPLATES = {
@@ -138,6 +151,20 @@ class NotificationService:
         NotificationType.ORDER_PLACED: {
             "title": "New order",
             "message": "New order #{order_id} has been placed",
+        },
+        # Riders. Short, and leading with the money or the place, because
+        # these are read on a phone mounted to a handlebar.
+        NotificationType.DELIVERY_AVAILABLE: {
+            "title": "New delivery nearby",
+            "message": "A delivery is available near you. {pickup}",
+        },
+        NotificationType.DELIVERY_ASSIGNED: {
+            "title": "Delivery assigned",
+            "message": "You're on delivery {reference}. {pickup}",
+        },
+        NotificationType.DELIVERY_EARNING_CREDITED: {
+            "title": "You've been paid",
+            "message": "{amount} for delivery {reference} is in your wallet.",
         },
         NotificationType.PAYMENT_SUCCESS: {
             "title": "Payment successful",
@@ -300,6 +327,24 @@ class NotificationService:
             "immediate_websocket": True,
             "push_when_offline": False,
         },
+        # A rider who misses "a delivery is available" has lost the job to
+        # someone else, so it pushes whether or not the app is open -- the
+        # only type here that does. The other two are records, not summons.
+        NotificationType.DELIVERY_AVAILABLE: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "always_push": True,
+        },
+        NotificationType.DELIVERY_ASSIGNED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.DELIVERY_EARNING_CREDITED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
         NotificationType.ORDER_PLACED: {
             "channels": [
                 DeliveryChannel.WEBSOCKET,
@@ -411,6 +456,25 @@ class NotificationService:
     }
 
     @staticmethod
+    @staticmethod
+    def _owner_filter(owner_id: str) -> Dict[str, str]:
+        """Which column this id belongs in.
+
+        Every method here takes one `user_id` that is really "whoever this is
+        for" -- a buyer or seller (`USR_`, the `User` table) or a rider
+        (`DEL_`, the structurally separate `DeliveryUser` table). The two id
+        formats never collide, so the prefix routes the write without a
+        second parameter at every call site. Same approach, deliberately, as
+        WalletService._owner_filter.
+        """
+        if str(owner_id).startswith("DEL_"):
+            return {"delivery_user_id": owner_id}
+        return {"user_id": owner_id}
+
+    @staticmethod
+    def is_rider(owner_id: str) -> bool:
+        return str(owner_id).startswith("DEL_")
+
     def create_notification(
         user_id: str,
         notification_type: NotificationType,
@@ -476,13 +540,21 @@ class NotificationService:
                     if metadata_
                     else "moderation"
                 ),
+                # Rider templates.
+                "pickup": (metadata_ or {}).get("pickup", ""),
+                "reference": (metadata_ or {}).get("reference", ""),
+                "amount": (metadata_ or {}).get("amount", ""),
             }
 
-            message = template["message"].format(**format_data)
+            # A placeholder with nothing behind it used to raise KeyError
+            # here, and every caller swallows that -- so one template gaining
+            # a field the callers do not pass made its notifications vanish
+            # rather than read oddly. An empty string is the better failure.
+            message = template["message"].format_map(_Blanks(format_data)).strip()
 
             with session_scope() as session:
                 notification = Notification(
-                    user_id=user_id,
+                    **NotificationService._owner_filter(user_id),
                     type=notification_type,
                     title=template["title"],
                     message=message,
@@ -605,7 +677,7 @@ class NotificationService:
         try:
             with session_scope() as session:
                 query = session.query(Notification).filter(
-                    Notification.user_id == user_id
+                    getattr(Notification, _owner_column(user_id)) == user_id
                 )
 
                 if unread_only:
@@ -641,7 +713,8 @@ class NotificationService:
         try:
             with session_scope() as session:
                 query = session.query(Notification).filter(
-                    Notification.user_id == user_id, Notification.is_read == False
+                    getattr(Notification, _owner_column(user_id)) == user_id,
+                    Notification.is_read == False,
                 )
 
                 if notification_ids:
@@ -676,7 +749,8 @@ class NotificationService:
                 return (
                     session.query(Notification)
                     .filter(
-                        Notification.user_id == user_id, Notification.is_read == False
+                        getattr(Notification, _owner_column(user_id)) == user_id,
+                        Notification.is_read == False,
                     )
                     .count()
                 )
@@ -689,7 +763,7 @@ class NotificationService:
         """Mark notifications as seen (internal helper)"""
         try:
             session.query(Notification).filter(
-                Notification.user_id == user_id,
+                getattr(Notification, _owner_column(user_id)) == user_id,
                 Notification.id.in_(notification_ids),
                 Notification.is_seen == False,
             ).update({"is_seen": True}, synchronize_session=False)
@@ -714,13 +788,18 @@ class PushService:
         if not token:
             return
         with session_scope() as session:
+            owner = NotificationService._owner_filter(user_id)
             existing = session.query(PushToken).filter_by(token=token).first()
             if existing:
-                existing.user_id = user_id
+                # A device can change hands between a rider and a shopper
+                # account; clear the other column rather than leaving both set
+                # and tripping the single-owner constraint.
+                existing.user_id = owner.get("user_id")
+                existing.delivery_user_id = owner.get("delivery_user_id")
                 if platform:
                     existing.platform = platform
             else:
-                session.add(PushToken(user_id=user_id, token=token, platform=platform))
+                session.add(PushToken(token=token, platform=platform, **owner))
 
     @staticmethod
     def remove_token(token: str) -> None:
@@ -736,7 +815,11 @@ class PushService:
         with session_scope() as session:
             return [
                 t.token
-                for t in session.query(PushToken).filter_by(user_id=user_id).all()
+                for t in (
+                    session.query(PushToken)
+                    .filter_by(**NotificationService._owner_filter(user_id))
+                    .all()
+                )
             ]
 
     @staticmethod
