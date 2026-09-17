@@ -405,21 +405,36 @@ class DeliveryService:
 
                         seen_seller_ids.add(seller.id)
 
-                        seller_address = (
-                            getattr(seller.user, "address", None)
-                            if seller.user
-                            else None
-                        )
+                        # The shop's own coordinates first.
+                        #
+                        # This read seller.user.address and nothing else, but
+                        # that is a personal address on the User, not the
+                        # shop: sellers set where their shop is through
+                        # Seller.shop_latitude/shop_longitude, which is what
+                        # the delivery quote prices against, what the
+                        # proximity feed ranks by, and what the run schemas
+                        # hand the rider app to draw a pickup pin.
+                        #
+                        # So a seller who had set their shop location the
+                        # supported way, and had no separate personal address
+                        # row, was skipped -- their paid orders never appeared
+                        # to any rider, and the only symptom was an available
+                        # list that stayed empty.
+                        pickup_lat = seller.shop_latitude
+                        pickup_lng = seller.shop_longitude
 
-                        if (
-                            not seller_address
-                            or seller_address.latitude is None
-                            or seller_address.longitude is None
-                        ):
+                        if pickup_lat is None or pickup_lng is None:
+                            seller_address = (
+                                getattr(seller.user, "address", None)
+                                if seller.user
+                                else None
+                            )
+                            if seller_address:
+                                pickup_lat = seller_address.latitude
+                                pickup_lng = seller_address.longitude
+
+                        if pickup_lat is None or pickup_lng is None:
                             continue
-
-                        pickup_lat = seller_address.latitude
-                        pickup_lng = seller_address.longitude
 
                         seller_pickups.append({"lat": pickup_lat, "lng": pickup_lng})
 
