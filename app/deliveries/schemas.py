@@ -177,7 +177,12 @@ class AvailableRunSchema(Schema):
     market = fields.String(allow_none=True)
     area = fields.String()
     order_count = fields.Integer()
+    # What each buyer pays towards the run -- not the rider's number.
     price_per_order = fields.Float(allow_none=True)
+    # What the rider is credited, per drop and for the whole run. Without
+    # these the app shows price_per_order as earnings, which over-promises.
+    rider_earning_per_drop = fields.Float(allow_none=True)
+    rider_earning_total = fields.Float(allow_none=True)
     distance_meters = fields.Float()
     # Area centroid (Area.latitude/longitude), not per-seller/per-buyer
     # coordinates -- a rider hasn't committed to this run yet, so real
@@ -254,6 +259,8 @@ class DeliveryRunDetailResponseSchema(Schema):
     market = fields.String(allow_none=True)
     area = fields.String(allow_none=True)
     price_per_order = fields.Float(allow_none=True)
+    rider_earning_per_drop = fields.Float(allow_none=True)
+    rider_earning_total = fields.Float(allow_none=True)
     stops = fields.List(fields.Nested(DeliveryRunStopDetailSchema), missing=list)
     orders = fields.List(fields.Nested(DeliveryRunOrderDetailSchema), missing=list)
 

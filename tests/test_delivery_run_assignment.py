@@ -84,18 +84,24 @@ def test_get_available_runs_filters_by_distance_and_missing_area_location(
         area=SimpleNamespace(name="Campus A", latitude=6.45, longitude=3.39),
         market=SimpleNamespace(name="Market A"),
         price_per_order=250.0,
+        base_price=1000.0,
+        run_orders=[object(), object(), object(), object()],
     )
     far_run = SimpleNamespace(
         id="RUN_FAR",
         area=SimpleNamespace(name="Campus B", latitude=10.0, longitude=10.0),
         market=SimpleNamespace(name="Market B"),
         price_per_order=250.0,
+        base_price=1000.0,
+        run_orders=[object(), object(), object(), object()],
     )
     no_area_location_run = SimpleNamespace(
         id="RUN_NO_LOC",
         area=SimpleNamespace(name="Campus C", latitude=None, longitude=None),
         market=None,
         price_per_order=None,
+        base_price=None,
+        run_orders=[],
     )
 
     session = MagicMock()
@@ -367,6 +373,8 @@ def test_get_run_detail_builds_stops_and_orders(mock_accepted):
         market=SimpleNamespace(name="Main Market"),
         area=SimpleNamespace(name="Campus A"),
         price_per_order=250.0,
+        base_price=1000.0,
+        run_orders=[object(), object(), object(), object()],
     )
     stop = SimpleNamespace(
         seller_id=7,
@@ -468,6 +476,8 @@ def test_get_run_detail_handles_missing_seller_and_order(mock_accepted):
         market=None,
         area=None,
         price_per_order=None,
+        base_price=None,
+        run_orders=[],
     )
     stop = SimpleNamespace(
         seller_id=7,
