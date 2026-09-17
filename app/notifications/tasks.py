@@ -84,6 +84,10 @@ def send_push_notification(self, notification_data: Dict):
                 "type": notification_data.get("type"),
                 "reference_type": notification_data.get("reference_type"),
                 "reference_id": notification_data.get("reference_id"),
+                # An order notification without its status lands everyone on
+                # the order summary. "A rider has picked it up" should open
+                # tracking; "delivered" should not.
+                "status": (notification_data.get("metadata_") or {}).get("status"),
             },
         )
         logger.info(
