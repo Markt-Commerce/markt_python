@@ -74,7 +74,9 @@ def test_confirm_order_qr_code_starts_settlement_hold_and_completes_order(
 
 @patch("app.deliveries.services.WalletService.credit_delivery_earning")
 @patch("app.orders.services.OrderService.update_order_status")
-def test_confirm_order_qr_code_skips_cancelled_items(mock_update_status, mock_credit_earning):
+def test_confirm_order_qr_code_skips_cancelled_items(
+    mock_update_status, mock_credit_earning
+):
     item_a = _make_item(1, OrderItem.Status.SHIPPED, seller_id=7)
     item_b = _make_item(2, OrderItem.Status.CANCELLED, seller_id=8)
     order = SimpleNamespace(id="ORD_1", items=[item_a, item_b], shipping_fee=500)

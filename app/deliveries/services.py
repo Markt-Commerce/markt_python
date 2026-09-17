@@ -869,7 +869,9 @@ class DeliveryService:
         # to notice and backfill, not a 500 on the buyer-facing POD flow.
         if earning_amount and earning_amount > 0:
             try:
-                WalletService.credit_delivery_earning(rider_id, earning_amount, reference_id)
+                WalletService.credit_delivery_earning(
+                    rider_id, earning_amount, reference_id
+                )
             except Exception:
                 logger.exception(
                     "Failed to credit rider %s for delivery %s", rider_id, reference_id
