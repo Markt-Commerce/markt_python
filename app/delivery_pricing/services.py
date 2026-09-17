@@ -415,3 +415,16 @@ class QuoteService:
                     synchronize_session=False,
                 )
             )
+
+
+def city_id_for_point(session, lat, lng) -> Optional[int]:
+    """The serviceable city a coordinate falls in, or None.
+
+    Delivery only happens *within* a city -- a lane across two cities returns
+    no_lane by design -- so this is the honest unit for "near enough to
+    matter". Used outside pricing to keep notifications inside the area a
+    delivery could actually serve: telling a seller in Lagos about a buyer in
+    Ibadan is telling them about a sale they cannot make.
+    """
+    zone = ServiceabilityService.zone_for_point(session, lat, lng)
+    return zone.city_id if zone else None
