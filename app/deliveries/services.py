@@ -37,6 +37,7 @@ from .models import (
 from app.orders.events import ActorType, OrderEventService, OrderEventType
 from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
 from app.orders.services import OrderService
+from app.wallet.services import WalletService
 
 logger = logging.getLogger(__name__)
 
@@ -851,12 +852,30 @@ class DeliveryService:
                     item.delivered_at = datetime.utcnow()
 
             assignment.logistical_status = LogisticalStatus.COMPLETED
+            rider_id = assignment.delivery_user_id
+            reference_id = assignment.assignment_id
+            earning_amount = order.shipping_fee
             session.commit()
 
         # Delegate order-level completion (status, realtime event, gamification)
         # to the single source of truth so the QR path gets the same side effects
         # as every other way an order can be marked delivered.
         OrderService.update_order_status(order_id, OrderStatus.DELIVERED)
+
+        # Outside the transaction above -- WalletService.credit opens its own
+        # session_scope(), and a wallet bug must never roll back a delivery
+        # that has already genuinely happened. Logged, not raised: the rider
+        # did the work either way, and a crediting failure here needs someone
+        # to notice and backfill, not a 500 on the buyer-facing POD flow.
+        if earning_amount and earning_amount > 0:
+            try:
+                WalletService.credit_delivery_earning(
+                    rider_id, earning_amount, reference_id
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to credit rider %s for delivery %s", rider_id, reference_id
+                )
 
         return {"status": "success", "message": "Order marked as delivered"}
 

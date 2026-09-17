@@ -18,6 +18,9 @@ class WalletReferenceType(Enum):
     WALLET_TOPUP = "wallet_topup"
     WITHDRAWAL = "withdrawal"
     ADJUSTMENT = "adjustment"
+    # Credited to a rider's wallet on delivery confirmation -- see
+    # WalletService.credit_delivery_earning.
+    DELIVERY_EARNING = "delivery_earning"
 
 
 class TopUpStatus(Enum):
@@ -37,17 +40,33 @@ class WalletAccount(BaseModel):
     __tablename__ = "wallet_accounts"
 
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.String(12), db.ForeignKey("users.id"), nullable=False)
+    # Exactly one of user_id/delivery_user_id is set (enforced by
+    # ck_wallet_accounts_single_owner) -- DeliveryUser is a structurally
+    # separate table from User (delivery_users vs users), so a rider's
+    # wallet can't reuse the user_id FK. See REFACTOR_NOTES.md
+    # (markt_logistics), "No rider payout functionality" (2026-09-17).
+    user_id = db.Column(db.String(12), db.ForeignKey("users.id"), nullable=True)
+    delivery_user_id = db.Column(
+        db.String(12), db.ForeignKey("delivery_users.id"), nullable=True
+    )
     currency = db.Column(db.String(3), default="NGN", nullable=False)
     available_balance = db.Column(MONEY, default=0.0, nullable=False)
 
     user = db.relationship("User", back_populates="wallet_accounts")
+    delivery_user = db.relationship("DeliveryUser")
     entries = db.relationship(
         "WalletEntry", back_populates="wallet_account", lazy="dynamic"
     )
 
     __table_args__ = (
         db.UniqueConstraint("user_id", "currency", name="uq_wallet_user_currency"),
+        db.UniqueConstraint(
+            "delivery_user_id", "currency", name="uq_wallet_delivery_user_currency"
+        ),
+        db.CheckConstraint(
+            "(user_id IS NOT NULL) <> (delivery_user_id IS NOT NULL)",
+            name="ck_wallet_accounts_single_owner",
+        ),
     )
 
 
@@ -74,7 +93,11 @@ class WithdrawalRequest(BaseModel, UniqueIdMixin):
     id_prefix = "WDR_"
 
     id = db.Column(db.String(12), primary_key=True, default=None)
-    user_id = db.Column(db.String(12), db.ForeignKey("users.id"), nullable=False)
+    # Same single-owner rule as WalletAccount above.
+    user_id = db.Column(db.String(12), db.ForeignKey("users.id"), nullable=True)
+    delivery_user_id = db.Column(
+        db.String(12), db.ForeignKey("delivery_users.id"), nullable=True
+    )
     amount = db.Column(MONEY, nullable=False)
     currency = db.Column(db.String(3), default="NGN", nullable=False)
     bank_code = db.Column(db.String(10), nullable=False)
@@ -87,6 +110,21 @@ class WithdrawalRequest(BaseModel, UniqueIdMixin):
     failure_reason = db.Column(db.String(255), nullable=True)
 
     user = db.relationship("User", back_populates="withdrawal_requests")
+    delivery_user = db.relationship("DeliveryUser")
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "(user_id IS NOT NULL) <> (delivery_user_id IS NOT NULL)",
+            name="ck_withdrawal_requests_single_owner",
+        ),
+    )
+
+    @property
+    def owner_id(self) -> str:
+        """The id of whoever this withdrawal belongs to, regardless of
+        which FK is populated -- use this instead of `.user_id` directly
+        whenever the row might belong to a delivery partner."""
+        return self.user_id or self.delivery_user_id
 
 
 class WalletTopUp(BaseModel, UniqueIdMixin):

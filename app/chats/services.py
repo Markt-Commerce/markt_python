@@ -528,9 +528,6 @@ class ChatService:
                 )
                 if not room:
                     raise ForbiddenError("Access denied to this chat room")
-                recipient_id = (
-                    room.seller_id if room.buyer_id == user_id else room.buyer_id
-                )
 
             ChatService._mark_messages_as_read(room_id, user_id)
 
@@ -789,6 +786,15 @@ class ChatService:
 
                 if not room:
                     raise ForbiddenError("Access denied to this chat room")
+
+                # Who the notification below goes to: the other person in the
+                # room. This was missing, so `recipient_id` was an undefined
+                # name -- caught by that block's own `except Exception`, which
+                # meant every chat notification failed silently while the
+                # message itself sent normally.
+                recipient_id = (
+                    room.seller_id if room.buyer_id == user_id else room.buyer_id
+                )
 
                 # Prepare message_data with product snapshot for product messages
                 final_message_data = message_data or {}
