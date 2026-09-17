@@ -179,8 +179,8 @@ class NotificationService:
             "message": "Your post in {niche_name} was not approved",
         },
         NotificationType.MODERATION_ACTION: {
-            "title": "Moderation action",
-            "message": "A moderation action was taken: {action_type}",
+            "title": "Your report",
+            "message": "{action_type}",
         },
         NotificationType.CHAT_MESSAGE: {
             "title": "New message",

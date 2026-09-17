@@ -186,7 +186,7 @@ class CartService:
 
             # Notify seller about cart addition (optional)
             CartService._notify_seller_cart_addition(
-                product.seller_id, product_id, quantity
+                product.seller_id, product_id, quantity, product.name
             )
 
             return cart_item
@@ -958,7 +958,9 @@ class CartService:
         return to_money(0)
 
     @staticmethod
-    def _notify_seller_cart_addition(seller_id: int, product_id: str, quantity: int):
+    def _notify_seller_cart_addition(
+        seller_id: int, product_id: str, quantity: int, product_name: str = ""
+    ):
         """Notify seller when product is added to cart"""
         try:
             from app.users.models import Seller
@@ -971,7 +973,13 @@ class CartService:
                         NotificationType.CART_ITEM_ADDED,
                         reference_type="product",
                         reference_id=product_id,
-                        metadata_={"quantity": quantity},
+                        # Without the name the seller reads "your product
+                        # was added to a customer's cart" and cannot tell
+                        # which of their products it was.
+                        metadata_={
+                            "quantity": quantity,
+                            "product_name": product_name,
+                        },
                     )
         except Exception:
             logger.exception("Failed to notify seller about cart addition")

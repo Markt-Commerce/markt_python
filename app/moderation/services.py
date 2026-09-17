@@ -245,8 +245,57 @@ class ModerationService:
             report.reviewed_by = reviewer_id
             report.reviewed_at = datetime.utcnow()
             report.resolution_note = note or None
-            return {
+            result = {
                 "report_id": report.id,
                 "status": report.status.value,
                 "reviewed_at": report.reviewed_at.isoformat(),
             }
+            reporter_id = report.reporter_id
+            report_id_value = report.id
+
+        # Close the loop with whoever reported it. Reporting something and
+        # then never hearing anything is how people stop reporting: they
+        # assume nobody looked. MODERATION_ACTION existed as a type, a
+        # template and a channel config with nothing creating one.
+        #
+        # Only for a decision. PENDING and REVIEWING are the report moving
+        # through a queue, which is not news to the person waiting.
+        if reporter_id and new_status in (
+            ReportStatus.ACTIONED,
+            ReportStatus.DISMISSED,
+        ):
+            ModerationService._notify_reporter(
+                reporter_id, report_id_value, new_status, note
+            )
+
+        return result
+
+    # What the reporter is told. Deliberately says what happened to their
+    # report and not what happened to the other person: the outcome of a
+    # report is between us and whoever was reported.
+    _OUTCOME_WORDS = {
+        ReportStatus.ACTIONED: "We took action on the content you reported",
+        ReportStatus.DISMISSED: ("We reviewed the content you reported and left it up"),
+    }
+
+    @staticmethod
+    def _notify_reporter(reporter_id, report_id, status, note):
+        try:
+            from app.notifications.models import NotificationType
+            from app.notifications.services import NotificationService
+
+            NotificationService.create_notification(
+                user_id=reporter_id,
+                notification_type=NotificationType.MODERATION_ACTION,
+                reference_type="report",
+                reference_id=report_id,
+                metadata_={
+                    "action_type": ModerationService._OUTCOME_WORDS.get(
+                        status, status.value
+                    ),
+                    "status": status.value,
+                    "note": note or "",
+                },
+            )
+        except Exception:  # never let a notification fail a moderation call
+            logger.exception("Failed to notify reporter %s", reporter_id)
