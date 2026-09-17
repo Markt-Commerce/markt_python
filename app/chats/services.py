@@ -20,6 +20,8 @@ from app.libs.errors import (
 from app.users.models import User, Seller
 from app.products.models import Product
 from app.requests.models import BuyerRequest
+from app.notifications.models import NotificationType
+from app.notifications.services import NotificationService
 
 # app imports
 from app.libs.models import ReactionType
@@ -785,6 +787,15 @@ class ChatService:
                 if not room:
                     raise ForbiddenError("Access denied to this chat room")
 
+                # Who the notification below goes to: the other person in the
+                # room. This was missing, so `recipient_id` was an undefined
+                # name -- caught by that block's own `except Exception`, which
+                # meant every chat notification failed silently while the
+                # message itself sent normally.
+                recipient_id = (
+                    room.seller_id if room.buyer_id == user_id else room.buyer_id
+                )
+
                 # Prepare message_data with product snapshot for product messages
                 final_message_data = message_data or {}
                 pid = product_id or final_message_data.get("product_id")
@@ -821,6 +832,18 @@ class ChatService:
 
                 session.commit()
 
+                try:
+                    NotificationService.create_notification(
+                        recipient_id,
+                        NotificationType.CHAT_MESSAGE,
+                        actor_id=user_id,
+                        reference_type="chat_room",
+                        reference_id=str(room_id),
+                        metadata_={"message": content[:160]},
+                    )
+                except Exception:
+                    logger.exception("Failed to create chat message notification")
+
                 return message
 
         except Exception as e:
@@ -849,6 +872,9 @@ class ChatService:
 
                 if not room:
                     raise ForbiddenError("Access denied to this chat room")
+                recipient_id = (
+                    room.seller_id if room.buyer_id == user_id else room.buyer_id
+                )
 
                 # Get product details
                 product = (
@@ -887,6 +913,18 @@ class ChatService:
                     room.unread_count_buyer += 1
 
                 session.commit()
+
+                try:
+                    NotificationService.create_notification(
+                        recipient_id,
+                        NotificationType.CHAT_OFFER,
+                        actor_id=user_id,
+                        reference_type="chat_room",
+                        reference_id=str(room_id),
+                        metadata_={"product_name": product.name},
+                    )
+                except Exception:
+                    logger.exception("Failed to create chat offer notification")
 
                 # Get sender info
                 sender = session.query(User).filter(User.id == user_id).first()
@@ -931,6 +969,9 @@ class ChatService:
 
                 if not room or (room.buyer_id != user_id and room.seller_id != user_id):
                     raise ForbiddenError("Access denied to this offer")
+                recipient_id = (
+                    room.seller_id if room.buyer_id == user_id else room.buyer_id
+                )
 
                 # Update offer status
                 offer.status = response  # "accepted" or "rejected"
@@ -950,6 +991,20 @@ class ChatService:
                 # Update room
                 room.last_message_at = datetime.utcnow()
                 session.commit()
+
+                try:
+                    NotificationService.create_notification(
+                        recipient_id,
+                        NotificationType.CHAT_OFFER_RESPONSE,
+                        actor_id=user_id,
+                        reference_type="chat_room",
+                        reference_id=str(room.id),
+                        metadata_={"response": response},
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to create chat offer response notification"
+                    )
 
                 # Send real-time notification
                 # ChatSocketManager.send_message_to_room(room.id, {

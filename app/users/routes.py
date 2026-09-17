@@ -75,7 +75,7 @@ from .services import (
     SellerAnalyticsService,
     SocialAuthService,
 )
-from .models import User
+from .models import User, UserSettings
 
 logger = logging.getLogger(__name__)
 
@@ -504,17 +504,48 @@ class UserList(MethodView):
 
 
 @bp.route("/settings")
-class UserSettings(MethodView):
+# Not `UserSettings`: that is the model, imported at the top of this file, and
+# a view with the same name shadows it -- so `UserSettings(user_id=...)` below
+# built a MethodView instead of a row and raised "takes no arguments". Any
+# user without a settings row got a 500 from both verbs.
+class UserSettingsView(MethodView):
     @login_required
     @bp.response(200, SettingsSchema)
     def get(self):
         """Get user settings"""
+        settings = current_user.settings
+        if not settings:
+            settings = UserSettings(user_id=current_user.id)
+            from external.database import db
+
+            db.session.add(settings)
+            db.session.commit()
+        return settings
 
     @login_required
     @bp.arguments(SettingsUpdateSchema)
     @bp.response(200, SettingsSchema)
     def patch(self, data):
         """Update user settings"""
+        settings = current_user.settings
+        if not settings:
+            settings = UserSettings(user_id=current_user.id)
+            from external.database import db
+
+            db.session.add(settings)
+        for field in (
+            "email_notifications",
+            "push_notifications",
+            "sms_notifications",
+            "marketing_notifications",
+            "preferred_language",
+        ):
+            if field in data:
+                setattr(settings, field, data[field])
+        from external.database import db
+
+        db.session.commit()
+        return settings
 
 
 @bp.route("/address")

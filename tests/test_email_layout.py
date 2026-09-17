@@ -137,3 +137,42 @@ class TestButton:
         html = L.button("Open your dashboard", "https://example.test/d")
         assert "<table" in html
         assert 'href="https://example.test/d"' in html
+
+
+class TestEscaping:
+    """Everything these helpers interpolate is somebody's typed-in text."""
+
+    NASTY = '<script>alert("x")</script> & "Ade\'s" <b>Shop</b>'
+
+    def test_a_product_name_cannot_inject_markup(self):
+        html = render(top_products=[{"name": self.NASTY, "sales": 1, "revenue": 10.0}])
+        assert "<script>" not in html
+        assert "&lt;script&gt;" in html
+
+    def test_a_shop_name_cannot_inject_markup(self):
+        html = render(shop_name=self.NASTY)
+        assert "<script>" not in html
+
+    def test_a_url_cannot_break_out_of_its_attribute(self):
+        html = L.button("Go", 'https://x.test/"onmouseover="alert(1)')
+        assert '"onmouseover=' not in html
+        assert "&quot;onmouseover=" in html
+
+    def test_table_cells_and_headings_are_escaped(self):
+        html = L.table_block([self.NASTY], [[self.NASTY]])
+        assert "<script>" not in html
+
+    def test_progress_step_labels_are_escaped(self):
+        assert "<script>" not in L.progress([self.NASTY, "B"], 0)
+
+    def test_detail_values_are_escaped(self):
+        assert "<script>" not in L.detail_rows([["Order", self.NASTY]])
+
+    def test_the_built_body_is_not_double_escaped(self):
+        # shell()'s body is already markup; escaping it would print the tags.
+        html = L.shell("T", "P", L.note("hello"), "footer")
+        assert "&lt;tr&gt;" not in html
+        assert "<tr>" in html
+
+    def test_none_does_not_become_the_word_none(self):
+        assert L.esc(None) == ""

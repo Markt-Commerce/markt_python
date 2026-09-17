@@ -70,10 +70,16 @@ def send_push_notification(self, notification_data: Dict):
     """Send push notification to the user's registered devices via Expo Push."""
     try:
         from .services import PushService
+        from app.users.models import User
 
         user_id = notification_data.get("user_id")
         if not user_id:
             return
+        with session_scope() as session:
+            user = session.query(User).get(user_id)
+            if user and user.settings and not user.settings.push_notifications:
+                logger.info("Push notifications disabled for user %s", user_id)
+                return
         title = notification_data.get("title") or "Markt"
         body = notification_data.get("message") or notification_data.get("body") or ""
         PushService.send_to_user(
@@ -157,7 +163,11 @@ def _order_email_data(notification_data: Dict, meta: Dict) -> Dict:
 
 @celery_app.task(bind=True, queue="notifications")
 def send_email_notification(self, notification_data: Dict):
-    """Send email notification for important alerts"""
+    """Deliver every configured email event through the common branded template.
+
+    Transactional mail is not suppressed by the optional marketing/email
+    preference. Promotional mail requires the explicit marketing opt-in.
+    """
     try:
         from app.libs.email_service import email_service
         from app.users.models import User
@@ -176,61 +186,136 @@ def send_email_notification(self, notification_data: Dict):
         # SELECT or a DetachedInstanceError -- and the surrounding
         # `except Exception` would log that as "email notification failed"
         # rather than as the bug it is.
+        # Read everything needed out of the session, as strings and bools.
+        # session_scope commits on exit and SQLAlchemy expires every object it
+        # loaded, so `user.email` afterwards is either a second SELECT or a
+        # DetachedInstanceError -- which the surrounding `except Exception`
+        # would log as "email notification failed" rather than as the bug it
+        # is. A rider also never binds `user` at all, so touching it below
+        # would raise NameError for them.
         recipient_email = None
+        is_rider = str(user_id).startswith("DEL_")
+        email_ok = True
+        marketing_ok = False
+
         with session_scope() as session:
-            if str(user_id).startswith("DEL_"):
+            if is_rider:
                 from app.deliveries.models import DeliveryUser
 
                 rider = session.query(DeliveryUser).get(user_id)
                 if not rider or not rider.email:
                     logger.warning("Rider %s has no email address", user_id)
                     return
+                # Riders have no UserSettings row. Everything they are sent is
+                # operational -- a delivery, an assignment, money credited --
+                # so there is no marketing to opt out of.
                 recipient_email = rider.email
             else:
                 user = session.query(User).get(user_id)
                 if not user or not user.email_verified:
                     logger.warning(f"User {user_id} not found or email not verified")
                     return
-
-                # Check user email notification settings
-                if user.settings and not user.settings.email_notifications:
-                    logger.info(f"Email notifications disabled for user {user_id}")
-                    return
                 recipient_email = user.email
+                if user.settings:
+                    email_ok = bool(user.settings.email_notifications)
+                    marketing_ok = bool(user.settings.marketing_notifications)
 
-        # Map notification types to email methods
+        notification_enum = next(
+            (item for item in NotificationType if item.value == notification_type),
+            None,
+        )
+        if not notification_enum:
+            logger.warning(
+                "Unknown notification type %s; email skipped", notification_type
+            )
+            return
+
+        from app.notifications.services import NotificationService
+
+        transactional = NotificationService.is_transactional_email(notification_enum)
+
+        # Preference gates. Transactional mail (a receipt, an order moving) is
+        # not suppressed by the optional-email preference; promotional mail
+        # needs the explicit marketing opt-in.
+        if not is_rider:
+            if notification_enum == NotificationType.PROMOTIONAL:
+                if not marketing_ok:
+                    logger.info("Promotional email disabled for user %s", user_id)
+                    return
+            elif not email_ok and not transactional:
+                logger.info(
+                    "Optional email notifications disabled for user %s", user_id
+                )
+                return
+
+        metadata = notification_data.get("metadata_") or {}
+
+        # The four events with a written-for-the-purpose template. Everything
+        # else goes through the generic branded one.
         email_methods = {
-            NotificationType.ORDER_PLACED.value: email_service.send_order_confirmation_email,
-            NotificationType.ORDER_UPDATE.value: email_service.send_order_status_update_email,
-            NotificationType.PAYMENT_SUCCESS.value: email_service.send_payment_success_email,
-            NotificationType.PAYMENT_FAILED.value: email_service.send_payment_failed_email,
+            NotificationType.ORDER_PLACED.value: (
+                email_service.send_order_confirmation_email
+            ),
+            NotificationType.ORDER_UPDATE.value: (
+                email_service.send_order_status_update_email
+            ),
+            NotificationType.PAYMENT_SUCCESS.value: (
+                email_service.send_payment_success_email
+            ),
+            NotificationType.PAYMENT_FAILED.value: (
+                email_service.send_payment_failed_email
+            ),
         }
-
         email_method = email_methods.get(notification_type)
-        if email_method:
-            meta = notification_data.get("metadata_") or {}
 
+        if email_method:
             # A seller's "you sold something" email is not the buyer's "we
             # have your order" email, and both hang off ORDER_PLACED.
-            if notification_type == NotificationType.ORDER_PLACED.value and (
-                meta.get("role") == "seller"
+            if (
+                notification_type == NotificationType.ORDER_PLACED.value
+                and metadata.get("role") == "seller"
             ):
                 email_method = email_service.send_seller_order_notification_email
 
-            email_data = _order_email_data(notification_data, meta)
-
-            success = email_method(recipient_email, email_data)
-            if success:
-                logger.info(
-                    f"Email notification sent for notification {notification_data['id']}"
-                )
-            else:
-                logger.error(
-                    f"Failed to send email notification for notification {notification_data['id']}"
-                )
+            success = email_method(
+                recipient_email, _order_email_data(notification_data, metadata)
+            )
+        elif notification_enum == NotificationType.PROMOTIONAL:
+            success = email_service.send_promotional_campaign_email(
+                recipient_email,
+                {
+                    **metadata,
+                    "subject": notification_data.get("title"),
+                    "headline": notification_data.get("title"),
+                    "subheadline": notification_data.get("message"),
+                },
+            )
         else:
+            success = email_service.send_notification_email(
+                email=recipient_email,
+                title=notification_data.get("title", "Markt notification"),
+                message=notification_data.get("message", ""),
+                notification_type=notification_type,
+                metadata=metadata,
+                transactional=transactional,
+                sender_profile=(
+                    "marketing"
+                    if notification_enum == NotificationType.PROMOTIONAL
+                    else "transactional"
+                    if transactional
+                    else "notification"
+                ),
+            )
+
+        if success:
             logger.info(
-                f"No email method configured for notification type {notification_type}"
+                "Email notification sent for notification %s",
+                notification_data.get("id"),
+            )
+        else:
+            logger.error(
+                "Failed to send email notification for notification %s",
+                notification_data.get("id"),
             )
 
     except Exception as e:

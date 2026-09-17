@@ -56,6 +56,13 @@ class NotificationType(Enum):
     NICHE_POST_APPROVED = "niche_post_approved"
     NICHE_POST_REJECTED = "niche_post_rejected"
     MODERATION_ACTION = "moderation_action"
+    CHAT_MESSAGE = "chat_message"
+    CHAT_OFFER = "chat_offer"
+    CHAT_OFFER_RESPONSE = "chat_offer_response"
+    WALLET_TOPUP_COMPLETED = "wallet_topup_completed"
+    WALLET_TOPUP_FAILED = "wallet_topup_failed"
+    WITHDRAWAL_COMPLETED = "withdrawal_completed"
+    WITHDRAWAL_FAILED = "withdrawal_failed"
 
     # Riders. Their own types rather than reusing the buyer/seller ones: a
     # rider's "new delivery available" is not a buyer's "order update", and

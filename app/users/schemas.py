@@ -507,11 +507,19 @@ class ShopSearchArgs(Schema):
 
 
 class SettingsSchema(Schema):
-    pass
+    email = fields.Bool(attribute="email_notifications")
+    push = fields.Bool(attribute="push_notifications")
+    sms = fields.Bool(attribute="sms_notifications")
+    marketing = fields.Bool(attribute="marketing_notifications")
+    preferred_language = fields.Str()
 
 
 class SettingsUpdateSchema(Schema):
-    pass
+    email = fields.Bool(attribute="email_notifications")
+    push = fields.Bool(attribute="push_notifications")
+    sms = fields.Bool(attribute="sms_notifications")
+    marketing = fields.Bool(attribute="marketing_notifications")
+    preferred_language = fields.Str(validate=validate.Length(min=2, max=5))
 
 
 class PublicShopSchema(Schema):

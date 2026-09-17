@@ -28,8 +28,7 @@ depends_on = None
 
 def upgrade():
     op.execute(
-        "ALTER TYPE walletreferencetype "
-        "ADD VALUE IF NOT EXISTS 'DELIVERY_EARNING'"
+        "ALTER TYPE walletreferencetype " "ADD VALUE IF NOT EXISTS 'DELIVERY_EARNING'"
     )
 
     op.alter_column("wallet_accounts", "user_id", nullable=True)

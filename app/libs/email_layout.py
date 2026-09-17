@@ -12,6 +12,7 @@ that is what the rest of email_service.py already does and one convention
 beats two.
 """
 
+import html
 from typing import List, Optional
 
 BRAND = "#E94C2A"
@@ -24,6 +25,20 @@ CARD = "#FFFFFF"
 # 600px is the width every client agrees on; wider gets cut off in Outlook's
 # reading pane and on a phone.
 WIDTH = 600
+
+
+def esc(value) -> str:
+    """Escape a value for HTML.
+
+    Everything these helpers interpolate is somebody's typed-in text -- a
+    product name, a shop name, a delivery address, the gateway's own failure
+    message. Left raw, a product title with an angle bracket in it breaks the
+    layout, and a deliberately crafted one puts markup into an email we sent.
+    Nothing downstream sanitises these, so it happens here.
+
+    `shell`'s `body` is the exception: by then it is already-built markup.
+    """
+    return html.escape(str(value), quote=True) if value is not None else ""
 
 
 def shell(title: str, preheader: str, body: str, footer_note: str = "") -> str:
@@ -40,10 +55,10 @@ def shell(title: str, preheader: str, body: str, footer_note: str = "") -> str:
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="x-apple-disable-message-reformatting">
 <meta name="color-scheme" content="light">
-<title>{title}</title>
+<title>{esc(title)}</title>
 </head>
 <body style="margin:0;padding:0;background:{PAGE};">
-<div style="display:none;max-height:0;overflow:hidden;opacity:0;">{preheader}</div>
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;">{esc(preheader)}</div>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
        style="background:{PAGE};padding:24px 12px;">
   <tr><td align="center">
@@ -60,7 +75,7 @@ def shell(title: str, preheader: str, body: str, footer_note: str = "") -> str:
                      font-size:12px;line-height:18px;
                      font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',
                      Roboto,Helvetica,Arial,sans-serif;">
-        {footer_note or "You're receiving this because you sell on Markt."}
+        {esc(footer_note) or "You're receiving this because you sell on Markt."}
       </td></tr>
     </table>
   </td></tr>
@@ -74,24 +89,24 @@ def header(eyebrow: str, headline: str) -> str:
     return f"""
       <tr><td style="background:{BRAND};padding:28px 24px;">
         <div style="color:#FFFFFF;opacity:.85;font-size:12px;font-weight:600;
-                    letter-spacing:.08em;text-transform:uppercase;">{eyebrow}</div>
+                    letter-spacing:.08em;text-transform:uppercase;">{esc(eyebrow)}</div>
         <div style="color:#FFFFFF;font-size:26px;font-weight:700;
-                    line-height:32px;margin-top:6px;">{headline}</div>
+                    line-height:32px;margin-top:6px;">{esc(headline)}</div>
       </td></tr>"""
 
 
 def lead_stat(value: str, label: str, context: str = "") -> str:
     """The one number the email is about, big enough to read at a glance."""
     context_html = (
-        f'<div style="color:{MUTED};font-size:14px;margin-top:6px;">{context}</div>'
+        f'<div style="color:{MUTED};font-size:14px;margin-top:6px;">{esc(context)}</div>'
         if context
         else ""
     )
     return f"""
       <tr><td style="padding:28px 24px 8px;">
-        <div style="color:{MUTED};font-size:13px;font-weight:600;">{label}</div>
+        <div style="color:{MUTED};font-size:13px;font-weight:600;">{esc(label)}</div>
         <div style="color:{INK};font-size:40px;font-weight:700;
-                    line-height:46px;margin-top:4px;">{value}</div>
+                    line-height:46px;margin-top:4px;">{esc(value)}</div>
         {context_html}
       </td></tr>"""
 
@@ -103,7 +118,7 @@ def stat_row(label: str, value: str, context: str = "") -> str:
     as a stack in Gmail anyway, and a row reads better on a phone.
     """
     context_html = (
-        f'<div style="color:{MUTED};font-size:13px;margin-top:2px;">{context}</div>'
+        f'<div style="color:{MUTED};font-size:13px;margin-top:2px;">{esc(context)}</div>'
         if context
         else ""
     )
@@ -113,12 +128,12 @@ def stat_row(label: str, value: str, context: str = "") -> str:
                style="border-top:1px solid {HAIRLINE};">
           <tr>
             <td style="padding:16px 0;">
-              <div style="color:{INK};font-size:15px;font-weight:600;">{label}</div>
+              <div style="color:{INK};font-size:15px;font-weight:600;">{esc(label)}</div>
               {context_html}
             </td>
             <td align="right" style="padding:16px 0;color:{INK};
                                      font-size:22px;font-weight:700;
-                                     white-space:nowrap;">{value}</td>
+                                     white-space:nowrap;">{esc(value)}</td>
           </tr>
         </table>
       </td></tr>"""
@@ -130,9 +145,9 @@ def button(text: str, url: str) -> str:
       <tr><td style="padding:8px 24px 28px;">
         <table role="presentation" cellpadding="0" cellspacing="0">
           <tr><td style="background:{BRAND};border-radius:10px;">
-            <a href="{url}" style="display:inline-block;padding:13px 26px;
+            <a href="{esc(url)}" style="display:inline-block;padding:13px 26px;
                color:#FFFFFF;font-size:15px;font-weight:700;
-               text-decoration:none;">{text}</a>
+               text-decoration:none;">{esc(text)}</a>
           </td></tr>
         </table>
       </td></tr>"""
@@ -146,14 +161,14 @@ def table_block(headings: List[str], rows: List[List[str]], title: str = "") -> 
 
     title_html = (
         f'<div style="color:{INK};font-size:16px;font-weight:700;'
-        f'margin-bottom:10px;">{title}</div>'
+        f'margin-bottom:10px;">{esc(title)}</div>'
         if title
         else ""
     )
     head = "".join(
         f'<th align="{"right" if i else "left"}" style="padding:8px 0;'
         f"color:{MUTED};font-size:12px;font-weight:600;text-transform:uppercase;"
-        f'letter-spacing:.05em;border-bottom:1px solid {HAIRLINE};">{h}</th>'
+        f'letter-spacing:.05em;border-bottom:1px solid {HAIRLINE};">{esc(h)}</th>'
         for i, h in enumerate(headings)
     )
     body = ""
@@ -161,7 +176,7 @@ def table_block(headings: List[str], rows: List[List[str]], title: str = "") -> 
         cells = "".join(
             f'<td align="{"right" if i else "left"}" style="padding:12px 0;'
             f"color:{INK};font-size:14px;"
-            f'border-bottom:1px solid {HAIRLINE};">{c}</td>'
+            f'border-bottom:1px solid {HAIRLINE};">{esc(c)}</td>'
             for i, c in enumerate(row)
         )
         body += f"<tr>{cells}</tr>"
@@ -179,7 +194,7 @@ def table_block(headings: List[str], rows: List[List[str]], title: str = "") -> 
 def note(text: str) -> str:
     return f"""
       <tr><td style="padding:16px 24px 24px;color:{MUTED};font-size:13px;
-                     line-height:20px;">{text}</td></tr>"""
+                     line-height:20px;">{esc(text)}</td></tr>"""
 
 
 def change_line(
@@ -242,7 +257,7 @@ def progress(steps: List[str], current: int) -> str:
             f'<td align="{"left" if i == 0 else "right" if i == len(steps) - 1 else "center"}"'
             f' style="padding:6px 2px 0;color:{INK if done else MUTED};'
             f"font-size:11px;line-height:15px;"
-            f'font-weight:{"600" if i == current else "400"};">{step}</td>'
+            f'font-weight:{"600" if i == current else "400"};">{esc(step)}</td>'
         )
 
     return f"""
@@ -268,9 +283,9 @@ def detail_rows(pairs: List[List[str]]) -> str:
             continue
         rows += f"""
           <tr>
-            <td style="padding:6px 0;color:{MUTED};font-size:13px;">{label}</td>
+            <td style="padding:6px 0;color:{MUTED};font-size:13px;">{esc(label)}</td>
             <td align="right" style="padding:6px 0;color:{INK};font-size:13px;
-                                     font-weight:600;">{value}</td>
+                                     font-weight:600;">{esc(value)}</td>
           </tr>"""
     if not rows:
         return ""
