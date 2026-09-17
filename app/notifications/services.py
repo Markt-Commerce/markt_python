@@ -39,6 +39,27 @@ def _owner_column(owner_id: str) -> str:
     return "delivery_user_id" if str(owner_id).startswith("DEL_") else "user_id"
 
 
+# The buyer-facing name for each order status. "ready_for_delivery" is a
+# column value, not something to put on someone's lock screen.
+_STATUS_WORDS = {
+    "pending_payment": "awaiting payment",
+    "processing": "confirmed",
+    "ready_for_delivery": "packed and waiting for a rider",
+    "shipped": "on its way to you",
+    "delivered": "delivered",
+    "cancelled": "cancelled",
+    "returned": "returned",
+    "failed": "failed",
+}
+
+
+def _human_status(status: str) -> str:
+    """A status a person can read. Unknown values lose their underscores
+    rather than being dropped, so a new status still reads as English."""
+    text = str(status or "").strip()
+    return _STATUS_WORDS.get(text.lower(), text.replace("_", " "))
+
+
 class NotificationService:
     # Notification templates
     TEMPLATES = {
@@ -64,7 +85,7 @@ class NotificationService:
         },
         NotificationType.ORDER_UPDATE: {
             "title": "Order update",
-            "message": "Your order #{order_id} status changed to {status}",
+            "message": "Your order #{order_id} is {status}",
         },
         NotificationType.SHIPMENT_UPDATE: {
             "title": "Shipment update",
@@ -510,9 +531,15 @@ class NotificationService:
                     else "your product"
                 ),
                 "rating": metadata_.get("rating", 0) if metadata_ else 0,
-                "order_id": reference_id or "N/A",
-                "status": (
-                    metadata_.get("status", "updated") if metadata_ else "updated"
+                # The order *number* where the emitter carries one. The
+                # reference_id is an ORD_ id, which is what the buyer used to
+                # be shown -- in the notification list and, since the message
+                # is the push body, on their lock screen.
+                "order_id": (
+                    (metadata_ or {}).get("order_number") or reference_id or "N/A"
+                ),
+                "status": _human_status(
+                    (metadata_ or {}).get("status", "updated") or "updated"
                 ),
                 "message": metadata_.get("message", "") if metadata_ else "",
                 # Buyer request variables

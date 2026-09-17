@@ -252,3 +252,28 @@ class TestSellerEmail:
         assert "Jersey" in body
         # Not the buyer's receipt copy, which is what sellers used to get.
         assert "keep this email as your receipt" not in body.lower()
+
+
+class TestInAppMessage:
+    """The notification message is also the push body, so it is what shows on
+    a lock screen."""
+
+    def test_status_words_are_english(self):
+        from app.notifications.services import _human_status
+
+        assert _human_status("ready_for_delivery") == "packed and waiting for a rider"
+        assert _human_status("shipped") == "on its way to you"
+        assert _human_status("processing") == "confirmed"
+
+    def test_an_unknown_status_loses_its_underscores_rather_than_vanishing(self):
+        from app.notifications.services import _human_status
+
+        assert _human_status("awaiting_customs_clearance") == (
+            "awaiting customs clearance"
+        )
+
+    def test_empty_status_does_not_raise(self):
+        from app.notifications.services import _human_status
+
+        assert _human_status("") == ""
+        assert _human_status(None) == ""
