@@ -355,8 +355,11 @@ def test_get_order_pod_qr_raises_validation_when_not_ready():
 # --- confirm_order_pod --------------------------------------------------------
 
 
+@patch("app.deliveries.pickup.WalletService.credit_delivery_earning")
 @patch("app.orders.services.OrderService.update_order_status")
-def test_confirm_order_pod_marks_items_delivered_and_completes_run(mock_update):
+def test_confirm_order_pod_marks_items_delivered_and_completes_run(
+    mock_update, mock_credit_earning
+):
     assignment = SimpleNamespace(status=AssignmentStatus.ACCEPTED)
     run_order = SimpleNamespace(
         order_id="ORD_1",
@@ -367,7 +370,9 @@ def test_confirm_order_pod_marks_items_delivered_and_completes_run(mock_update):
     item_a = _make_item(1, OrderItem.Status.SHIPPED, seller_id=10)
     item_b = _make_item(2, OrderItem.Status.CANCELLED, seller_id=11)
     order = SimpleNamespace(id="ORD_1", items=[item_a, item_b])
-    run = SimpleNamespace(id="RUN_1", status=DeliveryRunStatus.DELIVERY_IN_PROGRESS)
+    run = SimpleNamespace(
+        id="RUN_1", status=DeliveryRunStatus.DELIVERY_IN_PROGRESS, price_per_order=300
+    )
     run.transition_to = lambda new_status, _r=run: setattr(_r, "status", new_status)
 
     session = MagicMock()
@@ -412,6 +417,7 @@ def test_confirm_order_pod_marks_items_delivered_and_completes_run(mock_update):
     assert run_order.pod_status == DeliveryRunOrderPodStatus.DELIVERED
     assert run.status == DeliveryRunStatus.COMPLETED
     mock_update.assert_called_once_with("ORD_1", OrderStatus.DELIVERED)
+    mock_credit_earning.assert_called_once_with("DEL_1", 300, "RUN_1:ORD_1")
 
 
 def test_confirm_order_pod_raises_validation_for_wrong_qr_code():

@@ -34,6 +34,20 @@ MIN_WITHDRAWAL_AMOUNT = Decimal("1000.00")
 
 class WalletService:
     @staticmethod
+    def _owner_filter(owner_id: str) -> Dict[str, str]:
+        """Every method below takes a single `user_id` string that's really
+        "whoever owns this wallet" -- a buyer/seller (`USR_`-prefixed, the
+        `User` table) or a rider (`DEL_`-prefixed, the structurally separate
+        `DeliveryUser` table). The two id formats never collide, so this is
+        enough to route a query/insert at the right FK column without a
+        second parameter or code path at every call site. See
+        REFACTOR_NOTES.md (markt_logistics), "No rider payout
+        functionality" (2026-09-17)."""
+        if owner_id.startswith("DEL_"):
+            return {"delivery_user_id": owner_id}
+        return {"user_id": owner_id}
+
+    @staticmethod
     def _get_or_create_account(
         session, user_id: str, currency: str = "NGN", *, for_update: bool = False
     ) -> WalletAccount:
@@ -42,11 +56,10 @@ class WalletService:
         `for_update` takes a row lock, which every balance mutation must hold --
         see the note in `credit`.
         """
+        owner = WalletService._owner_filter(user_id)
 
         def _query():
-            q = session.query(WalletAccount).filter_by(
-                user_id=user_id, currency=currency
-            )
+            q = session.query(WalletAccount).filter_by(currency=currency, **owner)
             return q.with_for_update() if for_update else q
 
         account = _query().first()
@@ -60,7 +73,7 @@ class WalletService:
         savepoint = session.begin_nested()
         try:
             account = WalletAccount(
-                user_id=user_id, currency=currency, available_balance=to_money(0)
+                currency=currency, available_balance=to_money(0), **owner
             )
             session.add(account)
             savepoint.commit()
@@ -316,6 +329,38 @@ class WalletService:
         return entry
 
     @staticmethod
+    def credit_delivery_earning(
+        delivery_user_id: str,
+        amount,
+        reference_id: str,
+        *,
+        description: Optional[str] = None,
+    ) -> Optional[WalletEntry]:
+        """Credit a rider's wallet for one completed delivery.
+
+        Called from DeliveryService.confirm_order_qr_code (single-order)
+        and DeliveryRunPodService.confirm_order_pod (batch run), right
+        after POD is confirmed -- unlike seller settlement, there's no
+        hold window here yet (Joshua's call, 2026-09-17): a rider is
+        credited immediately, not after a delay. `reference_id` should be
+        stable and unique per delivery (an assignment id, or
+        "<run_id>:<order_id>") so the idempotency key below can't collide
+        across unrelated deliveries.
+        """
+        amount = to_money(amount)
+        if amount is None or amount <= 0:
+            return None
+
+        return WalletService.credit(
+            delivery_user_id,
+            amount,
+            WalletReferenceType.DELIVERY_EARNING,
+            reference_id,
+            description=description or f"Delivery earning for {reference_id}",
+            idempotency_key=f"delivery-earning:{reference_id}",
+        )
+
+    @staticmethod
     def refund_order_to_wallet(
         buyer_user_id: str,
         order_id: str,
@@ -386,10 +431,10 @@ class WalletService:
                 )
 
             withdrawal = WithdrawalRequest(
-                user_id=user_id,
                 amount=amount,
                 currency=account.currency,
                 bank_code=data["bank_code"],
+                **WalletService._owner_filter(user_id),
                 account_number=data["account_number"],
                 account_name=data["account_name"],
                 status=WithdrawalStatus.PENDING,
@@ -446,7 +491,7 @@ class WalletService:
         with session_scope() as session:
             query = (
                 session.query(WithdrawalRequest)
-                .filter_by(user_id=user_id)
+                .filter_by(**WalletService._owner_filter(user_id))
                 .order_by(WithdrawalRequest.created_at.desc())
             )
             total = query.count()
@@ -496,7 +541,7 @@ class WalletService:
             account_number = withdrawal.account_number
             account_name = withdrawal.account_name
             currency = withdrawal.currency
-            user_id = withdrawal.user_id
+            user_id = withdrawal.owner_id
 
         try:
             recipient_code = PaystackTransferClient.create_transfer_recipient(
@@ -583,7 +628,7 @@ class WalletService:
             if withdrawal.status == WithdrawalStatus.FAILED:
                 return True
 
-            user_id = withdrawal.user_id
+            user_id = withdrawal.owner_id
             amount = withdrawal.amount
             currency = withdrawal.currency
             withdrawal_id = withdrawal.id

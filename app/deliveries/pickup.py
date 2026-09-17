@@ -39,6 +39,7 @@ from app.libs.session import session_scope
 from app.orders.events import ActorType, OrderEventService, OrderEventType
 from app.orders.models import Order, OrderItem, OrderStatus
 from app.orders.services import OrderService
+from app.wallet.services import WalletService
 
 from .models import (
     AssignmentStatus,
@@ -266,6 +267,7 @@ class DeliveryRunPodService:
 
             run_completed = False
             run = session.query(DeliveryRun).filter_by(id=run_id).first()
+            earning_amount = run.price_per_order if run else None
             if run and run.status == DeliveryRunStatus.DELIVERY_IN_PROGRESS:
                 remaining = (
                     session.query(DeliveryRunOrder)
@@ -281,6 +283,21 @@ class DeliveryRunPodService:
                     run_completed = True
 
         OrderService.update_order_status(order_id, OrderStatus.DELIVERED)
+
+        # See DeliveryService.confirm_order_qr_code's identical comment --
+        # outside the transaction above, logged rather than raised.
+        if earning_amount and earning_amount > 0:
+            try:
+                WalletService.credit_delivery_earning(
+                    user_id, earning_amount, f"{run_id}:{order_id}"
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to credit rider %s for run order %s:%s",
+                    user_id,
+                    run_id,
+                    order_id,
+                )
 
         return {
             "status": "success",
