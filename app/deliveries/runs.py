@@ -45,11 +45,34 @@ RUN_CADENCE_HOURS = 2
 RUN_MAX_PACKAGES = 30
 RUN_MAX_WEIGHT_GRAMS = 50_000
 
-# 10.3: "numbers TBD later" (Phase 0), doesn't block build -- placeholder
-# flat fee per market-area pair until a real configurable zone-rate table
-# exists (11.4/13.1's own "Distance/Delivery Cost" gaps get the same
-# neutral-placeholder treatment elsewhere in this codebase).
-DEFAULT_BASE_PRICE = 500.0
+# 10.3: "numbers TBD later" (Phase 0), doesn't block build -- placeholders
+# until a real configurable zone-rate table exists (11.4/13.1's own
+# "Distance/Delivery Cost" gaps get the same neutral-placeholder treatment
+# elsewhere in this codebase).
+#
+# A run used to cost one flat fee no matter how many stops it had, which is
+# the one thing that cannot be true: the ride to the area is shared, the stops
+# are not. Priced flat, a four-stop run collected exactly what a one-stop run
+# collected, and since the rider is paid a share of what the trip collects
+# (app/deliveries/rider_pay.py), the rider earned the same for four drops as
+# for one. Splitting it also made each buyer's share fall as the run filled,
+# which is the point, but it fell towards nothing.
+#
+# So: one charge for the trip, plus one per stop on it.
+# Split so that a one-stop run still costs exactly what the old flat fee did:
+# nothing buyer-facing moves unless a run actually carries more than one drop.
+RUN_TRIP_BASE_PRICE = 250.0
+RUN_PER_STOP_PRICE = 250.0
+
+
+def run_base_price(stops: int) -> float:
+    """What a run of this many stops costs, before surge."""
+    return RUN_TRIP_BASE_PRICE + RUN_PER_STOP_PRICE * max(1, int(stops or 1))
+
+
+# Kept as the one-stop price so existing references and fixtures still mean
+# something sensible.
+DEFAULT_BASE_PRICE = run_base_price(1)
 
 # 10.1: items whose current fulfilment allocation means the seller has
 # genuinely committed -- "fully routed and confirmed."
@@ -543,7 +566,8 @@ class DeliveryRunService:
                 )
                 run.surge_multiplier = surge_multiplier
                 run.base_price = to_money(
-                    to_money(DEFAULT_BASE_PRICE) * Decimal(str(surge_multiplier))
+                    to_money(run_base_price(len(surviving_orders)))
+                    * Decimal(str(surge_multiplier))
                 )
                 run.price_per_order = to_money(run.base_price / len(surviving_orders))
                 run.transition_to(DeliveryRunStatus.PLANNING)

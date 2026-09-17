@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.deliveries.rider_pay import earning_for_drop
 from app.deliveries.models import AssignmentStatus, LogisticalStatus
 from app.deliveries.services import DeliveryService
 from app.libs.errors import ValidationError
@@ -69,7 +70,12 @@ def test_confirm_order_qr_code_starts_settlement_hold_and_completes_order(
     assert item_b.delivered_at is not None
     assert assignment.logistical_status == LogisticalStatus.COMPLETED
     mock_update_status.assert_called_once_with("ORD_1", OrderStatus.DELIVERED)
-    mock_credit_earning.assert_called_once_with("DEL_1", 500, "ASG_1")
+    # A share of the shipping fee, not all of it: the rider used to be
+    # credited the buyer's entire delivery fee, leaving nothing to fund the
+    # batched runs the same rider is meant to prefer.
+    mock_credit_earning.assert_called_once_with(
+        "DEL_1", earning_for_drop(500, stops=1), "ASG_1"
+    )
 
 
 @patch("app.deliveries.services.WalletService.credit_delivery_earning")
