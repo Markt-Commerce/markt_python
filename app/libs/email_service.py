@@ -1,4 +1,5 @@
 import logging
+import html
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -63,6 +64,159 @@ class EmailService:
         except Exception as e:
             logger.error(f"Failed to send email to {to_email}: {str(e)}")
             return False
+
+    def send_notification_email(
+        self,
+        email: str,
+        title: str,
+        message: str,
+        notification_type: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        transactional: bool = True,
+        sender_profile: Optional[str] = None,
+    ) -> bool:
+        """Send the common branded email for notification events.
+
+        Keeping this as a single resilient template means every new in-app
+        event can also have a useful email without another fragile method map.
+        Values are escaped because notification metadata can contain user text.
+        """
+        safe_title = html.escape(str(title or "Markt notification"))
+        safe_message = html.escape(str(message or ""))
+        metadata = metadata or {}
+        order_id = metadata.get("order_id") or metadata.get("order_number")
+        reference = (
+            f'<p style="color:#6b7280;font-size:13px">Reference: '
+            f"{html.escape(str(order_id))}</p>"
+            if order_id
+            else ""
+        )
+        unsubscribe = ""
+        if not transactional and settings.EMAIL_UNSUBSCRIBE_URL:
+            unsubscribe = (
+                f'<a href="{html.escape(settings.EMAIL_UNSUBSCRIBE_URL, quote=True)}" '
+                'style="color:#B8371B">Manage preferences</a>'
+            )
+        html_content = f"""<!doctype html><html><body style="margin:0;background:#f6f7f9;font-family:Arial,sans-serif;color:#222">
+        <div style="max-width:600px;margin:32px auto;background:#fff;border-radius:16px;overflow:hidden;border:1px solid #ececec">
+          <div style="background:#E94C2A;padding:24px 32px;color:#fff;font-size:28px;font-weight:700">Markt</div>
+          <div style="padding:32px"><div style="font-size:12px;color:#B8371B;text-transform:uppercase;letter-spacing:1px;font-weight:700">{html.escape(str(notification_type).replace('_',' '))}</div>
+          <h1 style="font-size:24px;margin:10px 0 16px">{safe_title}</h1>
+          <p style="font-size:16px;line-height:1.6;white-space:pre-line">{safe_message}</p>{reference}
+          <p style="margin-top:32px;color:#6b7280;font-size:14px">Open the Markt app to view more details and take action.</p></div>
+          <div style="padding:20px 32px;background:#fafafa;color:#6b7280;font-size:12px">You’re receiving this because it relates to your Markt account. {unsubscribe}</div>
+        </div></body></html>"""
+        text_content = f"{title}\n\n{message}\n\nOpen the Markt app for details."
+        profile = sender_profile or ("transactional" if transactional else "marketing")
+        if profile == "notification":
+            from_email, from_name = (
+                settings.RESEND_NOTIFICATION_FROM_EMAIL,
+                settings.RESEND_NOTIFICATION_FROM_NAME,
+            )
+        elif profile == "marketing":
+            from_email, from_name = (
+                settings.RESEND_MARKETING_FROM_EMAIL,
+                settings.RESEND_MARKETING_FROM_NAME,
+            )
+        else:
+            from_email, from_name = (
+                settings.RESEND_TRANSACTIONAL_FROM_EMAIL,
+                settings.RESEND_TRANSACTIONAL_FROM_NAME,
+            )
+        return self.send_email(
+            to_email=email,
+            subject=f"{safe_title} · Markt",
+            html_content=html_content,
+            text_content=text_content,
+            from_email=from_email,
+            from_name=from_name,
+            reply_to=settings.EMAIL_REPLY_TO or None,
+        )
+
+    def send_promotional_campaign_email(
+        self, email: str, campaign: Dict[str, Any]
+    ) -> bool:
+        """Send a commerce campaign email with a hero, categories and products."""
+        headline = html.escape(str(campaign.get("headline", "Big deals, made for you")))
+        subheadline = html.escape(
+            str(campaign.get("subheadline", "Discover something good today."))
+        )
+        cta = html.escape(str(campaign.get("cta_label", "Shop now")))
+        cta_url = html.escape(
+            str(campaign.get("cta_url", settings.WEB_APP_BASE_URL)), quote=True
+        )
+        hero_url = campaign.get("hero_url")
+        hero = (
+            f'<img src="{html.escape(str(hero_url), quote=True)}" alt="{headline}" '
+            'style="display:block;width:100%;max-height:280px;object-fit:cover;border-radius:12px">'
+            if hero_url
+            else '<div style="background:#FFF1E9;border-radius:12px;padding:36px 24px;text-align:center">'
+            '<div style="font-size:12px;letter-spacing:2px;color:#B8371B;font-weight:700">MARKT PICKS</div>'
+            f'<div style="font-size:32px;line-height:1.1;font-weight:800;margin-top:10px;color:#231F20">{headline}</div>'
+            f'<div style="font-size:16px;margin-top:12px;color:#5f6368">{subheadline}</div></div>'
+        )
+        products = ""
+        for product in campaign.get("products", [])[:4]:
+            name = html.escape(str(product.get("name", "Product")))
+            price = html.escape(str(product.get("price", "")))
+            image = product.get("image_url")
+            image_html = (
+                f'<img src="{html.escape(str(image), quote=True)}" alt="{name}" '
+                'style="width:100%;height:130px;object-fit:contain">'
+                if image
+                else ""
+            )
+            products += f'<td style="width:50%;padding:8px;vertical-align:top"><div style="border:1px solid #eee;border-radius:10px;padding:10px">{image_html}<div style="font-weight:700;font-size:14px">{name}</div><div style="color:#B8371B;font-size:16px;margin-top:6px">{price}</div></div></td>'
+        products_html = (
+            f'<table role="presentation" style="width:100%;border-collapse:collapse"><tr>{products}</tr></table>'
+            if products
+            else ""
+        )
+        html_content = f"""<!doctype html><html><body style="margin:0;background:#f6f7f9;font-family:Arial,sans-serif;color:#231F20"><div style="max-width:620px;margin:24px auto;background:#fff;border:1px solid #eee;border-radius:16px;overflow:hidden"><div style="padding:22px 28px;font-size:28px;font-weight:800">Markt<span style="color:#E94C2A">●</span></div><div style="padding:0 24px 28px">{hero}<div style="text-align:center;margin:24px 0"><a href="{cta_url}" style="display:inline-block;background:#E94C2A;color:#fff;text-decoration:none;font-weight:700;padding:14px 28px;border-radius:8px">{cta}</a></div>{products_html}</div><div style="padding:18px 28px;background:#fafafa;color:#6b7280;font-size:12px;text-align:center">You’re receiving Markt offers because you opted in to deals and recommendations. <a href="{html.escape(settings.EMAIL_UNSUBSCRIBE_URL, quote=True)}" style="color:#B8371B">Manage preferences</a></div></div></body></html>"""
+        return self.send_email(
+            email,
+            str(campaign.get("subject", headline)),
+            html_content,
+            text_content=f"{headline}\n\n{subheadline}\n\n{cta_url}",
+            from_email=settings.RESEND_MARKETING_FROM_EMAIL,
+            from_name=settings.RESEND_MARKETING_FROM_NAME,
+            reply_to=settings.EMAIL_REPLY_TO or None,
+        )
+
+    def send_order_tracking_email(self, email: str, order_data: Dict[str, Any]) -> bool:
+        """Send a visual order-progress email, including pickup/delivery details."""
+        order_number = html.escape(str(order_data.get("order_number", "")))
+        status = str(order_data.get("status", "processing")).replace("_", " ").title()
+        steps = order_data.get("tracking_steps") or [
+            "Order placed",
+            "Confirmed",
+            "Shipped",
+            "Out for delivery",
+            "Delivered",
+        ]
+        current = int(order_data.get("current_step", 1))
+        step_html = ""
+        for index, step in enumerate(steps):
+            active = index <= current
+            color = "#E94C2A" if active else "#D9DDE2"
+            step_html += f'<td style="width:{100 // len(steps)}%;text-align:center;color:{color};font-size:11px;font-weight:700"><div style="margin:auto;width:24px;height:24px;border-radius:50%;background:{color};color:#fff;line-height:24px">{"✓" if active else index + 1}</div><div style="margin-top:7px">{html.escape(str(step))}</div></td>'
+        details = html.escape(
+            str(
+                order_data.get(
+                    "delivery_note", "We’ll keep you updated as your order moves."
+                )
+            )
+        )
+        html_content = f"""<!doctype html><html><body style="margin:0;background:#f6f7f9;font-family:Arial,sans-serif;color:#231F20"><div style="max-width:620px;margin:24px auto;background:#fff;border-radius:16px;overflow:hidden;border:1px solid #eee"><div style="background:#E94C2A;padding:24px 30px;color:#fff;font-size:28px;font-weight:800">Markt</div><div style="padding:30px"><div style="color:#B8371B;font-size:12px;font-weight:700;letter-spacing:1px">ORDER {order_number}</div><h1 style="font-size:26px;margin:10px 0">Your order is {html.escape(status.lower())}</h1><p style="color:#5f6368;line-height:1.6">{details}</p><table role="presentation" style="width:100%;margin:32px 0;border-collapse:collapse"><tr>{step_html}</tr></table><div style="background:#FFF1E9;border-radius:10px;padding:18px"><strong>Order number</strong><br>{order_number}</div><p style="font-size:13px;color:#6b7280;margin-top:30px">Open the Markt app to view full tracking details, contact support, or update your delivery information.</p></div><div style="padding:18px 30px;background:#fafafa;color:#6b7280;font-size:12px">This is a transactional update about your Markt order.</div></div></body></html>"""
+        return self.send_email(
+            email,
+            f"Order {order_number} · {status} · Markt",
+            html_content,
+            text_content=f"Order {order_number} is {status}. {details}",
+            from_email=settings.RESEND_TRANSACTIONAL_FROM_EMAIL,
+            from_name=settings.RESEND_TRANSACTIONAL_FROM_NAME,
+            reply_to=settings.EMAIL_REPLY_TO or None,
+        )
 
     def send_verification_email(
         self, email: str, verification_code: str, username: str

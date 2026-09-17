@@ -48,6 +48,23 @@ class WalletService:
         return {"user_id": owner_id}
 
     @staticmethod
+    def _notify_wallet(
+        user_id: str, notification_type, reference_id: str, metadata=None
+    ):
+        try:
+            from app.notifications.services import NotificationService
+
+            NotificationService.create_notification(
+                user_id=user_id,
+                notification_type=notification_type,
+                reference_type="wallet",
+                reference_id=str(reference_id),
+                metadata_=metadata or {},
+            )
+        except Exception:
+            logger.exception("Wallet notification failed for %s", reference_id)
+
+    @staticmethod
     def _get_or_create_account(
         session, user_id: str, currency: str = "NGN", *, for_update: bool = False
     ) -> WalletAccount:
@@ -592,6 +609,14 @@ class WalletService:
             if withdrawal:
                 withdrawal.status = WithdrawalStatus.FAILED
                 withdrawal.failure_reason = reason[:255]
+        from app.notifications.models import NotificationType
+
+        WalletService._notify_wallet(
+            user_id,
+            NotificationType.WITHDRAWAL_FAILED,
+            withdrawal_id,
+            {"amount": amount, "currency": currency, "message": reason},
+        )
 
     @staticmethod
     def complete_withdrawal_transfer(reference: str) -> bool:
@@ -609,8 +634,26 @@ class WalletService:
                 return False
             if withdrawal.status == WithdrawalStatus.COMPLETED:
                 return True
+            # owner_id, not user_id: a rider's withdrawal has user_id NULL
+            # and delivery_user_id set (delivery partner wallets, on develop),
+            # so reading user_id here would notify nobody -- silently, since
+            # _notify_wallet swallows its own failures.
+            user_id, amount, currency, withdrawal_id = (
+                withdrawal.owner_id,
+                withdrawal.amount,
+                withdrawal.currency,
+                withdrawal.id,
+            )
             withdrawal.status = WithdrawalStatus.COMPLETED
-            return True
+        from app.notifications.models import NotificationType
+
+        WalletService._notify_wallet(
+            user_id,
+            NotificationType.WITHDRAWAL_COMPLETED,
+            withdrawal_id,
+            {"amount": amount, "currency": currency},
+        )
+        return True
 
     @staticmethod
     def fail_withdrawal_transfer(reference: str, reason: str = "") -> bool:
@@ -822,6 +865,14 @@ class WalletService:
             idempotency_key=f"topup:{topup_ref}",
             currency=currency,
         )
+        from app.notifications.models import NotificationType
+
+        WalletService._notify_wallet(
+            user_id,
+            NotificationType.WALLET_TOPUP_COMPLETED,
+            topup_ref,
+            {"amount": amount, "currency": currency},
+        )
         return True
 
     @staticmethod
@@ -901,6 +952,14 @@ class WalletService:
                 topup = session.query(WalletTopUp).get(topup_id)
                 if topup and topup.status == TopUpStatus.PENDING:
                     topup.status = TopUpStatus.FAILED
+            from app.notifications.models import NotificationType
+
+            WalletService._notify_wallet(
+                topup.user_id,
+                NotificationType.WALLET_TOPUP_FAILED,
+                topup_id,
+                {"currency": currency, "message": gateway_data.get("status")},
+            )
 
         return {
             "topup_id": topup_id,

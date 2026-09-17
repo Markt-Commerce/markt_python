@@ -65,3 +65,16 @@ AWS_SECRET_KEY=your_aws_secret_key_here
 AWS_REGION=us-east-1
 AWS_S3_BUCKET=markt-media
 CDN_DOMAIN=cdn.yourdomain.com
+
+# Email (Resend)
+RESEND_API_KEY=
+RESEND_FROM_EMAIL=noreply@markt.com
+RESEND_FROM_NAME=Markt
+RESEND_TRANSACTIONAL_FROM_EMAIL=orders@markt.com
+RESEND_TRANSACTIONAL_FROM_NAME=Markt Orders
+RESEND_NOTIFICATION_FROM_EMAIL=notifications@markt.com
+RESEND_NOTIFICATION_FROM_NAME=Markt Notifications
+RESEND_MARKETING_FROM_EMAIL=hello@markt.com
+RESEND_MARKETING_FROM_NAME=Markt
+EMAIL_REPLY_TO=support@markt.com
+EMAIL_UNSUBSCRIBE_URL=https://marktcommerce.com/settings/notifications

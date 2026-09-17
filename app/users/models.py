@@ -418,6 +418,7 @@ class UserSettings(BaseModel):
     email_notifications = db.Column(db.Boolean, default=True)
     push_notifications = db.Column(db.Boolean, default=True)
     sms_notifications = db.Column(db.Boolean, default=False)
+    marketing_notifications = db.Column(db.Boolean, default=False)
     privacy_public_profile = db.Column(db.Boolean, default=False)
     preferred_language = db.Column(db.String(5), default="en")
 

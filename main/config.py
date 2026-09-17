@@ -122,6 +122,29 @@ class Config:
             "RESEND_FROM_EMAIL", default="noreply@markt.com"
         )
         self.RESEND_FROM_NAME = config("RESEND_FROM_NAME", default="Markt")
+        # Sender identities are deliberately separate so mailbox providers and
+        # customers can distinguish receipts/alerts from community mail. Each
+        # falls back to the legacy sender for a painless rollout.
+        self.RESEND_TRANSACTIONAL_FROM_EMAIL = config(
+            "RESEND_TRANSACTIONAL_FROM_EMAIL", default=self.RESEND_FROM_EMAIL
+        )
+        self.RESEND_TRANSACTIONAL_FROM_NAME = config(
+            "RESEND_TRANSACTIONAL_FROM_NAME", default=self.RESEND_FROM_NAME
+        )
+        self.RESEND_NOTIFICATION_FROM_EMAIL = config(
+            "RESEND_NOTIFICATION_FROM_EMAIL", default=self.RESEND_FROM_EMAIL
+        )
+        self.RESEND_NOTIFICATION_FROM_NAME = config(
+            "RESEND_NOTIFICATION_FROM_NAME", default=self.RESEND_FROM_NAME
+        )
+        self.RESEND_MARKETING_FROM_EMAIL = config(
+            "RESEND_MARKETING_FROM_EMAIL", default=self.RESEND_FROM_EMAIL
+        )
+        self.RESEND_MARKETING_FROM_NAME = config(
+            "RESEND_MARKETING_FROM_NAME", default=self.RESEND_FROM_NAME
+        )
+        self.EMAIL_REPLY_TO = config("EMAIL_REPLY_TO", default="")
+        self.EMAIL_UNSUBSCRIBE_URL = config("EMAIL_UNSUBSCRIBE_URL", default="")
 
         # Build Redis URL
         REDIS_URL = f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
