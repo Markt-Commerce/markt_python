@@ -1258,7 +1258,9 @@ class BuyerRequestService:
             # Cap so one broad-category request can't fan out unboundedly.
             # Read before the city filter, which narrows rather than widens.
             sellers = query.limit(50).all()
-            sellers = BuyerRequestService._sellers_in_buyers_city(session, request, sellers)
+            sellers = BuyerRequestService._sellers_in_buyers_city(
+                session, request, sellers
+            )
             seller_user_ids = [s.user_id for s in sellers if s.user_id]
             request_title = request.title
 
