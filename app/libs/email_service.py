@@ -99,15 +99,28 @@ class EmailService:
                 f'<a href="{html.escape(settings.EMAIL_UNSUBSCRIBE_URL, quote=True)}" '
                 'style="color:#B8371B">Manage preferences</a>'
             )
-        html_content = f"""<!doctype html><html><body style="margin:0;background:#f6f7f9;font-family:Arial,sans-serif;color:#222">
-        <div style="max-width:600px;margin:32px auto;background:#fff;border-radius:16px;overflow:hidden;border:1px solid #ececec">
-          <div style="background:#E94C2A;padding:24px 32px;color:#fff;font-size:28px;font-weight:700">Markt</div>
-          <div style="padding:32px"><div style="font-size:12px;color:#B8371B;text-transform:uppercase;letter-spacing:1px;font-weight:700">{html.escape(str(notification_type).replace('_',' '))}</div>
-          <h1 style="font-size:24px;margin:10px 0 16px">{safe_title}</h1>
-          <p style="font-size:16px;line-height:1.6;white-space:pre-line">{safe_message}</p>{reference}
-          <p style="margin-top:32px;color:#6b7280;font-size:14px">Open the Markt app to view more details and take action.</p></div>
-          <div style="padding:20px 32px;background:#fafafa;color:#6b7280;font-size:12px">You’re receiving this because it relates to your Markt account. {unsubscribe}</div>
-        </div></body></html>"""
+        body = L.header(
+            str(notification_type).replace("_", " "),
+            title or "Markt notification",
+        )
+        body += L.note(
+            message or "Open the Markt app to view more details and take action."
+        )
+        body += L.detail_rows([["Reference", order_id]])
+        body += L.button("Open Markt", settings.WEB_APP_BASE_URL)
+        html_content = L.shell(
+            title or "Markt notification",
+            message or "A new update is waiting for you in Markt.",
+            body,
+            footer_note=(
+                "You're receiving this because it relates to your Markt account. "
+                + (
+                    "Manage preferences: " + settings.EMAIL_UNSUBSCRIBE_URL
+                    if unsubscribe
+                    else ""
+                )
+            ),
+        )
         text_content = f"{title}\n\n{message}\n\nOpen the Markt app for details."
         profile = sender_profile or ("transactional" if transactional else "marketing")
         if profile == "notification":
@@ -174,7 +187,17 @@ class EmailService:
             if products
             else ""
         )
-        html_content = f"""<!doctype html><html><body style="margin:0;background:#f6f7f9;font-family:Arial,sans-serif;color:#231F20"><div style="max-width:620px;margin:24px auto;background:#fff;border:1px solid #eee;border-radius:16px;overflow:hidden"><div style="padding:22px 28px;font-size:28px;font-weight:800">Markt<span style="color:#E94C2A">●</span></div><div style="padding:0 24px 28px">{hero}<div style="text-align:center;margin:24px 0"><a href="{cta_url}" style="display:inline-block;background:#E94C2A;color:#fff;text-decoration:none;font-weight:700;padding:14px 28px;border-radius:8px">{cta}</a></div>{products_html}</div><div style="padding:18px 28px;background:#fafafa;color:#6b7280;font-size:12px;text-align:center">You’re receiving Markt offers because you opted in to deals and recommendations. <a href="{html.escape(settings.EMAIL_UNSUBSCRIBE_URL, quote=True)}" style="color:#B8371B">Manage preferences</a></div></div></body></html>"""
+        body = L.header("Markt picks", headline)
+        body += f'<tr><td style="padding:0 24px 16px;">{hero}</td></tr>'
+        body += L.note(subheadline)
+        body += f'<tr><td align="center" style="padding:0 24px 22px;"><a href="{cta_url}" style="display:inline-block;background:{L.BRAND};color:#fff;text-decoration:none;font-weight:700;padding:14px 28px;border-radius:8px;">{cta}</a></td></tr>'
+        body += f'<tr><td style="padding:0 16px 24px;">{products_html}</td></tr>'
+        html_content = L.shell(
+            str(campaign.get("subject", headline)),
+            subheadline,
+            body,
+            footer_note="You're receiving Markt offers because you opted in to deals and recommendations.",
+        )
         return self.send_email(
             email,
             str(campaign.get("subject", headline)),
