@@ -453,8 +453,14 @@ class DeliveryService:
                     if max_distance > search_radius:
                         continue
 
+                    # What the rider is actually credited on completion, not
+                    # the buyer's shipping fee. Those were the same number
+                    # until riders started taking a share of the trip rather
+                    # than all of it, and this is the figure a rider decides
+                    # on -- promising the fee and paying the share is the
+                    # worst kind of wrong to be.
                     estimated_earnings = (
-                        order.shipping_fee if order.shipping_fee is not None else 0
+                        earning_for_drop(order.shipping_fee, stops=1) or 0
                     )
 
                     available_orders.append(

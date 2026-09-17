@@ -15,6 +15,8 @@ Implementation Checklist), not built here.
 """
 
 import logging
+
+from app.deliveries.rider_pay import earning_for_drop
 from typing import Dict
 
 from sqlalchemy.orm import joinedload
@@ -38,6 +40,12 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _run_total(run, stops: int):
+    """What the whole run pays the rider, or None when it is not priced yet."""
+    per_drop = earning_for_drop(run.base_price, stops=stops)
+    return per_drop * stops if per_drop is not None and stops else None
 
 
 class DeliveryRunAssignmentService:
@@ -109,7 +117,17 @@ class DeliveryRunAssignmentService:
                         "market": run.market.name if run.market else None,
                         "area": area.name,
                         "order_count": order_count,
+                        # What each *buyer* pays. Kept because the app has
+                        # always had it, but it is not the rider's number and
+                        # was being shown to riders as though it were.
                         "price_per_order": run.price_per_order,
+                        # What the rider is credited: per drop, and for
+                        # taking the whole run. The second is the one that
+                        # makes a run worth more than a single order.
+                        "rider_earning_per_drop": earning_for_drop(
+                            run.base_price, stops=order_count
+                        ),
+                        "rider_earning_total": _run_total(run, order_count),
                         "distance_meters": round(distance, 2),
                         "lat": area.latitude,
                         "lng": area.longitude,
@@ -304,6 +322,10 @@ class DeliveryRunAssignmentService:
                 "market": run.market.name if run.market else None,
                 "area": run.area.name if run.area else None,
                 "price_per_order": run.price_per_order,
+                "rider_earning_per_drop": earning_for_drop(
+                    run.base_price, stops=len(run.run_orders)
+                ),
+                "rider_earning_total": _run_total(run, len(run.run_orders)),
                 "stops": [
                     {
                         "seller_id": stop.seller_id,
