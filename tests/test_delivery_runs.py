@@ -15,6 +15,7 @@ from app.deliveries.models import (
 )
 from app.deliveries.runs import (
     DEFAULT_BASE_PRICE,
+    run_base_price,
     RUN_MAX_PACKAGES,
     RUN_MAX_WEIGHT_GRAMS,
     DeliveryRunService,
@@ -307,8 +308,13 @@ def test_close_runs_past_cutoff_prices_and_plans_nonempty_run(mock_scope):
     assert result["refunds_owed"] == 0
     assert run.status == DeliveryRunStatus.RIDER_ASSIGNMENT
     assert run.surge_multiplier == 1.0
-    assert run.base_price == DEFAULT_BASE_PRICE
-    assert run.price_per_order == round(DEFAULT_BASE_PRICE / 4, 2)
+    # Priced per stop, not flat: four drops cost the trip charge plus four
+    # stop charges. A flat run price meant a four-stop run collected what a
+    # one-stop run collected, so the rider earned the same for four drops.
+    assert run.base_price == run_base_price(4)
+    assert run.price_per_order == round(run_base_price(4) / 4, 2)
+    # Still much cheaper per buyer than delivering alone, which is the point.
+    assert run.price_per_order < run_base_price(1)
 
 
 @patch("app.deliveries.runs.session_scope")
@@ -338,7 +344,7 @@ def test_close_runs_past_cutoff_applies_surge_multiplier(mock_scope):
     DeliveryRunService.close_runs_past_cutoff()
 
     assert run.surge_multiplier == pytest.approx(1.3)
-    assert run.base_price == round(DEFAULT_BASE_PRICE * 1.3, 2)
+    assert run.base_price == round(run_base_price(4) * 1.3, 2)
 
 
 @patch("app.orders.services.OrderService.cancel_order")

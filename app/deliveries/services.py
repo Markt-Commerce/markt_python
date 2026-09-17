@@ -37,6 +37,7 @@ from .models import (
 from app.orders.events import ActorType, OrderEventService, OrderEventType
 from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
 from app.orders.services import OrderService
+from app.deliveries.rider_pay import earning_for_drop
 from app.wallet.services import WalletService
 
 logger = logging.getLogger(__name__)
@@ -854,7 +855,11 @@ class DeliveryService:
             assignment.logistical_status = LogisticalStatus.COMPLETED
             rider_id = assignment.delivery_user_id
             reference_id = assignment.assignment_id
-            earning_amount = order.shipping_fee
+            # One stop: the whole shipping fee is this trip's revenue.
+            # The rider takes a share of it rather than all of it -- see
+            # app/deliveries/rider_pay.py for why both payout paths now go
+            # through one function.
+            earning_amount = earning_for_drop(order.shipping_fee, stops=1)
             session.commit()
 
         # Delegate order-level completion (status, realtime event, gamification)

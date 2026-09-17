@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.deliveries.rider_pay import earning_for_drop
 from app.deliveries.models import (
     AssignmentStatus,
     DeliveryRunOrderPodStatus,
@@ -370,8 +371,15 @@ def test_confirm_order_pod_marks_items_delivered_and_completes_run(
     item_a = _make_item(1, OrderItem.Status.SHIPPED, seller_id=10)
     item_b = _make_item(2, OrderItem.Status.CANCELLED, seller_id=11)
     order = SimpleNamespace(id="ORD_1", items=[item_a, item_b])
+    # A two-stop run: the rider is paid a share of what the whole run
+    # collected, divided by its stops -- not price_per_order, which is the
+    # buyers' split and can be capped at somebody's solo fee.
     run = SimpleNamespace(
-        id="RUN_1", status=DeliveryRunStatus.DELIVERY_IN_PROGRESS, price_per_order=300
+        id="RUN_1",
+        status=DeliveryRunStatus.DELIVERY_IN_PROGRESS,
+        price_per_order=300,
+        base_price=750,
+        run_orders=[object(), object()],
     )
     run.transition_to = lambda new_status, _r=run: setattr(_r, "status", new_status)
 
@@ -417,7 +425,9 @@ def test_confirm_order_pod_marks_items_delivered_and_completes_run(
     assert run_order.pod_status == DeliveryRunOrderPodStatus.DELIVERED
     assert run.status == DeliveryRunStatus.COMPLETED
     mock_update.assert_called_once_with("ORD_1", OrderStatus.DELIVERED)
-    mock_credit_earning.assert_called_once_with("DEL_1", 300, "RUN_1:ORD_1")
+    mock_credit_earning.assert_called_once_with(
+        "DEL_1", earning_for_drop(750, stops=2), "RUN_1:ORD_1"
+    )
 
 
 def test_confirm_order_pod_raises_validation_for_wrong_qr_code():

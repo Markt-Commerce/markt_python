@@ -39,6 +39,7 @@ from app.libs.session import session_scope
 from app.orders.events import ActorType, OrderEventService, OrderEventType
 from app.orders.models import Order, OrderItem, OrderStatus
 from app.orders.services import OrderService
+from app.deliveries.rider_pay import earning_for_drop
 from app.wallet.services import WalletService
 
 from .models import (
@@ -267,7 +268,15 @@ class DeliveryRunPodService:
 
             run_completed = False
             run = session.query(DeliveryRun).filter_by(id=run_id).first()
-            earning_amount = run.price_per_order if run else None
+            # The run's whole price, divided by the stops it carries. Not
+            # run.price_per_order: that is the buyers' equal split, and a
+            # share capped at somebody's solo fee is not a statement about
+            # what the rider is owed for riding there.
+            earning_amount = (
+                earning_for_drop(run.base_price, stops=len(run.run_orders))
+                if run
+                else None
+            )
             if run and run.status == DeliveryRunStatus.DELIVERY_IN_PROGRESS:
                 remaining = (
                     session.query(DeliveryRunOrder)
