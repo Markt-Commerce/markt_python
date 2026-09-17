@@ -301,8 +301,32 @@ def send_seller_analytics_reports():
                     )
 
                     # Prepare report data
+                    # The same window, one period earlier. A figure with
+                    # nothing to compare it against is not information -- the
+                    # template prints "12 more than the month before" only
+                    # when this is here, and nothing at all when it is not.
+                    previous_start = start_date - (now - start_date)
+                    previous_orders = (
+                        session.query(Order)
+                        .join(OrderItem, OrderItem.order_id == Order.id)
+                        .filter(
+                            OrderItem.seller_id == seller.id,
+                            Order.created_at >= previous_start,
+                            Order.created_at < start_date,
+                            Order.status != OrderStatus.CANCELLED,
+                        )
+                        .all()
+                    )
+
                     report_data = {
                         "period": period,
+                        "shop_name": seller.shop_name,
+                        "previous": {
+                            "total_sales": float(
+                                sum(o.total or 0 for o in previous_orders)
+                            ),
+                            "total_orders": len(previous_orders),
+                        },
                         "total_sales": total_sales,
                         "total_orders": total_orders,
                         "total_products": total_products,

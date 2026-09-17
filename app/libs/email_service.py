@@ -675,105 +675,86 @@ class EmailService:
         """
 
     def _get_seller_analytics_report_template(self, report_data: Dict[str, Any]) -> str:
-        """Get seller analytics report template"""
-        period = report_data.get("period", "")
-        total_sales = report_data.get("total_sales", 0)
-        total_orders = report_data.get("total_orders", 0)
-        total_products = report_data.get("total_products", 0)
-        top_products = report_data.get("top_products", [])
+        """The seller's period report.
 
-        top_products_html = ""
-        for i, product in enumerate(top_products[:5], 1):
-            top_products_html += f"""
-            <tr>
-                <td style="padding: 10px; border-bottom: 1px solid #eee;">{i}</td>
-                <td style="padding: 10px; border-bottom: 1px solid #eee;">{product.get('name', '')}</td>
-                <td style="padding: 10px; border-bottom: 1px solid #eee;">{product.get('sales', 0)}</td>
-                <td style="padding: 10px; border-bottom: 1px solid #eee;">₦{product.get('revenue', 0):,.2f}</td>
-            </tr>
-            """
+        Rewritten because the old one laid its figures out with `display:
+        grid`, which Gmail and Outlook do not support -- so the two-column
+        panel readers were meant to see collapsed into a stack of unstyled
+        divs, and the `<style>` block carrying the rest of it was stripped on
+        the way in.
 
-        return f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Your Markt Analytics Report</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                .header {{ text-align: center; margin-bottom: 30px; }}
-                .logo {{ color: #E94C2A; font-size: 32px; font-weight: bold; }}
-                .stats-grid {{
-                    display: grid;
-                    grid-template-columns: 1fr 1fr;
-                    gap: 20px;
-                    margin: 20px 0;
-                }}
-                .stat-box {{
-                    background: #f8f9fa;
-                    padding: 20px;
-                    border-radius: 8px;
-                    text-align: center;
-                    border-left: 4px solid #E94C2A;
-                }}
-                .stat-number {{ font-size: 24px; font-weight: bold; color: #E94C2A; }}
-                .items-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
-                .items-table th {{ background: #E94C2A; color: white; padding: 10px; text-align: left; }}
-                .footer {{ text-align: center; margin-top: 30px; color: #666; font-size: 14px; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <div class="logo">Markt</div>
-                </div>
-
-                <h2>Your Analytics Report - {period}</h2>
-
-                <p>Here's a summary of your performance on Markt for {period}:</p>
-
-                <div class="stats-grid">
-                    <div class="stat-box">
-                        <div class="stat-number">₦{total_sales:,.2f}</div>
-                        <div>Total Sales</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-number">{total_orders}</div>
-                        <div>Total Orders</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-number">{total_products}</div>
-                        <div>Active Products</div>
-                    </div>
-                </div>
-
-                <h3>Top Performing Products</h3>
-                <table class="items-table">
-                    <thead>
-                        <tr>
-                            <th>Rank</th>
-                            <th>Product</th>
-                            <th>Units Sold</th>
-                            <th>Revenue</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {top_products_html}
-                    </tbody>
-                </table>
-
-                <p>Keep up the great work! Continue optimizing your products and customer service to grow your business.</p>
-
-                <div class="footer">
-                    <p>Best regards,<br>The Markt Team</p>
-                    <p>© 2025 Markt. All rights reserved.</p>
-                </div>
-            </div>
-        </body>
-        </html>
+        The shape follows what a report like this is for: one number the
+        seller actually cares about, the supporting ones underneath with
+        something to compare each against, what sold, and a way back into the
+        shop. Comparisons appear only when the caller supplies the previous
+        period -- an invented delta would be worse than none.
         """
+        from app.libs import email_layout as L
+
+        period = report_data.get("period", "")
+        shop_name = report_data.get("shop_name") or "your shop"
+        total_sales = float(report_data.get("total_sales", 0) or 0)
+        total_orders = int(report_data.get("total_orders", 0) or 0)
+        total_products = int(report_data.get("total_products", 0) or 0)
+        top_products = report_data.get("top_products") or []
+        dashboard_url = report_data.get("dashboard_url", "https://marktcommerce.com")
+
+        previous = report_data.get("previous") or {}
+        noun = "quarter" if period.strip().upper().startswith("Q") else "month"
+
+        body = L.header(period, f"How {shop_name} did")
+
+        if total_orders == 0:
+            # A report of nothing is the one most likely to read as a mistake,
+            # so it says plainly that nothing is broken and what usually helps.
+            body += L.lead_stat("No sales yet", period)
+            body += L.note(
+                f"Nothing sold this {noun}. That is usually a listing without "
+                "a photo or a price that has drifted -- both take a minute to "
+                "fix from your dashboard."
+            )
+            body += L.button("Open your shop", dashboard_url)
+            return L.shell(
+                f"Your Markt report - {period}",
+                f"No sales this {noun} - here is what usually helps.",
+                body,
+            )
+
+        body += L.lead_stat(
+            f"\u20a6{total_sales:,.2f}",
+            f"You earned in {period}",
+            L.change_line(
+                total_sales, previous.get("total_sales"), noun, prefix="\u20a6"
+            ),
+        )
+        body += L.stat_row(
+            "Orders",
+            f"{total_orders:,}",
+            L.change_line(total_orders, previous.get("total_orders"), noun),
+        )
+        body += L.stat_row(
+            "Average order",
+            f"\u20a6{(total_sales / total_orders):,.2f}",
+            f"Across every order this {noun}.",
+        )
+        body += L.stat_row("Live listings", f"{total_products:,}")
+
+        rows = [
+            [
+                p.get("name", ""),
+                f"{p.get('sales', 0):,}",
+                f"\u20a6{float(p.get('revenue', 0) or 0):,.2f}",
+            ]
+            for p in top_products[:5]
+        ]
+        body += L.table_block(["Product", "Sold", "Revenue"], rows, "What sold most")
+        body += L.button("Open your dashboard", dashboard_url)
+
+        return L.shell(
+            f"Your Markt report - {period}",
+            f"\u20a6{total_sales:,.2f} from {total_orders:,} orders in {period}.",
+            body,
+        )
 
 
 # Global email service instance
