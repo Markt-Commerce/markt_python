@@ -84,17 +84,45 @@ class AddressUpdateSchema(AddressSchema):
 
 
 class BuyerCreateSchema(Schema):
+    """Adding the buying side to an account that already exists.
+
+    Used both by registration and by POST /users/create-buyer, which is how
+    an account created through Google or Apple gets a role: the provider
+    proves the address and nothing else, so the role is chosen afterwards.
+
+    Only the name is required, and deliberately so. The delivery address is
+    asked for on its own screen further into onboarding -- requiring it here
+    would mean either blocking role creation on an address the app has not
+    collected yet, or inventing one.
+    """
+
     buyername = fields.Str(required=True)
-    shipping_address = fields.Dict()
+    shipping_address = fields.Dict(
+        required=False,
+        allow_none=True,
+        description="Optional: collected on its own step in the mobile flow",
+    )
 
 
 class SellerCreateSchema(Schema):
+    """Adding the selling side. Same two callers as BuyerCreateSchema.
+
+    `policies` is set from the seller dashboard once the shop exists, not
+    during signup, so it is not required here.
+    """
+
     shop_name = fields.Str(required=True)
     description = fields.Str(required=True)
     category_ids = fields.List(
-        fields.Int(), required=True, description="List of category IDs"
+        fields.Int(),
+        required=True,
+        description="List of category IDs; may be empty and chosen later",
     )
-    policies = fields.Dict(required=False)
+    policies = fields.Dict(
+        required=False,
+        allow_none=True,
+        description="Optional: set from the dashboard after the shop exists",
+    )
 
 
 class UserRegisterSchema(UserSchema):
