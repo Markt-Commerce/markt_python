@@ -111,6 +111,18 @@ class DeliveryOrderAcceptRequestSchema(Schema):
     order_id = fields.String(required=True)
 
 
+class DeliveryOrderOfferResponseSchema(Schema):
+    """The hold put on an order while a rider decides."""
+
+    assignment_id = fields.String()
+    status = fields.String()
+    # ISO-8601, UTC. The app counts down to this rather than to a duration
+    # it starts locally, so a slow response does not hand out extra seconds
+    # and a phone with a wrong clock still expires when the server does.
+    expires_at = fields.String()
+    seconds = fields.Integer()
+
+
 class DeliveryOrderAcceptResponseSchema(Schema):
     assignment_id = fields.String()
     status = fields.String(validate=validate.OneOf(["ASSIGNED", "REJECTED"]))

@@ -26,7 +26,9 @@ ALERT_RADIUS_KM = 5.0
 MAX_RIDERS_ALERTED = 25
 
 
-def _nearby_rider_ids(session, lat: float, lng: float) -> List[str]:
+def _nearby_rider_ids(
+    session, lat: float, lng: float, radius_km: float = ALERT_RADIUS_KM
+) -> List[str]:
     from app.deliveries.models import (
         DeliveryLastLocation,
         DeliveryStatus,
@@ -48,15 +50,24 @@ def _nearby_rider_ids(session, lat: float, lng: float) -> List[str]:
         if location is None or location.latitude is None or location.longitude is None:
             continue
         distance = haversine_km(lat, lng, location.latitude, location.longitude)
-        if distance <= ALERT_RADIUS_KM:
+        if distance <= radius_km:
             near.append((distance, rider_id))
 
     near.sort()
     return [rider_id for _, rider_id in near[:MAX_RIDERS_ALERTED]]
 
 
-def alert_nearby_riders(order_id: str, pickup_name: Optional[str] = None) -> int:
+def alert_nearby_riders(
+    order_id: str,
+    pickup_name: Optional[str] = None,
+    radius_km: float = ALERT_RADIUS_KM,
+) -> int:
     """Push "a delivery is available" to riders near the pickup.
+
+    `radius_km` widens for escalation: an order nobody has taken after a
+    while is re-alerted further out (see app/deliveries/offers.py), because
+    an order sitting unclaimed in a list nobody is refreshing is how one
+    gets forgotten.
 
     Returns how many were told. Never raises.
     """
@@ -83,7 +94,7 @@ def alert_nearby_riders(order_id: str, pickup_name: Optional[str] = None) -> int
                 return 0
 
             shop_name = pickup_name or getattr(seller, "shop_name", None) or "a shop"
-            rider_ids = _nearby_rider_ids(session, lat, lng)
+            rider_ids = _nearby_rider_ids(session, lat, lng, radius_km)
 
         for rider_id in rider_ids:
             NotificationService.create_notification(

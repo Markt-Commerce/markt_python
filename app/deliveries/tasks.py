@@ -56,3 +56,32 @@ def notify_thin_volume_orders():
         logger.info("Notified %s order(s) of thin delivery volume", result["notified"])
         run.result = result
         return result
+
+
+@celery_app.task(name="app.deliveries.tasks.sweep_delivery_offers", queue="default")
+def sweep_delivery_offers():
+    """Release lapsed holds, and chase orders nobody has taken.
+
+    This is what makes the countdown safe. The hold an offer puts on an
+    order has an expiry, and nothing on the rider's phone is trusted to
+    release it -- a backgrounded app, a dead battery or a ride through a
+    basement must not be able to park an order indefinitely. So the expiry
+    is enforced here, on a schedule, whether or not anyone comes back.
+
+    It also chases: an order still unclaimed well after it went out gets
+    re-alerted on a wider radius. An order sitting in a list nobody is
+    refreshing is exactly how one gets forgotten in an area that had riders
+    in it the whole time.
+    """
+    with record_worker_run("app.deliveries.tasks.sweep_delivery_offers") as run:
+        from app.deliveries.offers import sweep
+
+        result = sweep()
+        logger.info(
+            "Offer sweep: %s lapsed, %s re-alerted, %s escalated",
+            result["lapsed"],
+            result["realerted"],
+            result["escalated"],
+        )
+        run.result = result
+        return result
