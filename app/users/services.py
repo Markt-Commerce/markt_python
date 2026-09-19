@@ -299,10 +299,33 @@ class AuthService:
                 elif user.is_seller:
                     account_type = "seller"
                 else:
-                    raise AuthError("No valid account type found")
+                    # Neither role. This raised "No valid account type
+                    # found" -- a 401 with nothing the person holding the
+                    # phone can do about it, on an account that is perfectly
+                    # valid and simply has not been asked yet whether it is
+                    # buying or selling.
+                    #
+                    # Signing in through Google or Apple creates exactly
+                    # this: the provider proves the address, the app then
+                    # asks for a role, and anything that interrupts it in
+                    # between -- a killed app, a failed request, a flat
+                    # battery -- left an account that could never be logged
+                    # into again. There is no recovery path, because every
+                    # way to add a role needs a session and a session is
+                    # what this refused to issue.
+                    #
+                    # So: sign them in. The profile that comes back says
+                    # `next_step: "choose_role"`, and the client finishes
+                    # what it started. Nothing here is reachable without the
+                    # password, which is the thing login is checking.
+                    account_type = None
 
             # Validate the account type
-            if account_type == "buyer":
+            if account_type is None:
+                # Roleless: nothing to validate. Everything that needs a role
+                # checks for one itself.
+                pass
+            elif account_type == "buyer":
                 if not user.is_buyer:
                     raise AuthError("Buyer account not found")
 
@@ -342,9 +365,15 @@ class AuthService:
                     payload={"email": user.email},
                 )
 
-            # Update current_role and last login timestamp
-            user.current_role = account_type
-            UserService._cache_current_role(user.id, user.current_role)
+            # Update current_role and last login timestamp.
+            #
+            # Only when there is one: the setter rejects None (and rejects a
+            # role the account does not hold), so a roleless sign-in has
+            # nothing to record here. It picks one on the next screen, and
+            # create-buyer/create-seller set it then.
+            if account_type is not None:
+                user.current_role = account_type
+                UserService._cache_current_role(user.id, user.current_role)
             try:
                 # Update last login time for session management on frontend
                 from datetime import datetime
