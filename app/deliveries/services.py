@@ -57,6 +57,23 @@ def _normalize_phone(raw: str) -> str:
     return (raw or "").lstrip("+").strip()
 
 
+def _mask_email(email: str) -> str:
+    """Enough of an address to recognise your own inbox, not enough to be
+    somebody else's.
+
+    The OTP endpoint used to answer with the address in full -- "OTP sent to
+    ada@example.com" -- to anyone who posted a phone number. A rider's phone
+    number is on every package they deliver, so that turned a delivery note
+    into a lookup for their personal email. It is also the one response you
+    do not need authentication to reach.
+    """
+    if not email or "@" not in email:
+        return "your email"
+    name, _, domain = email.partition("@")
+    head = name[0] if name else ""
+    return f"{head}{'*' * max(len(name) - 1, 1)}@{domain}"
+
+
 class DeliveryService:
 
     # Ten minutes: long enough for an email to arrive and be typed out,
@@ -169,10 +186,19 @@ class DeliveryService:
             if email_service.send_otp_email(email, otp):
                 cache_key = f"{DeliveryService.CACHE_KEY_PREFIX}{phone}"
                 redis_client.setex(cache_key, DeliveryService.CACHE_EXPIRE_SECONDS, otp)
-                return {"status": "success", "message": f"OTP sent to {email}"}
+                return {
+                    "status": "success",
+                    "message": f"OTP sent to {_mask_email(email)}",
+                }
             else:
                 logger.error(f"Failed to send OTP email to {email}")
-                return {"status": "error", "message": f"Failed to send OTP to {email}"}
+                return {
+                    "status": "error",
+                    "message": (
+                        "We could not deliver a code to the email on this "
+                        "account. Contact support."
+                    ),
+                }
         except Exception as e:
             logger.error(f"Error sending OTP: {str(e)}")
             return {"status": "error", "message": "Failed to send OTP", "error": str(e)}
