@@ -65,6 +65,11 @@ class DeliveryUser(BaseModel, UserMixin, UniqueIdMixin):
     vehicle_type = db.Column(db.Enum(DeliveryVehicleType), nullable=True)
     created_at = db.Column(db.DateTime, server_default=db.func.now())
     rating = db.Column(db.Float, nullable=True)
+    # The rider's own photo. Buyers and sellers have had one on User since
+    # the beginning; riders are a separate table and simply never got the
+    # column -- so the one person who turns up at a stranger's door was the
+    # one with no face in the app.
+    profile_picture = db.Column(db.String(255), nullable=True)
 
     last_location = db.relationship(
         "DeliveryLastLocation",
