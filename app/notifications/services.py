@@ -145,6 +145,17 @@ class NotificationService:
             "title": "Delivery attempt failed",
             "message": "{message}",
         },
+        # The emitter writes the sentence, because the interesting part is
+        # which step was reached and a template cannot say "your rider is
+        # outside" and "we've found you a rider" at once.
+        NotificationType.DELIVERY_STATUS_UPDATE: {
+            "title": "Delivery update",
+            "message": "{message}",
+        },
+        NotificationType.DELIVERY_PICKUP_UPDATE: {
+            "title": "Rider update",
+            "message": "{message}",
+        },
         NotificationType.REFUND_ISSUED: {
             "title": "Refund issued",
             "message": "{message}",

@@ -99,10 +99,22 @@ class DeliveryAvailableOrdersResponseSchema(Schema):
 
 class AvailableOrderSchema(Schema):
     order_id = fields.String()
+    order_number = fields.String(allow_none=True)
     pickup = fields.List(fields.Nested("LocationSchema"))
     dropoff = fields.Nested("LocationSchema")
     distance_meters = fields.Float()
     estimated_earnings = fields.Float()
+
+    # What the offer is, not just what it pays. A rider deciding in the
+    # seconds an offer hold lasts was given an order id and a distance;
+    # these are the same details the assignment hands over once they have
+    # already committed.
+    seller_name = fields.String(allow_none=True)
+    seller_image = fields.String(allow_none=True)
+    pickup_address = fields.String(allow_none=True)
+    pickup_count = fields.Integer()
+    item_count = fields.Integer()
+    dropoff_area = fields.String(allow_none=True)
 
 
 class LocationSchema(Schema):
@@ -162,6 +174,22 @@ class ActiveAssignmentSchema(Schema):
             ["ASSIGNED", "ACCEPTED", "REJECTED", "OFFERED", "EXPIRED"]
         )
     )
+    # Which step of the delivery they are on. `status` above is ACCEPTED
+    # for the whole job and says nothing about progress, so without this
+    # the app cannot tell "on the way to the shop" from "parcel in hand"
+    # and re-offers the step the rider just finished.
+    logistical_status = fields.String(
+        validate=validate.OneOf(
+            [
+                "ARRIVED_PICKUP",
+                "PICKED_UP",
+                "EN_ROUTE_TO_DROPOFF",
+                "DELIVERED_PENDING_QR",
+                "COMPLETED",
+            ]
+        ),
+        allow_none=True,
+    )
     assignedAt = fields.DateTime()
 
     # Who and where, not just two coordinates. A run's stops have carried
@@ -169,6 +197,7 @@ class ActiveAssignmentSchema(Schema):
     # stop, and the rider was shown "Pickup from seller" with no name, no
     # address and nobody to call.
     seller_name = fields.String(allow_none=True)
+    seller_image = fields.String(allow_none=True)
     pickup_address = fields.String(allow_none=True)
     seller_phone = fields.String(allow_none=True)
     buyer_name = fields.String(allow_none=True)

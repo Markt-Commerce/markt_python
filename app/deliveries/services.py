@@ -40,6 +40,8 @@ from .models import (
     LocationUpdateRoom,
     OrderLocationMapping,
 )
+from app.notifications.models import NotificationType
+from app.notifications.services import NotificationService
 from app.orders.events import ActorType, OrderEventService, OrderEventType
 from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
 from app.orders.services import OrderService
@@ -601,6 +603,8 @@ class DeliveryService:
                     pickup_distances = []
                     seen_seller_ids = set()
 
+                    pickup_sellers = []
+
                     for item in order.items:
                         seller = item.seller
                         if not seller or seller.id in seen_seller_ids:
@@ -640,6 +644,7 @@ class DeliveryService:
                             continue
 
                         seller_pickups.append({"lat": pickup_lat, "lng": pickup_lng})
+                        pickup_sellers.append(seller)
 
                         distance = DeliveryService.haversine_distance(
                             delivery_lat, delivery_lng, pickup_lat, pickup_lng
@@ -665,9 +670,23 @@ class DeliveryService:
                         earning_for_drop(order.shipping_fee, stops=1) or 0
                     )
 
+                    # What the rider is deciding on.
+                    #
+                    # This carried two coordinates, a distance and a number
+                    # of naira -- so the accept card could only say "Order
+                    # #a1b2c3d4", and a rider had no way to tell a pickup
+                    # from a shop they know from one down an alley they
+                    # don't. The name, the street and the shop's picture
+                    # are what makes the offer legible, and they are the
+                    # same three the assignment already hands over *after*
+                    # accepting; withholding them until then is asking for
+                    # a decision without the facts behind it.
+                    first_seller = pickup_sellers[0] if pickup_sellers else None
+
                     available_orders.append(
                         {
                             "order_id": order.id,
+                            "order_number": order.order_number,
                             "pickup": seller_pickups,
                             "dropoff": {
                                 "lat": dropoff.latitude,
@@ -675,6 +694,28 @@ class DeliveryService:
                             },
                             "distance_meters": round(max_distance, 2),
                             "estimated_earnings": estimated_earnings,
+                            "seller_name": (
+                                getattr(first_seller, "shop_name", None)
+                                if first_seller
+                                else None
+                            ),
+                            "seller_image": DeliveryService._shop_image(first_seller),
+                            "pickup_address": DeliveryService._shop_address_line(
+                                first_seller
+                            ),
+                            # A second shop is a second stop, and that is
+                            # the difference between a ten-minute job and a
+                            # half-hour one.
+                            "pickup_count": len(seller_pickups),
+                            "item_count": sum(
+                                (item.quantity or 1) for item in order.items
+                            ),
+                            # Where they are taking it. Not the full address
+                            # -- that is the buyer's, and they have not
+                            # accepted yet -- just the area, which is what
+                            # tells them whether it is a trip home or the
+                            # wrong way across town.
+                            "dropoff_area": getattr(dropoff, "city", None),
                         }
                     )
 
@@ -861,10 +902,25 @@ class DeliveryService:
             mine.expires_at = None
             session.flush()
 
-            return {
+            audience = DeliveryService._delivery_audience(session, mine)
+            result = {
                 "status": AssignmentStatus.ASSIGNED.value,
                 "assignment_id": mine.assignment_id,
             }
+
+        # The first thing either side hears about the delivery. A buyer
+        # watching a paid order had no way to know a rider had been found
+        # short of opening the app and pulling to refresh, and the seller
+        # got no warning at all that someone was on their way to a
+        # collection they have to be there for.
+        DeliveryService._send_delivery_notice(
+            audience,
+            buyer_text="{rider} is on the way to collect order {order}.",
+            seller_text="{rider} is on the way to collect order {order} from your shop.",
+            status_value="ACCEPTED",
+        )
+
+        return result
 
     @staticmethod
     def reject_order(user_id: str, order_id: str) -> Dict:
@@ -931,6 +987,24 @@ class DeliveryService:
                         "order_id": assignment.order_id,
                         "assigned_at": assignment.assigned_at,
                         "status": assignment.status.value,
+                        # The status that actually moves.
+                        #
+                        # `status` is the *assignment* status, and for
+                        # everything a rider does after accepting it is the
+                        # constant ACCEPTED. The step they are on -- arrived,
+                        # picked up, en route -- lives on logistical_status,
+                        # and it was never sent. So the app had nothing to
+                        # tell the steps apart by: it re-rendered "Arrived at
+                        # pickup" after the rider had already arrived, and
+                        # tapping it again was rejected by
+                        # is_valid_status_transition (ARRIVED_PICKUP is only
+                        # reachable from None) as an error the rider could do
+                        # nothing about.
+                        "logistical_status": (
+                            assignment.logistical_status.value
+                            if assignment.logistical_status
+                            else None
+                        ),
                         "pickup": DeliveryService.get_assignment_pickups_from_order_item(
                             assignment.order
                         ),
@@ -950,6 +1024,46 @@ class DeliveryService:
             }
 
     @staticmethod
+    def _shop_address_line(seller) -> Optional[str]:
+        """Seller.shop_address is a JSON blob; a rider needs one line."""
+        shop_address = getattr(seller, "shop_address", None) if seller else None
+        if not isinstance(shop_address, dict):
+            return shop_address or None
+
+        return (
+            ", ".join(
+                str(part)
+                for part in (
+                    shop_address.get("street"),
+                    shop_address.get("street_address"),
+                    shop_address.get("city"),
+                )
+                if part
+            )
+            or None
+        )
+
+    @staticmethod
+    def _shop_image(seller) -> Optional[str]:
+        """The shop's picture, for a rider looking for the right stall.
+
+        User.profile_picture is the shop's avatar and banner_url the wide
+        cover; the avatar is what a rider wants, since it is what the shop
+        looks like rather than what its page looks like. "default.jpg" is
+        the column default for a seller who never set one, and is a
+        filename rather than a URL -- sending it gives the app a broken
+        image to render, which is worse than sending nothing.
+        """
+        if not seller:
+            return None
+
+        avatar = getattr(getattr(seller, "user", None), "profile_picture", None)
+        if avatar and avatar != "default.jpg":
+            return avatar
+
+        return getattr(seller, "banner_url", None) or None
+
+    @staticmethod
     def _assignment_parties(order: Order) -> Dict:
         """The people at each end of a single-order delivery.
 
@@ -964,20 +1078,7 @@ class DeliveryService:
         )
         buyer_user = getattr(getattr(order, "buyer", None), "user", None)
 
-        shop_address = getattr(seller, "shop_address", None) if seller else None
-        if isinstance(shop_address, dict):
-            shop_address = (
-                ", ".join(
-                    str(part)
-                    for part in (
-                        shop_address.get("street"),
-                        shop_address.get("street_address"),
-                        shop_address.get("city"),
-                    )
-                    if part
-                )
-                or None
-            )
+        shop_address = DeliveryService._shop_address_line(seller)
 
         drop = order.shipping_address
         drop_line = None
@@ -996,6 +1097,7 @@ class DeliveryService:
 
         return {
             "seller_name": getattr(seller, "shop_name", None) if seller else None,
+            "seller_image": DeliveryService._shop_image(seller),
             "pickup_address": shop_address,
             "seller_phone": (
                 getattr(getattr(seller, "user", None), "phone_number", None)
@@ -1111,9 +1213,149 @@ class DeliveryService:
                         if item.status == OrderItem.Status.PROCESSING:
                             item.transition_to(OrderItem.Status.SHIPPED)
 
+            # Who to tell, gathered while the session is still open.
+            # NotificationService.create_notification opens its own
+            # session_scope, so firing from in here would nest one
+            # transaction inside another -- failure.py has the same shape
+            # and the same comment.
+            audience = DeliveryService._delivery_audience(session, assignment)
+
             session.commit()
 
-            return {"status": assignment.logistical_status.value}
+        DeliveryService._notify_delivery_progress(audience, logistical_status)
+
+        return {"status": logistical_status.value}
+
+    # Who hears about a rider reaching each step, and what they are told.
+    #
+    # The buyer hears about all of it: it is their parcel, and before this
+    # their order went silent the moment they paid for it. The seller hears
+    # only the two steps that ask something of them -- someone is coming,
+    # and someone is outside -- because a shop does not need to know the
+    # rider has set off for a buyer across town.
+    #
+    # COMPLETED is absent deliberately: the POD confirm path already tells
+    # both sides the order was delivered, and a second "delivered" a moment
+    # later reads as a duplicate.
+    _BUYER_PROGRESS = {
+        LogisticalStatus.ARRIVED_PICKUP: "{rider} has reached the shop to collect order {order}.",
+        LogisticalStatus.PICKED_UP: "{rider} has collected order {order}.",
+        LogisticalStatus.EN_ROUTE_TO_DROPOFF: "{rider} is on the way with order {order}.",
+        LogisticalStatus.DELIVERED_PENDING_QR: (
+            "{rider} has arrived with order {order}. Have your delivery code ready."
+        ),
+    }
+
+    _SELLER_PROGRESS = {
+        LogisticalStatus.ARRIVED_PICKUP: "{rider} is at your shop to collect order {order}.",
+        LogisticalStatus.PICKED_UP: "{rider} has collected order {order} from your shop.",
+    }
+
+    @staticmethod
+    def _delivery_audience(session, assignment) -> Dict:
+        """The people behind one assignment, as plain values.
+
+        Plain values rather than model objects on purpose: these outlive
+        the session they were read in, and a lazy load after it closes is
+        a DetachedInstanceError inside an `except Exception` that nobody
+        would ever see.
+
+        Every read is defensive, and the whole thing is wrapped: this runs
+        inside the transaction that just moved a real delivery forward, and
+        failing to work out who to tell must not undo the step the rider
+        already took. An empty dict means nobody gets told, which is
+        exactly the behaviour this replaces.
+        """
+        try:
+            order = session.query(Order).filter_by(id=assignment.order_id).first()
+            if not order:
+                return {}
+
+            buyer_user = getattr(getattr(order, "buyer", None), "user", None)
+
+            seller_user_ids = []
+            for item in getattr(order, "items", None) or []:
+                seller_user_id = getattr(getattr(item, "seller", None), "user_id", None)
+                if seller_user_id and seller_user_id not in seller_user_ids:
+                    seller_user_ids.append(seller_user_id)
+
+            rider = getattr(assignment, "delivery_user", None)
+
+            return {
+                "order_id": getattr(order, "id", None),
+                "order_number": getattr(order, "order_number", None),
+                "buyer_user_id": getattr(buyer_user, "id", None),
+                "seller_user_ids": seller_user_ids,
+                "rider_name": getattr(rider, "name", None) or "Your rider",
+            }
+        except Exception:
+            logger.exception(
+                "Could not work out who to notify about assignment %s",
+                getattr(assignment, "assignment_id", None),
+            )
+            return {}
+
+    @staticmethod
+    def _notify_delivery_progress(
+        audience: Dict, logistical_status: LogisticalStatus
+    ) -> None:
+        DeliveryService._send_delivery_notice(
+            audience,
+            buyer_text=DeliveryService._BUYER_PROGRESS.get(logistical_status),
+            seller_text=DeliveryService._SELLER_PROGRESS.get(logistical_status),
+            status_value=logistical_status.value,
+        )
+
+    @staticmethod
+    def _send_delivery_notice(
+        audience: Dict,
+        buyer_text: Optional[str],
+        seller_text: Optional[str],
+        status_value: str,
+    ) -> None:
+        if not audience:
+            return
+
+        label = audience.get("order_number") or audience.get("order_id") or ""
+        rider_name = audience.get("rider_name") or "Your rider"
+
+        def send(user_id, notification_type, text):
+            if not user_id or not text:
+                return
+            try:
+                NotificationService.create_notification(
+                    user_id=user_id,
+                    notification_type=notification_type,
+                    reference_type="order",
+                    reference_id=audience.get("order_id"),
+                    metadata_={
+                        "message": text.format(rider=rider_name, order=label),
+                        "order_number": audience.get("order_number"),
+                        "logistical_status": status_value,
+                    },
+                )
+            except Exception:
+                # A delivery must not fail because a notification did. The
+                # rider has already moved; the step is already committed.
+                logger.exception(
+                    "Could not notify %s of %s on order %s",
+                    user_id,
+                    status_value,
+                    audience.get("order_id"),
+                )
+
+        send(
+            audience.get("buyer_user_id"),
+            NotificationType.DELIVERY_STATUS_UPDATE,
+            buyer_text,
+        )
+
+        for seller_user_id in audience.get("seller_user_ids", []):
+            send(
+                seller_user_id,
+                NotificationType.DELIVERY_PICKUP_UPDATE,
+                seller_text,
+            )
 
     @staticmethod
     def get_buyer_pod_code(order_id: str, user_id: str) -> Dict:
