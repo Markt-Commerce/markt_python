@@ -25,6 +25,16 @@ class AssignmentStatus(Enum):
     ASSIGNED = "ASSIGNED"
     ACCEPTED = "ACCEPTED"
     REJECTED = "REJECTED"
+    # A rider is looking at this order and has a few seconds to decide. The
+    # hold lives on the server with an expiry, never on the phone: a rider
+    # who backgrounds the app, loses signal or is hit by a dead battery must
+    # not be able to hold an order hostage, and the one thing you cannot
+    # rely on to release a lock is the client that took it.
+    OFFERED = "OFFERED"
+    # An offer nobody acted on. Distinct from REJECTED, which is a decision:
+    # letting an offer lapse says nothing about whether the rider wanted it,
+    # so it must not count against them the way a decline does.
+    EXPIRED = "EXPIRED"
     # 10.7: rider failed *after* accepting (mid-run) -- distinct from
     # REJECTED, which happens before any commitment. Used by
     # DeliveryRunAssignment (10.7's run-level rider failure/reassignment);
@@ -109,7 +119,15 @@ class DeliveryOrderAssignment(BaseModel):
     assigned_at = db.Column(db.DateTime, server_default=db.func.now())
     status = db.Column(
         db.Enum(AssignmentStatus), nullable=False
-    )  # ASSIGNED, ACCEPTED, REJECTED
+    )  # ASSIGNED, ACCEPTED, REJECTED, OFFERED, EXPIRED
+    # When an OFFERED hold lapses, and when a REJECTED order becomes visible
+    # to this rider again. Null for every other status.
+    #
+    # A decline is deliberately not permanent. It used to be -- one tap and
+    # that rider could never see the order again -- so in an area with three
+    # riders, three taps made an order invisible to everyone nearby with
+    # nothing to put it back. Indexed because the sweep queries on it.
+    expires_at = db.Column(db.DateTime, nullable=True, index=True)
     logistical_status = db.Column(
         db.Enum(LogisticalStatus), nullable=True
     )  # ARRIVED_PICKUP, PICKED_UP, EN_ROUTE_TO_DROPOFF, DELIVERED_PENDING_QR

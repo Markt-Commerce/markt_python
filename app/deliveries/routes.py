@@ -24,6 +24,7 @@ from .schemas import (
     DeliveryAvailableOrdersResponseSchema,
     DeliveryOrderAcceptRequestSchema,
     DeliveryOrderAcceptResponseSchema,
+    DeliveryOrderOfferResponseSchema,
     DeliveryActiveAssignmentsResponseSchema,
     LogisticStatusUpdateSchema,
     DeliveryOrderQRResponseSchema,
@@ -142,6 +143,20 @@ class DeliveryAvailableOrders(MethodView):
             page=args.get("page", 1),
             per_page=args.get("per_page", 20),
         )
+
+
+@bp.route("/orders/<string:order_id>/offer")
+class DeliveryOfferOrder(MethodView):
+    @login_required
+    @bp.response(200, DeliveryOrderOfferResponseSchema)
+    def post(self, order_id):
+        """Hold this order for this rider while they decide.
+
+        Returns the expiry the app counts down to. The app counts down to
+        the server's clock rather than its own, which can be minutes out and
+        is the rider's to set.
+        """
+        return DeliveryService.offer_order(current_user.id, order_id)
 
 
 @bp.route("/orders/<string:order_id>/accept")

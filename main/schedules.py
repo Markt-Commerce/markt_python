@@ -1,6 +1,14 @@
 from celery.schedules import crontab
 
 CELERYBEAT_SCHEDULE = {
+    # Delivery offers. Frequent on purpose: this is what releases a hold
+    # whose countdown ran out, and an order held by a phone that went quiet
+    # is an order nobody can take until this runs.
+    "sweep-delivery-offers": {
+        "task": "app.deliveries.tasks.sweep_delivery_offers",
+        "schedule": crontab(minute="*"),  # Every minute
+        "options": {"queue": "default"},
+    },
     # Feed generation tasks
     "generate-personalized-feeds": {
         "task": "app.socials.tasks.generate_all_feeds",

@@ -19,7 +19,13 @@ from sqlalchemy.orm import joinedload
 from external.redis import redis_client
 from app.libs.session import session_scope
 from app.libs.pagination import Paginator
-from app.libs.errors import APIError, NotFoundError, ValidationError, ForbiddenError
+from app.libs.errors import (
+    APIError,
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    ValidationError,
+)
 from app.libs.email_service import email_service
 
 # app imports
@@ -37,6 +43,7 @@ from .models import (
 from app.orders.events import ActorType, OrderEventService, OrderEventType
 from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
 from app.orders.services import OrderService
+from app.deliveries import offers
 from app.deliveries.rider_pay import earning_for_drop
 from app.wallet.services import WalletService
 
@@ -397,6 +404,50 @@ class DeliveryService:
                     .all()
                 )
 
+                # What is genuinely available to *this* rider.
+                #
+                # This list used to be every order in READY_FOR_DELIVERY with
+                # no reference to assignments at all. Accepting an order does
+                # not change its status, so an order another rider was already
+                # carrying stayed on everyone's list until it was delivered --
+                # tapping it returned "Order already accepted" and the real
+                # work was buried under it. A rider's own declines sat there
+                # too, equally untakeable.
+                assignment_rows = (
+                    session.query(DeliveryOrderAssignment)
+                    .filter(
+                        DeliveryOrderAssignment.order_id.in_(
+                            [order.id for order in orders]
+                        )
+                    )
+                    .all()
+                    if orders
+                    else []
+                )
+
+                at = offers.now()
+                taken = set()
+                hidden_from_me = set()
+                for row in assignment_rows:
+                    if row.status == AssignmentStatus.ACCEPTED:
+                        taken.add(row.order_id)
+                    elif offers.is_live_offer(row, at):
+                        # Held by someone right now -- including, briefly,
+                        # this rider, whose own countdown screen is showing
+                        # it rather than the list.
+                        hidden_from_me.add(row.order_id)
+                    elif (
+                        row.delivery_user_id == user_id
+                        and offers.suppresses_for_rider(row, at)
+                    ):
+                        hidden_from_me.add(row.order_id)
+
+                orders = [
+                    order
+                    for order in orders
+                    if order.id not in taken and order.id not in hidden_from_me
+                ]
+
                 available_orders = []
 
                 for order in orders:
@@ -535,84 +586,170 @@ class DeliveryService:
         return R * c
 
     @staticmethod
+    def offer_order(user_id: str, order_id: str) -> Dict:
+        """Hold this order for this rider while they decide.
+
+        The countdown in the app is only meaningful if the order is really
+        held, so this is what the app calls when a rider opens one. It
+        returns the expiry, and the app counts down to *that* -- the
+        server's clock, not the phone's, which can be minutes out and is
+        the rider's to change.
+        """
+        with session_scope() as session:
+            at = offers.now()
+            rows = (
+                session.query(DeliveryOrderAssignment)
+                .filter_by(order_id=order_id)
+                .with_for_update()
+                .all()
+            )
+
+            if any(r.status == AssignmentStatus.ACCEPTED for r in rows):
+                raise ConflictError("Someone else already took this order")
+
+            held_by_other = next(
+                (
+                    r
+                    for r in rows
+                    if r.delivery_user_id != user_id and offers.is_live_offer(r, at)
+                ),
+                None,
+            )
+            if held_by_other:
+                raise ConflictError("Another rider is looking at this order")
+
+            mine = next((r for r in rows if r.delivery_user_id == user_id), None)
+            if mine is None:
+                mine = DeliveryOrderAssignment(
+                    delivery_user_id=user_id,
+                    order_id=order_id,
+                    assignment_id=str(uuid.uuid4()),
+                    status=AssignmentStatus.OFFERED,
+                )
+                session.add(mine)
+            else:
+                # Re-offering to a rider who declined earlier is fine once
+                # the cooldown is over -- that is the whole point of the
+                # cooldown -- but not while it is still running.
+                if offers.suppresses_for_rider(mine, at) and not offers.is_live_offer(
+                    mine, at
+                ):
+                    raise ConflictError("You passed on this order recently")
+                mine.status = AssignmentStatus.OFFERED
+
+            expires_at = offers.offer_expiry(at)
+            mine.expires_at = expires_at
+            session.flush()
+
+            return {
+                "assignment_id": mine.assignment_id,
+                "status": mine.status.value,
+                "expires_at": expires_at.isoformat() + "Z",
+                "seconds": offers.OFFER_SECONDS,
+            }
+
+    @staticmethod
     def accept_order(user_id: str, order_id: str) -> Dict:
         with session_scope() as session:
+            at = offers.now()
             assignments = (
                 session.query(DeliveryOrderAssignment)
                 .filter_by(order_id=order_id)
+                .with_for_update()
                 .all()
             )
             if any(a.status == AssignmentStatus.ACCEPTED for a in assignments):
                 logger.warning(
                     f"Order {order_id} has already been accepted by another delivery partner"
                 )
-                raise NotFoundError("Order already accepted")
+                raise ConflictError("Someone else already took this order")
 
-            if any(
-                a.delivery_user_id == user_id and a.status == AssignmentStatus.REJECTED
-                for a in assignments
-            ):
-                logger.warning(
-                    f"Delivery partner {user_id} has already rejected order {order_id}"
-                )
-                raise NotFoundError("You have already rejected this order")
-
-            # Create a new assignment for the delivery user
-            new_assignment = DeliveryOrderAssignment(
-                delivery_user_id=user_id,
-                order_id=order_id,
-                status=AssignmentStatus.ACCEPTED,
-                assignment_id=str(uuid.uuid4()),
-                escrow_qr_code=str(uuid.uuid4()),
+            held_by_other = next(
+                (
+                    a
+                    for a in assignments
+                    if a.delivery_user_id != user_id and offers.is_live_offer(a, at)
+                ),
+                None,
             )
-            session.add(new_assignment)
-            session.commit()
+            if held_by_other:
+                raise ConflictError("Another rider is looking at this order")
+
+            mine = next((a for a in assignments if a.delivery_user_id == user_id), None)
+
+            # A rider inside a decline cooldown cannot accept. A rider whose
+            # offer merely lapsed can: they were looking at it a moment ago,
+            # and refusing them now -- when nobody else has taken it -- would
+            # be leaving an order on the ground to enforce a technicality.
+            if (
+                mine is not None
+                and mine.status == AssignmentStatus.REJECTED
+                and offers.suppresses_for_rider(mine, at)
+            ):
+                raise ConflictError("You passed on this order recently")
+
+            if mine is None:
+                mine = DeliveryOrderAssignment(
+                    delivery_user_id=user_id,
+                    order_id=order_id,
+                    assignment_id=str(uuid.uuid4()),
+                    status=AssignmentStatus.ACCEPTED,
+                )
+                session.add(mine)
+            else:
+                mine.status = AssignmentStatus.ACCEPTED
+
+            mine.escrow_qr_code = mine.escrow_qr_code or str(uuid.uuid4())
+            mine.expires_at = None
+            session.flush()
 
             return {
                 "status": AssignmentStatus.ASSIGNED.value,
-                "assignment_id": new_assignment.assignment_id,
+                "assignment_id": mine.assignment_id,
             }
 
     @staticmethod
     def reject_order(user_id: str, order_id: str) -> Dict:
+        """Pass on an order -- for now, not forever.
+
+        A decline used to be permanent: the rider could never see the order
+        again, and nothing anywhere put it back. Three riders in an area
+        declining once each made the order invisible to all of them with no
+        way to recover it. It is a cooldown now.
+        """
         with session_scope() as session:
+            at = offers.now()
             assignments = (
                 session.query(DeliveryOrderAssignment)
                 .filter_by(order_id=order_id)
+                .with_for_update()
                 .all()
             )
             if any(a.status == AssignmentStatus.ACCEPTED for a in assignments):
-                logger.warning(
-                    f"Order {order_id} has already been accepted by another delivery partner"
-                )
-                raise NotFoundError("Order already accepted")
+                raise ConflictError("Someone else already took this order")
 
-            if any(
-                a.delivery_user_id == user_id and a.status == AssignmentStatus.REJECTED
-                for a in assignments
-            ):
-                logger.warning(
-                    f"Delivery partner {user_id} has already rejected order {order_id}"
+            mine = next((a for a in assignments if a.delivery_user_id == user_id), None)
+            if mine is None:
+                mine = DeliveryOrderAssignment(
+                    delivery_user_id=user_id,
+                    order_id=order_id,
+                    assignment_id=str(uuid.uuid4()),
+                    status=AssignmentStatus.REJECTED,
                 )
-                raise NotFoundError("You have already rejected this order")
+                session.add(mine)
+            else:
+                mine.status = AssignmentStatus.REJECTED
 
-            # Create a new assignment for the delivery user (no escrow QR for rejected)
-            new_assignment = DeliveryOrderAssignment(
-                delivery_user_id=user_id,
-                order_id=order_id,
-                status=AssignmentStatus.REJECTED,
-                assignment_id=str(uuid.uuid4()),
-                escrow_qr_code=None,
-            )
-            session.add(new_assignment)
-            session.commit()
+            mine.escrow_qr_code = None
+            mine.expires_at = offers.decline_until(at)
+            session.flush()
 
             return {
                 "status": AssignmentStatus.REJECTED.value,
-                "assignment_id": new_assignment.assignment_id,
+                "assignment_id": mine.assignment_id,
+                "available_again_at": mine.expires_at.isoformat() + "Z",
             }
 
-    # TODO: We would need to include the location details of the pickup point and drop off points
     @staticmethod
     def get_active_assignments(user_id: str) -> Dict:
         with session_scope() as session:
