@@ -85,3 +85,42 @@ class TestTheCodeIsNotLogged:
         # The f-string that interpolated `otp` into a log message.
         assert "OTP {otp}" not in source
         assert "{otp}" not in source
+
+
+class TestTheResponseDoesNotHandOutTheAddress:
+    """The OTP endpoint needs no authentication, and a rider's phone number
+    is printed on every package they deliver."""
+
+    def test_the_address_is_masked_not_returned(self):
+        from app.deliveries.services import _mask_email
+
+        masked = _mask_email("adebowale@gmail.com")
+        assert "adebowale" not in masked
+        assert masked.startswith("a")
+        assert masked.endswith("@gmail.com")
+
+    def test_enough_survives_to_recognise_your_own_inbox(self):
+        from app.deliveries.services import _mask_email
+
+        assert _mask_email("rider@markt.test").startswith("r")
+        assert "@markt.test" in _mask_email("rider@markt.test")
+
+    def test_a_one_letter_name_is_still_masked(self):
+        from app.deliveries.services import _mask_email
+
+        # Not "a@x.com", which would be the whole address.
+        assert _mask_email("a@x.com") == "a*@x.com"
+
+    def test_junk_does_not_raise_or_leak(self):
+        from app.deliveries.services import _mask_email
+
+        assert _mask_email("") == "your email"
+        assert _mask_email("not-an-email") == "your email"
+
+    def test_a_failed_send_does_not_name_the_address_either(self):
+        import inspect
+
+        from app.deliveries.services import DeliveryService
+
+        source = inspect.getsource(DeliveryService.send_otp)
+        assert "Failed to send OTP to {email}" not in source
