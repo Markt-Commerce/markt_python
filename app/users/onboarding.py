@@ -27,6 +27,11 @@ from typing import Any, Dict, Optional
 
 # Ordered: the first unmet step is the one to resume at.
 VERIFY_EMAIL = "verify_email"
+# An account with neither role. Sign-in through Google or Apple creates one:
+# the provider proves the address, but nothing has yet said whether this
+# person is here to buy or to sell, and until that is answered the account
+# has no buyer row and no seller row to hang anything on.
+CHOOSE_ROLE = "choose_role"
 BUYER_PROFILE = "buyer_profile"
 SELLER_PROFILE = "seller_profile"
 
@@ -69,6 +74,13 @@ def next_step(user) -> Optional[str]:
     """
     if not user.email_verified:
         return VERIFY_EMAIL
+    # Neither role: this returned None, meaning "ready to use", for an
+    # account that has nothing to use the app *as*. profile_complete said
+    # False at the same time, so the two disagreed and the client believed
+    # next_step -- which is how an OAuth signup walked straight past role
+    # selection into an app it had no role in.
+    if not (user.is_buyer or user.is_seller):
+        return CHOOSE_ROLE
     if user.is_buyer and not _buyer_complete(user):
         return BUYER_PROFILE
     if user.is_seller and not _seller_complete(user):
