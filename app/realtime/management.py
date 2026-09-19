@@ -1,6 +1,7 @@
 """
 Management commands for real-time event system
 """
+
 import logging
 from typing import Dict, Any
 from app.realtime.throttler import redis_event_throttler

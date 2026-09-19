@@ -8,6 +8,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 # project imports
 from external.redis import redis_client
+from app.libs.money import json_safe
 from app.libs.session import session_scope
 from app.libs.pagination import Paginator
 from app.libs.errors import NotFoundError
@@ -25,7 +26,59 @@ class DeliveryChannel(Enum):
     EMAIL = "email"
 
 
+class _Blanks(dict):
+    """Formatting that leaves unknown placeholders blank instead of raising."""
+
+    def __missing__(self, key):  # pragma: no cover - trivial
+        return ""
+
+
+def _owner_column(owner_id: str) -> str:
+    """The Notification column an id is stored in -- see
+    NotificationService._owner_filter for why the prefix is enough."""
+    return "delivery_user_id" if str(owner_id).startswith("DEL_") else "user_id"
+
+
+# The buyer-facing name for each order status. "ready_for_delivery" is a
+# column value, not something to put on someone's lock screen.
+_STATUS_WORDS = {
+    "pending_payment": "awaiting payment",
+    "processing": "confirmed",
+    "ready_for_delivery": "packed and waiting for a rider",
+    "shipped": "on its way to you",
+    "delivered": "delivered",
+    "cancelled": "cancelled",
+    "returned": "returned",
+    "failed": "failed",
+}
+
+
+def _human_status(status: str) -> str:
+    """A status a person can read. Unknown values lose their underscores
+    rather than being dropped, so a new status still reads as English."""
+    text = str(status or "").strip()
+    return _STATUS_WORDS.get(text.lower(), text.replace("_", " "))
+
+
 class NotificationService:
+    # Events that must reach the account owner even when they opted out of
+    # optional mail. These are service messages, not marketing.
+    TRANSACTIONAL_EMAIL_TYPES = {
+        NotificationType.ORDER_UPDATE,
+        NotificationType.SHIPMENT_UPDATE,
+        NotificationType.SYSTEM_ALERT,
+        NotificationType.REQUEST_OFFER,
+        NotificationType.OFFER_ACCEPTED,
+        NotificationType.ORDER_PLACED,
+        NotificationType.PAYMENT_SUCCESS,
+        NotificationType.PAYMENT_FAILED,
+        NotificationType.ITEM_UNFULFILLED,
+        NotificationType.ORDER_CANCELLED,
+        NotificationType.DELIVERY_FAILED,
+        NotificationType.REFUND_ISSUED,
+        NotificationType.SUBSTITUTION_APPROVAL_REQUIRED,
+    }
+
     # Notification templates
     TEMPLATES = {
         NotificationType.POST_LIKE: {
@@ -50,7 +103,7 @@ class NotificationService:
         },
         NotificationType.ORDER_UPDATE: {
             "title": "Order update",
-            "message": "Your order #{order_id} status changed to {status}",
+            "message": "Your order #{order_id} is {status}",
         },
         NotificationType.SHIPMENT_UPDATE: {
             "title": "Shipment update",
@@ -64,10 +117,46 @@ class NotificationService:
             "title": "System notification",
             "message": "{message}",
         },
+        NotificationType.FULFILMENT_REQUEST: {
+            "title": "New order to fulfil",
+            "message": "{message}",
+        },
+        NotificationType.SUBSTITUTION_APPROVAL_REQUIRED: {
+            "title": "Approval needed",
+            "message": "{message}",
+        },
+        # 10.3 -- real bug, never caught: this type had no template entry
+        # at all, so a real (non-mocked) call would raise ValueError.
+        # Caught while wiring Phase 12's notifications, none of which
+        # exercise the real create_notification() call path in tests.
+        NotificationType.THIN_VOLUME_DELIVERY_CHOICE: {
+            "title": "Delivery update",
+            "message": "{message}",
+        },
+        NotificationType.ITEM_UNFULFILLED: {
+            "title": "Item couldn't be fulfilled",
+            "message": "{message}",
+        },
+        NotificationType.ORDER_CANCELLED: {
+            "title": "Order cancelled",
+            "message": "Order #{order_id} has been cancelled.",
+        },
+        NotificationType.DELIVERY_FAILED: {
+            "title": "Delivery attempt failed",
+            "message": "{message}",
+        },
+        NotificationType.REFUND_ISSUED: {
+            "title": "Refund issued",
+            "message": "{message}",
+        },
         # Buyer request notifications
         NotificationType.REQUEST_OFFER: {
             "title": "New offer",
             "message": "{seller_name} made an offer on your request: {request_title}",
+        },
+        NotificationType.NEW_REQUEST_MATCH: {
+            "title": "New request in your category",
+            "message": "{message}",
         },
         NotificationType.OFFER_ACCEPTED: {
             "title": "Offer accepted",
@@ -102,6 +191,20 @@ class NotificationService:
             "title": "New order",
             "message": "New order #{order_id} has been placed",
         },
+        # Riders. Short, and leading with the money or the place, because
+        # these are read on a phone mounted to a handlebar.
+        NotificationType.DELIVERY_AVAILABLE: {
+            "title": "New delivery nearby",
+            "message": "A delivery is available near you. {pickup}",
+        },
+        NotificationType.DELIVERY_ASSIGNED: {
+            "title": "Delivery assigned",
+            "message": "You're on delivery {reference}. {pickup}",
+        },
+        NotificationType.DELIVERY_EARNING_CREDITED: {
+            "title": "You've been paid",
+            "message": "{amount} for delivery {reference} is in your wallet.",
+        },
         NotificationType.PAYMENT_SUCCESS: {
             "title": "Payment successful",
             "message": "Payment for order #{order_id} was successful",
@@ -124,8 +227,36 @@ class NotificationService:
             "message": "Your post in {niche_name} was not approved",
         },
         NotificationType.MODERATION_ACTION: {
-            "title": "Moderation action",
-            "message": "A moderation action was taken: {action_type}",
+            "title": "Your report",
+            "message": "{action_type}",
+        },
+        NotificationType.CHAT_MESSAGE: {
+            "title": "New message",
+            "message": "{username} sent you a message: {message}",
+        },
+        NotificationType.CHAT_OFFER: {
+            "title": "New offer",
+            "message": "{username} made an offer on {product_name}",
+        },
+        NotificationType.CHAT_OFFER_RESPONSE: {
+            "title": "Offer update",
+            "message": "{username} {response} your offer",
+        },
+        NotificationType.WALLET_TOPUP_COMPLETED: {
+            "title": "Wallet funded",
+            "message": "Your wallet was credited with {amount} {currency}",
+        },
+        NotificationType.WALLET_TOPUP_FAILED: {
+            "title": "Wallet top-up failed",
+            "message": "Your wallet top-up could not be completed. {message}",
+        },
+        NotificationType.WITHDRAWAL_COMPLETED: {
+            "title": "Withdrawal complete",
+            "message": "Your withdrawal of {amount} {currency} is complete",
+        },
+        NotificationType.WITHDRAWAL_FAILED: {
+            "title": "Withdrawal failed",
+            "message": "Your withdrawal could not be completed. {message}",
         },
     }
 
@@ -177,15 +308,39 @@ class NotificationService:
             "always_email": True,
         },
         NotificationType.PROMOTIONAL: {
-            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
             "immediate_websocket": True,
             "push_when_offline": False,  # Don't spam with promotional push
+            "always_email": True,
+            "marketing": True,
         },
         NotificationType.SYSTEM_ALERT: {
             "channels": [DeliveryChannel.EMAIL, DeliveryChannel.PUSH],
             "immediate_websocket": False,  # System alerts via reliable channels
             "always_email": True,
             "always_push": True,
+        },
+        # Seller fulfilment notifications (12.1-12.2). Same "no entry ->
+        # WEBSOCKET-only, so an offline seller/buyer never gets pushed" gap
+        # documented below at ITEM_UNFULFILLED -- caught the same way, by
+        # tracing how this reaches the phone rather than by a test. Both
+        # carry a hard response countdown (SELLER_RESPONSE_TIMEOUT_MINUTES /
+        # the 9.1 ASK deadline), so a missed push here directly costs the
+        # seller's Reliability score or strands the buyer's order -- no
+        # email, the window is too short for it to help.
+        NotificationType.FULFILMENT_REQUEST: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.SUBSTITUTION_APPROVAL_REQUIRED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
         },
         # Buyer request notifications
         NotificationType.REQUEST_OFFER: {
@@ -197,6 +352,12 @@ class NotificationService:
             "immediate_websocket": True,
             "push_when_offline": True,
             "always_email": True,  # Important business notification
+        },
+        NotificationType.NEW_REQUEST_MATCH: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": False,  # High-volume for an active seller; push is enough
         },
         NotificationType.OFFER_ACCEPTED: {
             "channels": [
@@ -239,6 +400,24 @@ class NotificationService:
             "immediate_websocket": True,
             "push_when_offline": False,
         },
+        # A rider who misses "a delivery is available" has lost the job to
+        # someone else, so it pushes whether or not the app is open -- the
+        # only type here that does. The other two are records, not summons.
+        NotificationType.DELIVERY_AVAILABLE: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "always_push": True,
+        },
+        NotificationType.DELIVERY_ASSIGNED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.DELIVERY_EARNING_CREDITED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
         NotificationType.ORDER_PLACED: {
             "channels": [
                 DeliveryChannel.WEBSOCKET,
@@ -269,6 +448,58 @@ class NotificationService:
             "push_when_offline": True,
             "always_email": True,  # Critical business notification
         },
+        # Phase 12 (15) -- same "critical business notification" treatment
+        # as payment/order events above. Without an explicit entry here,
+        # NotificationService.create_notification defaults a type to
+        # WEBSOCKET-only (see config_channels' own fallback) -- meaning a
+        # buyer not actively connected at that exact moment (the normal
+        # case for e.g. "a rider reported your delivery failed") would
+        # never be pushed at all. A real gap, caught by asking "how does
+        # this reach the mobile app" rather than by any test -- none of
+        # this phase's tests exercise CHANNEL_CONFIG, only that
+        # create_notification was called.
+        NotificationType.ITEM_UNFULFILLED: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.ORDER_CANCELLED: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,
+        },
+        NotificationType.DELIVERY_FAILED: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,
+        },
+        NotificationType.REFUND_ISSUED: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,  # Money moved -- buyer should always know
+        },
+        # 10.3: informational/actionable in-app prompt, not a critical
+        # financial event -- push so it's not missed, no email.
+        NotificationType.THIN_VOLUME_DELIVERY_CHOICE: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
         # Social notifications
         NotificationType.NICHE_INVITATION: {
             "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
@@ -295,7 +526,85 @@ class NotificationService:
             "push_when_offline": True,
             "always_email": True,  # Important moderation notification
         },
+        NotificationType.CHAT_MESSAGE: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.CHAT_OFFER: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.CHAT_OFFER_RESPONSE: {
+            "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+        },
+        NotificationType.WALLET_TOPUP_COMPLETED: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,
+        },
+        NotificationType.WALLET_TOPUP_FAILED: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,
+        },
+        NotificationType.WITHDRAWAL_COMPLETED: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,
+        },
+        NotificationType.WITHDRAWAL_FAILED: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,
+        },
     }
+
+    @staticmethod
+    def _owner_filter(owner_id: str) -> Dict[str, str]:
+        """Which column this id belongs in.
+
+        Every method here takes one `user_id` that is really "whoever this is
+        for" -- a buyer or seller (`USR_`, the `User` table) or a rider
+        (`DEL_`, the structurally separate `DeliveryUser` table). The two id
+        formats never collide, so the prefix routes the write without a
+        second parameter at every call site. Same approach, deliberately, as
+        WalletService._owner_filter.
+        """
+        if str(owner_id).startswith("DEL_"):
+            return {"delivery_user_id": owner_id}
+        return {"user_id": owner_id}
+
+    @staticmethod
+    def is_rider(owner_id: str) -> bool:
+        return str(owner_id).startswith("DEL_")
+
+    @staticmethod
+    def is_transactional_email(notification_type: NotificationType) -> bool:
+        return notification_type in NotificationService.TRANSACTIONAL_EMAIL_TYPES
 
     @staticmethod
     def create_notification(
@@ -327,39 +636,68 @@ class NotificationService:
             # Format message with safe defaults
             format_data = {
                 "username": actor_name or "Someone",
-                "product_name": metadata_.get("product_name", "your product")
-                if metadata_
-                else "your product",
+                "product_name": (
+                    metadata_.get("product_name", "your product")
+                    if metadata_
+                    else "your product"
+                ),
                 "rating": metadata_.get("rating", 0) if metadata_ else 0,
-                "order_id": reference_id or "N/A",
-                "status": metadata_.get("status", "updated")
-                if metadata_
-                else "updated",
+                # The order *number* where the emitter carries one. The
+                # reference_id is an ORD_ id, which is what the buyer used to
+                # be shown -- in the notification list and, since the message
+                # is the push body, on their lock screen.
+                "order_id": (
+                    (metadata_ or {}).get("order_number") or reference_id or "N/A"
+                ),
+                "status": _human_status(
+                    (metadata_ or {}).get("status", "updated") or "updated"
+                ),
                 "message": metadata_.get("message", "") if metadata_ else "",
                 # Buyer request variables
-                "seller_name": metadata_.get("seller_name", "A seller")
-                if metadata_
-                else "A seller",
-                "request_title": metadata_.get("request_title", "your request")
-                if metadata_
-                else "your request",
+                "seller_name": (
+                    metadata_.get("seller_name", "A seller")
+                    if metadata_
+                    else "A seller"
+                ),
+                "request_title": (
+                    metadata_.get("request_title", "your request")
+                    if metadata_
+                    else "your request"
+                ),
                 # Social variables
-                "inviter_name": metadata_.get("inviter_name", "Someone")
-                if metadata_
-                else "Someone",
-                "niche_name": metadata_.get("niche_name", "a community")
-                if metadata_
-                else "a community",
-                "action_type": metadata_.get("action_type", "moderation")
-                if metadata_
-                else "moderation",
+                "inviter_name": (
+                    metadata_.get("inviter_name", "Someone") if metadata_ else "Someone"
+                ),
+                "niche_name": (
+                    metadata_.get("niche_name", "a community")
+                    if metadata_
+                    else "a community"
+                ),
+                "action_type": (
+                    metadata_.get("action_type", "moderation")
+                    if metadata_
+                    else "moderation"
+                ),
+                # Rider templates.
+                "pickup": (metadata_ or {}).get("pickup", ""),
+                "reference": (metadata_ or {}).get("reference", ""),
+                # Blank rather than 0: "credited with 0" is a number someone
+                # will act on, and a missing amount is a bug in the emitter,
+                # not a zero-value credit.
+                "amount": (metadata_ or {}).get("amount", ""),
+                "currency": (metadata_ or {}).get("currency", "NGN"),
+                "response": (metadata_ or {}).get("response", "updated"),
             }
 
-            message = template["message"].format(**format_data)
+            # A placeholder with nothing behind it used to raise KeyError
+            # here, and every caller swallows that -- so one template gaining
+            # a field the callers do not pass made its notifications vanish
+            # rather than read oddly. An empty string is the better failure.
+            message = template["message"].format_map(_Blanks(format_data)).strip()
 
             with session_scope() as session:
                 notification = Notification(
-                    user_id=user_id,
+                    **NotificationService._owner_filter(user_id),
                     type=notification_type,
                     title=template["title"],
                     message=message,
@@ -367,7 +705,13 @@ class NotificationService:
                     is_seen=False,
                     reference_type=reference_type,
                     reference_id=reference_id,
-                    metadata_=metadata_ or {},
+                    # Through json_safe: metadata_ is JSONB and callers pass
+                    # money straight in (payment amounts, order totals).
+                    # Decimal does not serialise, and the failure lands at
+                    # flush -- which, for a notification created inside a
+                    # payment's own transaction, took the payment's other
+                    # work down with it.
+                    metadata_=json_safe(metadata_ or {}),
                 )
                 session.add(notification)
                 session.flush()
@@ -476,7 +820,7 @@ class NotificationService:
         try:
             with session_scope() as session:
                 query = session.query(Notification).filter(
-                    Notification.user_id == user_id
+                    getattr(Notification, _owner_column(user_id)) == user_id
                 )
 
                 if unread_only:
@@ -512,7 +856,8 @@ class NotificationService:
         try:
             with session_scope() as session:
                 query = session.query(Notification).filter(
-                    Notification.user_id == user_id, Notification.is_read == False
+                    getattr(Notification, _owner_column(user_id)) == user_id,
+                    Notification.is_read == False,
                 )
 
                 if notification_ids:
@@ -547,7 +892,8 @@ class NotificationService:
                 return (
                     session.query(Notification)
                     .filter(
-                        Notification.user_id == user_id, Notification.is_read == False
+                        getattr(Notification, _owner_column(user_id)) == user_id,
+                        Notification.is_read == False,
                     )
                     .count()
                 )
@@ -560,9 +906,118 @@ class NotificationService:
         """Mark notifications as seen (internal helper)"""
         try:
             session.query(Notification).filter(
-                Notification.user_id == user_id,
+                getattr(Notification, _owner_column(user_id)) == user_id,
                 Notification.id.in_(notification_ids),
                 Notification.is_seen == False,
             ).update({"is_seen": True}, synchronize_session=False)
         except Exception as e:
             logger.error(f"Error marking notifications as seen: {str(e)}")
+
+
+class PushService:
+    """Remote push notifications via the Expo Push API.
+
+    Tokens are Expo push tokens (``ExponentPushToken[...]``) registered by the
+    mobile client. Sending is best-effort; invalid tokens returned by Expo
+    (``DeviceNotRegistered``) are pruned so we stop pushing to dead devices.
+    """
+
+    EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
+
+    @staticmethod
+    def register_token(user_id: str, token: str, platform: str = None) -> None:
+        from .models import PushToken
+
+        if not token:
+            return
+        with session_scope() as session:
+            owner = NotificationService._owner_filter(user_id)
+            existing = session.query(PushToken).filter_by(token=token).first()
+            if existing:
+                # A device can change hands between a rider and a shopper
+                # account; clear the other column rather than leaving both set
+                # and tripping the single-owner constraint.
+                existing.user_id = owner.get("user_id")
+                existing.delivery_user_id = owner.get("delivery_user_id")
+                if platform:
+                    existing.platform = platform
+            else:
+                session.add(PushToken(token=token, platform=platform, **owner))
+
+    @staticmethod
+    def remove_token(token: str) -> None:
+        from .models import PushToken
+
+        with session_scope() as session:
+            session.query(PushToken).filter_by(token=token).delete()
+
+    @staticmethod
+    def get_user_tokens(user_id: str) -> List[str]:
+        from .models import PushToken
+
+        with session_scope() as session:
+            return [
+                t.token
+                for t in (
+                    session.query(PushToken)
+                    .filter_by(**NotificationService._owner_filter(user_id))
+                    .all()
+                )
+            ]
+
+    @staticmethod
+    def send_to_user(
+        user_id: str, title: str, body: str, data: Dict[str, Any] = None
+    ) -> None:
+        tokens = PushService.get_user_tokens(user_id)
+        if tokens:
+            PushService.send_to_tokens(tokens, title, body, data)
+
+    @staticmethod
+    def send_to_tokens(
+        tokens: List[str], title: str, body: str, data: Dict[str, Any] = None
+    ) -> None:
+        import requests
+
+        messages = [
+            {
+                "to": t,
+                "title": title,
+                "body": body,
+                "data": data or {},
+                "sound": "default",
+                "channelId": "default",
+            }
+            for t in tokens
+            if str(t).startswith("ExponentPushToken")
+        ]
+        if not messages:
+            return
+        try:
+            resp = requests.post(
+                PushService.EXPO_PUSH_URL,
+                json=messages,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                timeout=10,
+            )
+            PushService._prune_invalid(resp, messages)
+        except Exception as e:
+            logger.error(f"Expo push send failed: {e}")
+
+    @staticmethod
+    def _prune_invalid(resp, messages) -> None:
+        """Remove tokens Expo reports as no longer registered."""
+        try:
+            tickets = (resp.json() or {}).get("data", [])
+        except Exception:
+            return
+        for msg, ticket in zip(messages, tickets):
+            if (
+                isinstance(ticket, dict)
+                and ticket.get("status") == "error"
+                and (ticket.get("details") or {}).get("error") == "DeviceNotRegistered"
+            ):
+                PushService.remove_token(msg["to"])

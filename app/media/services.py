@@ -4,6 +4,9 @@ from typing import List, Dict, Any, Optional, Tuple
 from io import BytesIO
 from PIL import Image, ImageOps
 
+from .moderation import scan_image
+from .sanitize import strip_metadata
+
 from main.config import settings
 from app.libs.aws.s3 import s3_service
 from app.libs.session import session_scope
@@ -11,6 +14,20 @@ from .models import Media, MediaVariant, MediaType, MediaVariantType
 from .errors import MediaUploadError, MediaProcessingError
 
 logger = logging.getLogger(__name__)
+
+
+def _owner_columns(owner_id: str) -> dict:
+    """Which column an uploader's id belongs in.
+
+    A rider is not a User -- they live in delivery_users with a DEL_ id --
+    and media.user_id is a foreign key to users, so filing a rider's upload
+    under it fails at flush. The two id formats never collide, so the prefix
+    routes it. Same approach as NotificationService._owner_filter and
+    WalletService._owner_filter.
+    """
+    if str(owner_id or "").startswith("DEL_"):
+        return {"user_id": None, "delivery_user_id": owner_id}
+    return {"user_id": owner_id, "delivery_user_id": None}
 
 
 class MediaService:
@@ -51,7 +68,7 @@ class MediaService:
         # Image size limits
         self.image_limits = {
             "max_size": 10 * 1024 * 1024,  # 10MB
-            "max_dimensions": (4000, 4000),
+            "max_dimensions": (5000, 5000),
             "allowed_formats": [".jpg", ".jpeg", ".png", ".webp", ".gif"],
         }
 
@@ -106,6 +123,25 @@ class MediaService:
             finally:
                 validation_stream.close()
 
+            # Refused before it is stored, not after someone reports it.
+            # With no provider configured this allows everything and says so
+            # -- today's behaviour, made visible rather than implicit.
+            verdict = scan_image(file_data, filename, user_id)
+            if not verdict.allowed:
+                raise MediaUploadError(
+                    verdict.reason or "This image can't be uploaded."
+                )
+
+            # Strip EXIF -- which routinely carries the GPS coordinates the
+            # photo was taken at -- before the bytes reach storage. The
+            # display variants lose it by being re-encoded, but the original
+            # was uploaded exactly as received, and the original is what
+            # Media.get_url() serves.
+            file_data, stripped = strip_metadata(file_data)
+            if stripped:
+                info_stream = BytesIO(file_data)
+                upload_stream = BytesIO(file_data)
+
             # Get image info
             try:
                 with Image.open(info_stream) as img:
@@ -145,7 +181,8 @@ class MediaService:
                     media.file_size = file_size
                     media.alt_text = alt_text
                     media.caption = caption
-                    media.user_id = user_id
+                    for _column, _value in _owner_columns(user_id).items():
+                        setattr(media, _column, _value)
                     media.original_filename = filename
                     media.processing_status = (
                         "uploaded"  # Will be updated by async task
@@ -227,7 +264,8 @@ class MediaService:
                 media.file_size = file_size
                 media.alt_text = alt_text
                 media.caption = caption
-                media.user_id = user_id
+                for _column, _value in _owner_columns(user_id).items():
+                    setattr(media, _column, _value)
                 media.original_filename = filename
                 media.processing_status = "uploaded"  # Will be updated by async task
 
@@ -281,9 +319,11 @@ class MediaService:
                         original_img = original_img.convert("RGBA")
                     background.paste(
                         original_img,
-                        mask=original_img.split()[-1]
-                        if original_img.mode == "RGBA"
-                        else None,
+                        mask=(
+                            original_img.split()[-1]
+                            if original_img.mode == "RGBA"
+                            else None
+                        ),
                     )
                     original_img = background
                 elif original_img.mode != "RGB":

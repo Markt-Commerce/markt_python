@@ -2,6 +2,7 @@
 import logging
 import uuid
 import math
+from datetime import datetime
 from random import randint
 from typing import Dict, List, Optional
 
@@ -18,7 +19,13 @@ from sqlalchemy.orm import joinedload
 from external.redis import redis_client
 from app.libs.session import session_scope
 from app.libs.pagination import Paginator
-from app.libs.errors import NotFoundError, ValidationError
+from app.libs.errors import (
+    APIError,
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    ValidationError,
+)
 from app.libs.email_service import email_service
 
 # app imports
@@ -33,8 +40,12 @@ from .models import (
     LocationUpdateRoom,
     OrderLocationMapping,
 )
+from app.orders.events import ActorType, OrderEventService, OrderEventType
 from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
 from app.orders.services import OrderService
+from app.deliveries import offers
+from app.deliveries.rider_pay import earning_for_drop
+from app.wallet.services import WalletService
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +57,30 @@ def _normalize_phone(raw: str) -> str:
     return (raw or "").lstrip("+").strip()
 
 
+def _mask_email(email: str) -> str:
+    """Enough of an address to recognise your own inbox, not enough to be
+    somebody else's.
+
+    The OTP endpoint used to answer with the address in full -- "OTP sent to
+    ada@example.com" -- to anyone who posted a phone number. A rider's phone
+    number is on every package they deliver, so that turned a delivery note
+    into a lookup for their personal email. It is also the one response you
+    do not need authentication to reach.
+    """
+    if not email or "@" not in email:
+        return "your email"
+    name, _, domain = email.partition("@")
+    head = name[0] if name else ""
+    return f"{head}{'*' * max(len(name) - 1, 1)}@{domain}"
+
+
 class DeliveryService:
 
-    CACHE_EXPIRE_SECONDS = 3600  # 1 hour (relaxed for tests; was 5 min)
+    # Ten minutes: long enough for an email to arrive and be typed out,
+    # short enough that a code left sitting in an inbox stops working. It
+    # was an hour, "relaxed for tests", which is the kind of relaxation that
+    # ships.
+    CACHE_EXPIRE_SECONDS = 600
     CACHE_KEY_PREFIX = "otp_cache:"
     PHONE_MIN_LEN = 10
     PHONE_MAX_LEN = 15
@@ -86,6 +118,16 @@ class DeliveryService:
         if not cached_otp or cached_str != otp:
             logger.warning(f"Invalid OTP for phone number {phone_number}")
             raise ValidationError("Invalid OTP")
+
+        # Spend it. A code that survives being used is a password with an
+        # hour's life on it: it sits in a mailbox, and anyone who reads that
+        # mailbox -- a forwarded message, a shared laptop, a shoulder on a
+        # bus -- can sign in as this rider repeatedly until it expires.
+        # Deleting before the lookup rather than after is deliberate: if the
+        # partner turns out not to exist, the code is still spent, so a
+        # wrong-number guess cannot be retried against a working code.
+        redis_client.delete(cache_key)
+
         try:
             with session_scope() as session:
                 delivery_user = (
@@ -104,6 +146,111 @@ class DeliveryService:
             raise NotFoundError(
                 "Login failed due to invalid credentials or server error"
             )
+
+    @staticmethod
+    def update_partner(user_id: str, data: Dict) -> Dict:
+        """Change the handful of things a rider owns about themselves.
+
+        Deliberately not phone number or status: the phone is the login
+        credential and changing it needs the OTP flow, and status is what
+        the online/offline toggle already owns.
+        """
+        allowed = {}
+        if "name" in data and data["name"]:
+            name = str(data["name"]).strip()
+            if not name:
+                raise ValidationError("Name cannot be empty")
+            allowed["name"] = name[:100]
+        if "vehicle_type" in data and data["vehicle_type"]:
+            try:
+                allowed["vehicle_type"] = DeliveryVehicleType(data["vehicle_type"])
+            except ValueError:
+                raise ValidationError("Unknown vehicle type")
+        if "email" in data and data["email"]:
+            allowed["email"] = str(data["email"]).strip()[:100]
+
+        if not allowed:
+            raise ValidationError("Nothing to update")
+
+        with session_scope() as session:
+            rider = session.query(DeliveryUser).get(user_id)
+            if not rider:
+                raise NotFoundError("Delivery partner not found")
+            for field, value in allowed.items():
+                setattr(rider, field, value)
+            session.flush()
+            return {
+                "id": rider.id,
+                "name": rider.name,
+                "email": rider.email,
+                "phone_number": rider.phone_number,
+                "status": rider.status.value if rider.status else None,
+                "vehicle_type": (
+                    rider.vehicle_type.value if rider.vehicle_type else None
+                ),
+                "rating": rider.rating,
+                "profile_picture": rider.profile_picture,
+            }
+
+    @staticmethod
+    def upload_profile_picture(user_id: str, file_stream, filename: str) -> Dict:
+        """Set the rider's photo, replacing any previous one.
+
+        A near-twin of UserService.upload_profile_picture rather than a
+        shared generic, for the same reason upload_shop_banner is: the two
+        differ in which table the URL lands on, and folding them together
+        would put a "which kind of account is this" branch inside every
+        step. The media row itself knows -- see media.delivery_user_id.
+        """
+        from io import BytesIO
+        from urllib.parse import urlparse
+
+        from app.media.models import Media, MediaVariant
+        from app.media.services import media_service
+
+        if not isinstance(file_stream, BytesIO):
+            file_stream = BytesIO(file_stream.read())
+
+        with session_scope() as session:
+            rider = session.query(DeliveryUser).get(user_id)
+            if not rider:
+                raise NotFoundError("Delivery partner not found")
+
+            # Drop the previous photo, or every re-upload leaks a file in
+            # S3 and a row in media.
+            if rider.profile_picture:
+                storage_key = urlparse(rider.profile_picture).path.lstrip("/")
+                old = session.query(Media).filter_by(storage_key=storage_key).first()
+                if old:
+                    try:
+                        media_service.delete_media(old)
+                    except Exception:
+                        # A file we cannot delete must not stop a rider
+                        # replacing their photo.
+                        logger.warning(
+                            "Could not remove old rider photo %s", storage_key
+                        )
+                    session.query(MediaVariant).filter_by(media_id=old.id).delete()
+                    session.delete(old)
+                rider.profile_picture = None
+
+        media = media_service.upload_image(
+            file_stream=file_stream,
+            filename=filename,
+            user_id=user_id,
+            alt_text=f"Profile picture for delivery partner {user_id}",
+            caption="Profile picture",
+            is_profile_picture=True,
+        )
+
+        with session_scope() as session:
+            rider = session.query(DeliveryUser).get(user_id)
+            if not rider:
+                raise NotFoundError("Delivery partner not found")
+            rider.profile_picture = media.get_url()
+            url = rider.profile_picture
+
+        return {"profile_picture": url}
 
     @staticmethod
     def send_otp(phone_number: str) -> bool:
@@ -137,14 +284,26 @@ class DeliveryService:
                     )
                     raise NotFoundError("Email not found")
 
-            logger.info(f"Sending OTP {otp} to {email}")
+            # The code itself is deliberately not logged. It used to be,
+            # which put a working credential into every log sink, aggregator
+            # and support screenshot that touches this line.
+            logger.info("Sending OTP to %s", email)
             if email_service.send_otp_email(email, otp):
                 cache_key = f"{DeliveryService.CACHE_KEY_PREFIX}{phone}"
                 redis_client.setex(cache_key, DeliveryService.CACHE_EXPIRE_SECONDS, otp)
-                return {"status": "success", "message": f"OTP sent to {email}"}
+                return {
+                    "status": "success",
+                    "message": f"OTP sent to {_mask_email(email)}",
+                }
             else:
                 logger.error(f"Failed to send OTP email to {email}")
-                return {"status": "error", "message": f"Failed to send OTP to {email}"}
+                return {
+                    "status": "error",
+                    "message": (
+                        "We could not deliver a code to the email on this "
+                        "account. Contact support."
+                    ),
+                }
         except Exception as e:
             logger.error(f"Error sending OTP: {str(e)}")
             return {"status": "error", "message": "Failed to send OTP", "error": str(e)}
@@ -195,11 +354,13 @@ class DeliveryService:
                     email=data.get("email"),
                     name=data["name"],
                     status=DeliveryStatus.INACTIVE,  # New partners start as INACTIVE until they complete onboarding
-                    vehicle_type=DeliveryVehicleType[data.get("vehicle_type").upper()]
-                    if data.get("vehicle_type")
-                    and data.get("vehicle_type").upper()
-                    in [e.name for e in DeliveryVehicleType]
-                    else DeliveryVehicleType.BIKE,
+                    vehicle_type=(
+                        DeliveryVehicleType[data.get("vehicle_type").upper()]
+                        if data.get("vehicle_type")
+                        and data.get("vehicle_type").upper()
+                        in [e.name for e in DeliveryVehicleType]
+                        else DeliveryVehicleType.BIKE
+                    ),
                 )
                 session.add(new_partner)
                 session.commit()
@@ -208,9 +369,11 @@ class DeliveryService:
                     "id": new_partner.id,
                     "name": new_partner.name,
                     "status": new_partner.status.value,
-                    "vehicle_type": new_partner.vehicle_type.value
-                    if new_partner.vehicle_type
-                    else None,
+                    "vehicle_type": (
+                        new_partner.vehicle_type.value
+                        if new_partner.vehicle_type
+                        else None
+                    ),
                 }
         except Exception as e:
             logger.error(f"Error registering delivery partner: {str(e)}")
@@ -232,10 +395,15 @@ class DeliveryService:
                     "id": delivery_user.id,
                     "name": delivery_user.name,
                     "status": delivery_user.status.value,
-                    "vehicle_type": delivery_user.vehicle_type.value
-                    if delivery_user.vehicle_type
-                    else None,
+                    "vehicle_type": (
+                        delivery_user.vehicle_type.value
+                        if delivery_user.vehicle_type
+                        else None
+                    ),
                     "rating": delivery_user.rating,
+                    "email": delivery_user.email,
+                    "phone_number": delivery_user.phone_number,
+                    "profile_picture": delivery_user.profile_picture,
                 }
         except Exception as e:
             logger.error(f"Error fetching current delivery partner: {str(e)}")
@@ -316,106 +484,196 @@ class DeliveryService:
     # we would need, after the MVP, to optimize this
     # either by using postGIS to calculate the distance properly,
     # or by pre-calculating the distance between the delivery partner and the sellers and caching that in Redis, and then just fetching the available orders based on the cached distances
+
     @staticmethod
     def get_available_orders(
         user_id: str,
-        search_radius: int = 3000,
+        search_radius: int = 5000,
         page: int = 1,
         per_page: int = 20,
-    ) -> Dict:
+    ) -> dict:
         """Get available orders for the delivery partner with pagination.
         per_page is capped at 50.
         """
         per_page = min(max(1, per_page), 50)
         page = max(1, page)
+
         try:
             with session_scope() as session:
-
                 delivery_user = (
                     session.query(DeliveryUser)
                     .filter(DeliveryUser.id == user_id)
                     .first()
                 )
 
-                if not delivery_user or not delivery_user.last_location:
-                    raise NotFoundError("Delivery partner location not found")
+                # error handling for delivery user not found, suspended, or missing location
+                if not delivery_user:
+                    raise NotFoundError("Delivery partner not found")
+
+                if delivery_user.status == DeliveryStatus.SUSPENDED:
+                    raise ForbiddenError("Your account has been suspended")
+
+                if (
+                    not delivery_user.last_location
+                    or delivery_user.last_location.latitude is None
+                    or delivery_user.last_location.longitude is None
+                ):
+                    raise ValidationError(
+                        "Location not set. Please update your location before browsing available orders."
+                    )
 
                 delivery_lat = delivery_user.last_location.latitude
                 delivery_lng = delivery_user.last_location.longitude
 
                 orders = (
                     session.query(Order)
-                    .join(ShippingAddress, Order.id == ShippingAddress.order_id)
-                    .join(OrderItem, Order.id == OrderItem.order_id)
-                    .join(Seller, OrderItem.seller_id == Seller.id)
-                    .join(User, Seller.user_id == User.id)
-                    .join(UserAddress, User.id == UserAddress.user_id)
-                    .filter(Order.status == OrderStatus.PROCESSING)
+                    .filter(Order.status == OrderStatus.READY_FOR_DELIVERY)
                     .options(
                         joinedload(Order.shipping_address),
-                        joinedload(Order.items).joinedload(OrderItem.seller),
+                        joinedload(Order.items)
+                        .joinedload(OrderItem.seller)
+                        .joinedload(Seller.user)
+                        .joinedload(User.address),
                     )
-                    .distinct()
                     .all()
                 )
-                # Filter by radius in Python (PostGIS can replace this later)
+
+                # What is genuinely available to *this* rider.
+                #
+                # This list used to be every order in READY_FOR_DELIVERY with
+                # no reference to assignments at all. Accepting an order does
+                # not change its status, so an order another rider was already
+                # carrying stayed on everyone's list until it was delivered --
+                # tapping it returned "Order already accepted" and the real
+                # work was buried under it. A rider's own declines sat there
+                # too, equally untakeable.
+                assignment_rows = (
+                    session.query(DeliveryOrderAssignment)
+                    .filter(
+                        DeliveryOrderAssignment.order_id.in_(
+                            [order.id for order in orders]
+                        )
+                    )
+                    .all()
+                    if orders
+                    else []
+                )
+
+                at = offers.now()
+                taken = set()
+                hidden_from_me = set()
+                for row in assignment_rows:
+                    if row.status == AssignmentStatus.ACCEPTED:
+                        taken.add(row.order_id)
+                    elif offers.is_live_offer(row, at):
+                        # Held by someone right now -- including, briefly,
+                        # this rider, whose own countdown screen is showing
+                        # it rather than the list.
+                        hidden_from_me.add(row.order_id)
+                    elif (
+                        row.delivery_user_id == user_id
+                        and offers.suppresses_for_rider(row, at)
+                    ):
+                        hidden_from_me.add(row.order_id)
+
+                orders = [
+                    order
+                    for order in orders
+                    if order.id not in taken and order.id not in hidden_from_me
+                ]
+
                 available_orders = []
 
                 for order in orders:
-
-                    seller_pickups = []
-                    total_distance = 0
-
                     dropoff = order.shipping_address
 
-                    if not dropoff or dropoff.latitude is None:
+                    if (
+                        not dropoff
+                        or dropoff.latitude is None
+                        or dropoff.longitude is None
+                    ):
                         continue
 
                     if not order.items:
                         continue
 
+                    seller_pickups = []
+                    pickup_distances = []
+                    seen_seller_ids = set()
+
                     for item in order.items:
                         seller = item.seller
-                        seller_address = (
-                            getattr(seller.user, "address", None) if seller else None
-                        )
-                        if (
-                            not seller_address
-                            or seller_address.latitude is None
-                            or seller_address.longitude is None
-                        ):
+                        if not seller or seller.id in seen_seller_ids:
                             continue
 
-                        pickup_lat = seller_address.latitude
-                        pickup_lng = seller_address.longitude
+                        seen_seller_ids.add(seller.id)
+
+                        # The shop's own coordinates first.
+                        #
+                        # This read seller.user.address and nothing else, but
+                        # that is a personal address on the User, not the
+                        # shop: sellers set where their shop is through
+                        # Seller.shop_latitude/shop_longitude, which is what
+                        # the delivery quote prices against, what the
+                        # proximity feed ranks by, and what the run schemas
+                        # hand the rider app to draw a pickup pin.
+                        #
+                        # So a seller who had set their shop location the
+                        # supported way, and had no separate personal address
+                        # row, was skipped -- their paid orders never appeared
+                        # to any rider, and the only symptom was an available
+                        # list that stayed empty.
+                        pickup_lat = seller.shop_latitude
+                        pickup_lng = seller.shop_longitude
+
+                        if pickup_lat is None or pickup_lng is None:
+                            seller_address = (
+                                getattr(seller.user, "address", None)
+                                if seller.user
+                                else None
+                            )
+                            if seller_address:
+                                pickup_lat = seller_address.latitude
+                                pickup_lng = seller_address.longitude
+
+                        if pickup_lat is None or pickup_lng is None:
+                            continue
 
                         seller_pickups.append({"lat": pickup_lat, "lng": pickup_lng})
 
                         distance = DeliveryService.haversine_distance(
                             delivery_lat, delivery_lng, pickup_lat, pickup_lng
                         )
-
-                        total_distance += distance
+                        pickup_distances.append(distance)
 
                     if not seller_pickups:
                         continue
 
-                    average_distance = total_distance / len(seller_pickups)
+                    # Better than average for multi-pickup feasibility
+                    max_distance = max(pickup_distances)
 
-                    if average_distance > search_radius:
+                    if max_distance > search_radius:
                         continue
 
-                    drop_lat = dropoff.latitude
-                    drop_lng = dropoff.longitude
-
-                    estimated_earnings = order.shipping_fee or 0
+                    # What the rider is actually credited on completion, not
+                    # the buyer's shipping fee. Those were the same number
+                    # until riders started taking a share of the trip rather
+                    # than all of it, and this is the figure a rider decides
+                    # on -- promising the fee and paying the share is the
+                    # worst kind of wrong to be.
+                    estimated_earnings = (
+                        earning_for_drop(order.shipping_fee, stops=1) or 0
+                    )
 
                     available_orders.append(
                         {
                             "order_id": order.id,
                             "pickup": seller_pickups,
-                            "dropoff": {"lat": drop_lat, "lng": drop_lng},
-                            "distance_meters": round(average_distance, 2),
+                            "dropoff": {
+                                "lat": dropoff.latitude,
+                                "lng": dropoff.longitude,
+                            },
+                            "distance_meters": round(max_distance, 2),
                             "estimated_earnings": estimated_earnings,
                         }
                     )
@@ -433,9 +691,16 @@ class DeliveryService:
                     "total": total,
                     "total_pages": (total + per_page - 1) // per_page if total else 0,
                 }
+        except (NotFoundError, ForbiddenError, ValidationError):
+            raise
+        except SQLAlchemyError as e:
+            logger.exception(f"Database error fetching available orders: {str(e)}")
+            raise APIError(
+                "Database error while fetching available orders", status_code=500
+            )
         except Exception as e:
-            logger.error(f"Error fetching available orders: {str(e)}")
-            raise NotFoundError("Failed to fetch available orders")
+            logger.exception(f"Unexpected error fetching available orders: {str(e)}")
+            raise APIError("Failed to fetch available orders", status_code=500)
 
     @staticmethod
     def haversine_distance(lat1, lng1, lat2, lng2):
@@ -455,84 +720,194 @@ class DeliveryService:
         return R * c
 
     @staticmethod
+    def offer_order(user_id: str, order_id: str) -> Dict:
+        """Hold this order for this rider while they decide.
+
+        The countdown in the app is only meaningful if the order is really
+        held, so this is what the app calls when a rider opens one. It
+        returns the expiry, and the app counts down to *that* -- the
+        server's clock, not the phone's, which can be minutes out and is
+        the rider's to change.
+        """
+        with session_scope() as session:
+            at = offers.now()
+            rows = (
+                session.query(DeliveryOrderAssignment)
+                .filter_by(order_id=order_id)
+                .with_for_update()
+                .all()
+            )
+
+            if any(r.status == AssignmentStatus.ACCEPTED for r in rows):
+                raise ConflictError("Someone else already took this order")
+
+            held_by_other = next(
+                (
+                    r
+                    for r in rows
+                    if r.delivery_user_id != user_id and offers.is_live_offer(r, at)
+                ),
+                None,
+            )
+            if held_by_other:
+                raise ConflictError("Another rider is looking at this order")
+
+            mine = next((r for r in rows if r.delivery_user_id == user_id), None)
+            if mine is None:
+                mine = DeliveryOrderAssignment(
+                    delivery_user_id=user_id,
+                    order_id=order_id,
+                    assignment_id=str(uuid.uuid4()),
+                    status=AssignmentStatus.OFFERED,
+                )
+                session.add(mine)
+            else:
+                # Re-offering to a rider who declined earlier is fine once
+                # the cooldown is over -- that is the whole point of the
+                # cooldown -- but not while it is still running.
+                if offers.suppresses_for_rider(mine, at) and not offers.is_live_offer(
+                    mine, at
+                ):
+                    raise ConflictError("You passed on this order recently")
+                mine.status = AssignmentStatus.OFFERED
+
+            expires_at = offers.offer_expiry(at)
+            mine.expires_at = expires_at
+            session.flush()
+
+            return {
+                "assignment_id": mine.assignment_id,
+                "status": mine.status.value,
+                "expires_at": expires_at.isoformat() + "Z",
+                "seconds": offers.OFFER_SECONDS,
+            }
+
+    @staticmethod
     def accept_order(user_id: str, order_id: str) -> Dict:
         with session_scope() as session:
+            at = offers.now()
             assignments = (
                 session.query(DeliveryOrderAssignment)
                 .filter_by(order_id=order_id)
+                .with_for_update()
                 .all()
             )
             if any(a.status == AssignmentStatus.ACCEPTED for a in assignments):
                 logger.warning(
                     f"Order {order_id} has already been accepted by another delivery partner"
                 )
-                raise NotFoundError("Order already accepted")
+                raise ConflictError("Someone else already took this order")
 
-            if any(
-                a.delivery_user_id == user_id and a.status == AssignmentStatus.REJECTED
-                for a in assignments
-            ):
-                logger.warning(
-                    f"Delivery partner {user_id} has already rejected order {order_id}"
-                )
-                raise NotFoundError("You have already rejected this order")
-
-            # Create a new assignment for the delivery user
-            new_assignment = DeliveryOrderAssignment(
-                delivery_user_id=user_id,
-                order_id=order_id,
-                status=AssignmentStatus.ACCEPTED,
-                assignment_id=str(uuid.uuid4()),
-                escrow_qr_code=str(uuid.uuid4()),
+            held_by_other = next(
+                (
+                    a
+                    for a in assignments
+                    if a.delivery_user_id != user_id and offers.is_live_offer(a, at)
+                ),
+                None,
             )
-            session.add(new_assignment)
-            session.commit()
+            if held_by_other:
+                raise ConflictError("Another rider is looking at this order")
+
+            mine = next((a for a in assignments if a.delivery_user_id == user_id), None)
+
+            # How many they are already carrying. Unlimited before, so a
+            # rider could take every order on the dashboard and leave four
+            # of five buyers watching an order that was "on its way" and
+            # going cold. See offers.MAX_CONCURRENT_ORDERS.
+            carrying = (
+                session.query(DeliveryOrderAssignment)
+                .filter(
+                    DeliveryOrderAssignment.delivery_user_id == user_id,
+                    DeliveryOrderAssignment.order_id != order_id,
+                    DeliveryOrderAssignment.status == AssignmentStatus.ACCEPTED,
+                    (DeliveryOrderAssignment.logistical_status.is_(None))
+                    | (
+                        DeliveryOrderAssignment.logistical_status
+                        != LogisticalStatus.COMPLETED
+                    ),
+                )
+                .count()
+            )
+            if carrying >= offers.MAX_CONCURRENT_ORDERS:
+                raise ConflictError(
+                    "Finish what you are carrying before taking another. "
+                    f"You have {carrying}."
+                )
+
+            # A rider inside a decline cooldown cannot accept. A rider whose
+            # offer merely lapsed can: they were looking at it a moment ago,
+            # and refusing them now -- when nobody else has taken it -- would
+            # be leaving an order on the ground to enforce a technicality.
+            if (
+                mine is not None
+                and mine.status == AssignmentStatus.REJECTED
+                and offers.suppresses_for_rider(mine, at)
+            ):
+                raise ConflictError("You passed on this order recently")
+
+            if mine is None:
+                mine = DeliveryOrderAssignment(
+                    delivery_user_id=user_id,
+                    order_id=order_id,
+                    assignment_id=str(uuid.uuid4()),
+                    status=AssignmentStatus.ACCEPTED,
+                )
+                session.add(mine)
+            else:
+                mine.status = AssignmentStatus.ACCEPTED
+
+            mine.escrow_qr_code = mine.escrow_qr_code or str(uuid.uuid4())
+            mine.expires_at = None
+            session.flush()
 
             return {
                 "status": AssignmentStatus.ASSIGNED.value,
-                "assignment_id": new_assignment.assignment_id,
+                "assignment_id": mine.assignment_id,
             }
 
     @staticmethod
     def reject_order(user_id: str, order_id: str) -> Dict:
+        """Pass on an order -- for now, not forever.
+
+        A decline used to be permanent: the rider could never see the order
+        again, and nothing anywhere put it back. Three riders in an area
+        declining once each made the order invisible to all of them with no
+        way to recover it. It is a cooldown now.
+        """
         with session_scope() as session:
+            at = offers.now()
             assignments = (
                 session.query(DeliveryOrderAssignment)
                 .filter_by(order_id=order_id)
+                .with_for_update()
                 .all()
             )
             if any(a.status == AssignmentStatus.ACCEPTED for a in assignments):
-                logger.warning(
-                    f"Order {order_id} has already been accepted by another delivery partner"
-                )
-                raise NotFoundError("Order already accepted")
+                raise ConflictError("Someone else already took this order")
 
-            if any(
-                a.delivery_user_id == user_id and a.status == AssignmentStatus.REJECTED
-                for a in assignments
-            ):
-                logger.warning(
-                    f"Delivery partner {user_id} has already rejected order {order_id}"
+            mine = next((a for a in assignments if a.delivery_user_id == user_id), None)
+            if mine is None:
+                mine = DeliveryOrderAssignment(
+                    delivery_user_id=user_id,
+                    order_id=order_id,
+                    assignment_id=str(uuid.uuid4()),
+                    status=AssignmentStatus.REJECTED,
                 )
-                raise NotFoundError("You have already rejected this order")
+                session.add(mine)
+            else:
+                mine.status = AssignmentStatus.REJECTED
 
-            # Create a new assignment for the delivery user (no escrow QR for rejected)
-            new_assignment = DeliveryOrderAssignment(
-                delivery_user_id=user_id,
-                order_id=order_id,
-                status=AssignmentStatus.REJECTED,
-                assignment_id=str(uuid.uuid4()),
-                escrow_qr_code=None,
-            )
-            session.add(new_assignment)
-            session.commit()
+            mine.escrow_qr_code = None
+            mine.expires_at = offers.decline_until(at)
+            session.flush()
 
             return {
                 "status": AssignmentStatus.REJECTED.value,
-                "assignment_id": new_assignment.assignment_id,
+                "assignment_id": mine.assignment_id,
+                "available_again_at": mine.expires_at.isoformat() + "Z",
             }
 
-    # TODO: We would need to include the location details of the pickup point and drop off points
     @staticmethod
     def get_active_assignments(user_id: str) -> Dict:
         with session_scope() as session:
@@ -563,28 +938,99 @@ class DeliveryService:
                             "lat": assignment.order.shipping_address.latitude,
                             "lng": assignment.order.shipping_address.longitude,
                         },
+                        # Who and where, not just two coordinates. A rider
+                        # was shown "Pickup from seller" with no name, no
+                        # address and no way to call anyone -- a run's stops
+                        # have carried all three since runs existed, and a
+                        # single order is the same job with one stop.
+                        **DeliveryService._assignment_parties(assignment.order),
                     }
                     for assignment in active_assignments
                 ]
             }
 
     @staticmethod
+    def _assignment_parties(order: Order) -> Dict:
+        """The people at each end of a single-order delivery.
+
+        Phone numbers are included because a rider standing outside a shut
+        shop, or at a gate with no answer, has no other move -- every
+        delivery app in the world puts a call button on that screen. They
+        are the real numbers: masking them through a proxy is the right
+        end state and needs a telephony provider we do not have yet.
+        """
+        seller = next(
+            (item.seller for item in order.items if item.seller is not None), None
+        )
+        buyer_user = getattr(getattr(order, "buyer", None), "user", None)
+
+        shop_address = getattr(seller, "shop_address", None) if seller else None
+        if isinstance(shop_address, dict):
+            shop_address = (
+                ", ".join(
+                    str(part)
+                    for part in (
+                        shop_address.get("street"),
+                        shop_address.get("street_address"),
+                        shop_address.get("city"),
+                    )
+                    if part
+                )
+                or None
+            )
+
+        drop = order.shipping_address
+        drop_line = None
+        if drop is not None:
+            drop_line = (
+                ", ".join(
+                    str(part)
+                    for part in (
+                        getattr(drop, "street_address", None),
+                        getattr(drop, "city", None),
+                    )
+                    if part
+                )
+                or None
+            )
+
+        return {
+            "seller_name": getattr(seller, "shop_name", None) if seller else None,
+            "pickup_address": shop_address,
+            "seller_phone": (
+                getattr(getattr(seller, "user", None), "phone_number", None)
+                if seller
+                else None
+            ),
+            "buyer_name": getattr(buyer_user, "username", None),
+            "dropoff_address": drop_line,
+            "buyer_phone": getattr(buyer_user, "phone_number", None),
+            "order_number": order.order_number,
+        }
+
+    @staticmethod
     def get_assignment_pickups_from_order_item(order: Order) -> List[Dict[str, float]]:
+        # The shop's own coordinates, falling back to the seller's personal
+        # address. This resolved from seller.user.address alone, which is
+        # frequently unset -- so the pickup list came back empty and the
+        # active-delivery map had no pickup pin at all. Same fix as
+        # get_available_orders (riders could not see paid orders).
         pickups = []
         for item in order.items:
             seller = item.seller
-            if not seller or not getattr(seller, "user", None):
+            if not seller:
                 continue
-            seller_address = getattr(seller.user, "address", None)
-            if (
-                not seller_address
-                or seller_address.latitude is None
-                or seller_address.longitude is None
-            ):
+
+            lat = getattr(seller, "shop_latitude", None)
+            lng = getattr(seller, "shop_longitude", None)
+            if lat is None or lng is None:
+                seller_address = getattr(getattr(seller, "user", None), "address", None)
+                lat = getattr(seller_address, "latitude", None)
+                lng = getattr(seller_address, "longitude", None)
+
+            if lat is None or lng is None:
                 continue
-            pickups.append(
-                {"lat": seller_address.latitude, "lng": seller_address.longitude}
-            )
+            pickups.append({"lat": lat, "lng": lng})
         return pickups
 
     @staticmethod
@@ -652,9 +1098,77 @@ class DeliveryService:
                 )
 
             assignment.logistical_status = logistical_status
+
+            # Pickup is the item-level equivalent of "shipped" for orders
+            # fulfilled through Markt's own delivery network -- keep OrderItem
+            # in step so a rider-managed order reaches DELIVERED through the
+            # same validated SHIPPED->DELIVERED transition as a seller-managed
+            # one, instead of needing a special case at POD time.
+            if logistical_status == LogisticalStatus.PICKED_UP:
+                order = session.query(Order).filter_by(id=assignment.order_id).first()
+                if order:
+                    for item in order.items:
+                        if item.status == OrderItem.Status.PROCESSING:
+                            item.transition_to(OrderItem.Status.SHIPPED)
+
             session.commit()
 
             return {"status": assignment.logistical_status.value}
+
+    @staticmethod
+    def get_buyer_pod_code(order_id: str, user_id: str) -> Dict:
+        """10.6 POD handshake, buyer side: the buyer's app displays this
+        code so the rider can read/enter it back at the door -- both
+        existing rider-side confirm calls (confirm_order_qr_code below,
+        and DeliveryRunPodService.confirm_order_pod) already just take a
+        `qr_code` string with no assumption about how the rider learned
+        it, so neither needed any change for this. Before this, the only
+        way to fetch either code was the rider-authenticated GET
+        endpoints (get_order_qr_code below, DeliveryRunPodService.
+        get_order_pod_qr) -- meaning a rider could always fetch and
+        immediately submit their own code back with no buyer step at all,
+        which isn't real proof of anything. This is what closes that gap.
+
+        Checks both delivery systems, since an order can be served by
+        either today (10's own note: single-order is what actually works
+        end-to-end right now; the batched DeliveryRun model is the real
+        target direction, not yet fully rider-driven) -- single-order
+        first, then the run-based join table. Same ownership-check
+        convention as OrderService.track_order (user_id is the buyer's
+        own User.id, not their Buyer account id).
+        """
+        with session_scope() as session:
+            order = session.query(Order).options(joinedload(Order.buyer)).get(order_id)
+            if not order:
+                raise NotFoundError("Order not found")
+            if not order.buyer or order.buyer.user_id != user_id:
+                raise ForbiddenError("You can only view your own order's delivery code")
+
+            assignment = (
+                session.query(DeliveryOrderAssignment)
+                .filter_by(order_id=order_id, status=AssignmentStatus.ACCEPTED)
+                .order_by(DeliveryOrderAssignment.assigned_at.desc())
+                .first()
+            )
+            if assignment and assignment.escrow_qr_code:
+                return {
+                    "ready": True,
+                    "system": "single_order",
+                    "code": assignment.escrow_qr_code,
+                }
+
+            from .models import DeliveryRunOrder, DeliveryRunOrderPodStatus
+
+            run_order = (
+                session.query(DeliveryRunOrder).filter_by(order_id=order_id).first()
+            )
+            if (
+                run_order
+                and run_order.pod_status == DeliveryRunOrderPodStatus.QR_ISSUED
+            ):
+                return {"ready": True, "system": "run", "code": run_order.qr_code}
+
+            return {"ready": False, "system": None, "code": None}
 
     @staticmethod
     def get_order_qr_code(user_id: str, order_id: str) -> Dict:
@@ -704,17 +1218,75 @@ class DeliveryService:
                 )
                 raise ValidationError("Invalid QR code")
 
-            # Mark the order as delivered
             order = session.query(Order).filter_by(id=order_id).first()
             if not order:
                 logger.warning(f"No order found with ID {order_id}")
                 raise NotFoundError("Order not found")
 
-            order.status = OrderStatus.DELIVERED
+            if not DeliveryService.is_valid_status_transition(
+                assignment.logistical_status, LogisticalStatus.COMPLETED
+            ):
+                logger.warning(
+                    f"QR confirm attempted for order {order_id} while assignment "
+                    f"is at {assignment.logistical_status}, not DELIVERED_PENDING_QR"
+                )
+                raise ValidationError(
+                    "Delivery is not ready for proof-of-delivery confirmation"
+                )
+
+            # POD starts the settlement hold (Phase 0: 12h) for every
+            # item's seller, not just items a seller separately marked
+            # shipped/delivered themselves. Cancelled items are skipped
+            # entirely -- never transitioned, never paid. Settlement itself
+            # happens later, via WalletService.settle_eligible_order_items
+            # once the hold elapses -- POD no longer pays out immediately.
+            for item in order.items:
+                if item.status == OrderItem.Status.CANCELLED:
+                    continue
+                if item.status != OrderItem.Status.DELIVERED:
+                    item.transition_to(OrderItem.Status.DELIVERED)
+                    OrderEventService.emit(
+                        session,
+                        order_id=order.id,
+                        order_item_id=item.id,
+                        event_type=OrderEventType.ITEM_DELIVERED,
+                        actor_type=ActorType.RIDER,
+                        actor_id=user_id,
+                    )
+                if item.delivered_at is None:
+                    item.delivered_at = datetime.utcnow()
+
             assignment.logistical_status = LogisticalStatus.COMPLETED
+            rider_id = assignment.delivery_user_id
+            reference_id = assignment.assignment_id
+            # One stop: the whole shipping fee is this trip's revenue.
+            # The rider takes a share of it rather than all of it -- see
+            # app/deliveries/rider_pay.py for why both payout paths now go
+            # through one function.
+            earning_amount = earning_for_drop(order.shipping_fee, stops=1)
             session.commit()
 
-            return {"status": "success", "message": "Order marked as delivered"}
+        # Delegate order-level completion (status, realtime event, gamification)
+        # to the single source of truth so the QR path gets the same side effects
+        # as every other way an order can be marked delivered.
+        OrderService.update_order_status(order_id, OrderStatus.DELIVERED)
+
+        # Outside the transaction above -- WalletService.credit opens its own
+        # session_scope(), and a wallet bug must never roll back a delivery
+        # that has already genuinely happened. Logged, not raised: the rider
+        # did the work either way, and a crediting failure here needs someone
+        # to notice and backfill, not a 500 on the buyer-facing POD flow.
+        if earning_amount and earning_amount > 0:
+            try:
+                WalletService.credit_delivery_earning(
+                    rider_id, earning_amount, reference_id
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to credit rider %s for delivery %s", rider_id, reference_id
+                )
+
+        return {"status": "success", "message": "Order marked as delivered"}
 
     @staticmethod
     def find_delivery_order_buyer(user_id: str, room_id: str) -> bool:

@@ -75,6 +75,13 @@ class Niche(BaseModel, UniqueIdMixin):
     require_approval = db.Column(db.Boolean, default=False)
     max_members = db.Column(db.Integer, default=10000)
 
+    # Imagery. A community reads as a place because it has a face -- the
+    # X Communities layout is carried almost entirely by the avatar in a card
+    # and the banner on the detail page. Niches had neither, so every one of
+    # them rendered as an initial on a coloured square.
+    image_id = db.Column(db.Integer, db.ForeignKey("media.id"), nullable=True)
+    banner_id = db.Column(db.Integer, db.ForeignKey("media.id"), nullable=True)
+
     # Metadata
     tags = db.Column(db.JSON)  # Array of tags
     rules = db.Column(db.JSON)  # Community rules
@@ -89,6 +96,8 @@ class Niche(BaseModel, UniqueIdMixin):
     updated_at = db.Column(db.DateTime, onupdate=db.func.now())
 
     # Relationships
+    image = db.relationship("Media", foreign_keys=[image_id])
+    banner = db.relationship("Media", foreign_keys=[banner_id])
     categories = db.relationship("NicheCategory", back_populates="niche")
     members = db.relationship(
         "NicheMembership", back_populates="niche", cascade="all, delete-orphan"
@@ -239,6 +248,29 @@ class ProductReview(BaseModel):
     order = db.relationship("Order")
 
 
+class ReviewUpvote(BaseModel):
+    """One row per (user, review), so a review can only be upvoted once.
+
+    upvote_review() used to do a bare `review.upvotes += 1` with nothing
+    recording who had voted -- tap the button ten times and the count went up
+    ten times. A Redis set was written but never read, and a cache is the wrong
+    place to enforce a uniqueness rule anyway.
+    """
+
+    __tablename__ = "review_upvotes"
+    # The primary key covers (user_id, review_id), which doesn't serve
+    # "count the votes on this review". Index the other direction too.
+    __table_args__ = (db.Index("ix_review_upvotes_review_id", "review_id"),)
+
+    user_id = db.Column(db.String(12), db.ForeignKey("users.id"), primary_key=True)
+    review_id = db.Column(
+        db.Integer, db.ForeignKey("product_reviews.id"), primary_key=True
+    )
+
+    user = db.relationship("User")
+    review = db.relationship("ProductReview")
+
+
 class ProductView(BaseModel):
     __tablename__ = "product_views"
 
@@ -384,6 +416,33 @@ class PostLike(BaseModel):
 
     post = db.relationship("Post", back_populates="likes")
     user = db.relationship("User")
+
+
+class SavedItemType(Enum):
+    POST = "post"
+    PRODUCT = "product"
+
+
+class SavedItem(BaseModel):
+    """A user's saved posts and products -- "save" on a post, "wishlist" on a
+    product, one table because the home feed mixes both and the client wants a
+    single saved list back.
+
+    Polymorphic over (content_type, content_id) for the same reason
+    ContentReport is: two nullable FKs plus a check constraint reads worse and
+    extends worse, and nothing needs to JOIN across both types at once.
+    """
+
+    __tablename__ = "saved_items"
+
+    user_id = db.Column(db.String(12), db.ForeignKey("users.id"), primary_key=True)
+    content_type = db.Column(db.Enum(SavedItemType), primary_key=True)
+    content_id = db.Column(db.String(12), primary_key=True)
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+    user = db.relationship("User")
+
+    __table_args__ = (db.Index("ix_saved_items_user_type", "user_id", "content_type"),)
 
 
 class PostComment(BaseModel, ReactionMixin):
