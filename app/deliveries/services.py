@@ -52,7 +52,11 @@ def _normalize_phone(raw: str) -> str:
 
 class DeliveryService:
 
-    CACHE_EXPIRE_SECONDS = 3600  # 1 hour (relaxed for tests; was 5 min)
+    # Ten minutes: long enough for an email to arrive and be typed out,
+    # short enough that a code left sitting in an inbox stops working. It
+    # was an hour, "relaxed for tests", which is the kind of relaxation that
+    # ships.
+    CACHE_EXPIRE_SECONDS = 600
     CACHE_KEY_PREFIX = "otp_cache:"
     PHONE_MIN_LEN = 10
     PHONE_MAX_LEN = 15
@@ -90,6 +94,16 @@ class DeliveryService:
         if not cached_otp or cached_str != otp:
             logger.warning(f"Invalid OTP for phone number {phone_number}")
             raise ValidationError("Invalid OTP")
+
+        # Spend it. A code that survives being used is a password with an
+        # hour's life on it: it sits in a mailbox, and anyone who reads that
+        # mailbox -- a forwarded message, a shared laptop, a shoulder on a
+        # bus -- can sign in as this rider repeatedly until it expires.
+        # Deleting before the lookup rather than after is deliberate: if the
+        # partner turns out not to exist, the code is still spent, so a
+        # wrong-number guess cannot be retried against a working code.
+        redis_client.delete(cache_key)
+
         try:
             with session_scope() as session:
                 delivery_user = (
@@ -141,7 +155,10 @@ class DeliveryService:
                     )
                     raise NotFoundError("Email not found")
 
-            logger.info(f"Sending OTP {otp} to {email}")
+            # The code itself is deliberately not logged. It used to be,
+            # which put a working credential into every log sink, aggregator
+            # and support screenshot that touches this line.
+            logger.info("Sending OTP to %s", email)
             if email_service.send_otp_email(email, otp):
                 cache_key = f"{DeliveryService.CACHE_KEY_PREFIX}{phone}"
                 redis_client.setex(cache_key, DeliveryService.CACHE_EXPIRE_SECONDS, otp)
