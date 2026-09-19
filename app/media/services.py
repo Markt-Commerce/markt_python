@@ -16,6 +16,20 @@ from .errors import MediaUploadError, MediaProcessingError
 logger = logging.getLogger(__name__)
 
 
+def _owner_columns(owner_id: str) -> dict:
+    """Which column an uploader's id belongs in.
+
+    A rider is not a User -- they live in delivery_users with a DEL_ id --
+    and media.user_id is a foreign key to users, so filing a rider's upload
+    under it fails at flush. The two id formats never collide, so the prefix
+    routes it. Same approach as NotificationService._owner_filter and
+    WalletService._owner_filter.
+    """
+    if str(owner_id or "").startswith("DEL_"):
+        return {"user_id": None, "delivery_user_id": owner_id}
+    return {"user_id": owner_id, "delivery_user_id": None}
+
+
 class MediaService:
     """Comprehensive media service for handling uploads, processing, and variants"""
 
@@ -167,7 +181,8 @@ class MediaService:
                     media.file_size = file_size
                     media.alt_text = alt_text
                     media.caption = caption
-                    media.user_id = user_id
+                    for _column, _value in _owner_columns(user_id).items():
+                        setattr(media, _column, _value)
                     media.original_filename = filename
                     media.processing_status = (
                         "uploaded"  # Will be updated by async task
@@ -249,7 +264,8 @@ class MediaService:
                 media.file_size = file_size
                 media.alt_text = alt_text
                 media.caption = caption
-                media.user_id = user_id
+                for _column, _value in _owner_columns(user_id).items():
+                    setattr(media, _column, _value)
                 media.original_filename = filename
                 media.processing_status = "uploaded"  # Will be updated by async task
 

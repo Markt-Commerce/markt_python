@@ -56,9 +56,12 @@ class DeliveryOTPResponseSchema(Schema):
 class DeliveryDataResponseSchema(Schema):
     id = fields.String()
     name = fields.String()
+    email = fields.String(allow_none=True)
+    phone_number = fields.String(allow_none=True)
     status = fields.String(validate=validate.OneOf(["ACTIVE", "INACTIVE", "SUSPENDED"]))
-    vehicle_type = fields.String()
-    rating = fields.Float()
+    vehicle_type = fields.String(allow_none=True)
+    rating = fields.Float(allow_none=True)
+    profile_picture = fields.String(allow_none=True)
 
 
 class DeliveryStatusUpdateSchema(Schema):
@@ -109,6 +112,22 @@ class LocationSchema(Schema):
 
 class DeliveryOrderAcceptRequestSchema(Schema):
     order_id = fields.String(required=True)
+
+
+class DeliveryPartnerUpdateSchema(Schema):
+    """What a rider may change about themselves.
+
+    Not phone_number -- that is the login credential and belongs to the OTP
+    flow -- and not status, which the online/offline toggle owns.
+    """
+
+    name = fields.String(required=False, validate=validate.Length(min=1, max=100))
+    email = fields.Email(required=False)
+    vehicle_type = fields.String(required=False)
+
+
+class DeliveryPartnerPhotoResponseSchema(Schema):
+    profile_picture = fields.String(allow_none=True)
 
 
 class DeliveryOrderOfferResponseSchema(Schema):

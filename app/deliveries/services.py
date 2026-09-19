@@ -148,6 +148,111 @@ class DeliveryService:
             )
 
     @staticmethod
+    def update_partner(user_id: str, data: Dict) -> Dict:
+        """Change the handful of things a rider owns about themselves.
+
+        Deliberately not phone number or status: the phone is the login
+        credential and changing it needs the OTP flow, and status is what
+        the online/offline toggle already owns.
+        """
+        allowed = {}
+        if "name" in data and data["name"]:
+            name = str(data["name"]).strip()
+            if not name:
+                raise ValidationError("Name cannot be empty")
+            allowed["name"] = name[:100]
+        if "vehicle_type" in data and data["vehicle_type"]:
+            try:
+                allowed["vehicle_type"] = DeliveryVehicleType(data["vehicle_type"])
+            except ValueError:
+                raise ValidationError("Unknown vehicle type")
+        if "email" in data and data["email"]:
+            allowed["email"] = str(data["email"]).strip()[:100]
+
+        if not allowed:
+            raise ValidationError("Nothing to update")
+
+        with session_scope() as session:
+            rider = session.query(DeliveryUser).get(user_id)
+            if not rider:
+                raise NotFoundError("Delivery partner not found")
+            for field, value in allowed.items():
+                setattr(rider, field, value)
+            session.flush()
+            return {
+                "id": rider.id,
+                "name": rider.name,
+                "email": rider.email,
+                "phone_number": rider.phone_number,
+                "status": rider.status.value if rider.status else None,
+                "vehicle_type": (
+                    rider.vehicle_type.value if rider.vehicle_type else None
+                ),
+                "rating": rider.rating,
+                "profile_picture": rider.profile_picture,
+            }
+
+    @staticmethod
+    def upload_profile_picture(user_id: str, file_stream, filename: str) -> Dict:
+        """Set the rider's photo, replacing any previous one.
+
+        A near-twin of UserService.upload_profile_picture rather than a
+        shared generic, for the same reason upload_shop_banner is: the two
+        differ in which table the URL lands on, and folding them together
+        would put a "which kind of account is this" branch inside every
+        step. The media row itself knows -- see media.delivery_user_id.
+        """
+        from io import BytesIO
+        from urllib.parse import urlparse
+
+        from app.media.models import Media, MediaVariant
+        from app.media.services import media_service
+
+        if not isinstance(file_stream, BytesIO):
+            file_stream = BytesIO(file_stream.read())
+
+        with session_scope() as session:
+            rider = session.query(DeliveryUser).get(user_id)
+            if not rider:
+                raise NotFoundError("Delivery partner not found")
+
+            # Drop the previous photo, or every re-upload leaks a file in
+            # S3 and a row in media.
+            if rider.profile_picture:
+                storage_key = urlparse(rider.profile_picture).path.lstrip("/")
+                old = session.query(Media).filter_by(storage_key=storage_key).first()
+                if old:
+                    try:
+                        media_service.delete_media(old)
+                    except Exception:
+                        # A file we cannot delete must not stop a rider
+                        # replacing their photo.
+                        logger.warning(
+                            "Could not remove old rider photo %s", storage_key
+                        )
+                    session.query(MediaVariant).filter_by(media_id=old.id).delete()
+                    session.delete(old)
+                rider.profile_picture = None
+
+        media = media_service.upload_image(
+            file_stream=file_stream,
+            filename=filename,
+            user_id=user_id,
+            alt_text=f"Profile picture for delivery partner {user_id}",
+            caption="Profile picture",
+            is_profile_picture=True,
+        )
+
+        with session_scope() as session:
+            rider = session.query(DeliveryUser).get(user_id)
+            if not rider:
+                raise NotFoundError("Delivery partner not found")
+            rider.profile_picture = media.get_url()
+            url = rider.profile_picture
+
+        return {"profile_picture": url}
+
+    @staticmethod
     def send_otp(phone_number: str) -> bool:
         """Generate and send OTP to delivery partner's email (phone number would be used later when we integrate SMS service)"""
         try:
@@ -296,6 +401,9 @@ class DeliveryService:
                         else None
                     ),
                     "rating": delivery_user.rating,
+                    "email": delivery_user.email,
+                    "phone_number": delivery_user.phone_number,
+                    "profile_picture": delivery_user.profile_picture,
                 }
         except Exception as e:
             logger.error(f"Error fetching current delivery partner: {str(e)}")

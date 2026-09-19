@@ -1,5 +1,6 @@
 # package imports
-from flask_smorest import Blueprint
+from flask import request
+from flask_smorest import Blueprint, abort
 from flask.views import MethodView
 from flask_login import login_required, login_user, current_user
 from marshmallow import fields
@@ -25,6 +26,8 @@ from .schemas import (
     DeliveryOrderAcceptRequestSchema,
     DeliveryOrderAcceptResponseSchema,
     DeliveryOrderOfferResponseSchema,
+    DeliveryPartnerPhotoResponseSchema,
+    DeliveryPartnerUpdateSchema,
     DeliveryActiveAssignmentsResponseSchema,
     LogisticStatusUpdateSchema,
     DeliveryOrderQRResponseSchema,
@@ -107,6 +110,41 @@ class DeliveryPartnerMe(MethodView):
         return DeliveryService.get_current_delivery_partner(
             current_user.id
         )  # TODO: This will require session management to link delivery partner to user session.
+
+    @login_required
+    @bp.arguments(DeliveryPartnerUpdateSchema, location="json")
+    @bp.response(200, DeliveryDataResponseSchema)
+    def patch(self, data):
+        """Update the rider's own details.
+
+        Name, email and vehicle type only. The phone number is the login
+        credential and changing it belongs to the OTP flow; status belongs
+        to the online/offline toggle.
+        """
+        return DeliveryService.update_partner(current_user.id, data)
+
+
+@bp.route("/partners/me/photo")
+class DeliveryPartnerPhoto(MethodView):
+    @login_required
+    @bp.response(200, DeliveryPartnerPhotoResponseSchema)
+    def post(self):
+        """Upload the rider's profile picture (multipart, field `file`)."""
+        from io import BytesIO
+
+        from werkzeug.utils import secure_filename
+
+        file = request.files.get("file")
+        if not file:
+            abort(400, message="No file provided")
+
+        filename = secure_filename(file.filename or "")
+        if not filename:
+            abort(400, message="Invalid filename")
+
+        stream = BytesIO(file.read())
+        stream.seek(0)
+        return DeliveryService.upload_profile_picture(current_user.id, stream, filename)
 
 
 @bp.route("/partners/me/status")
