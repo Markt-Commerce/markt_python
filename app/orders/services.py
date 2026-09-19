@@ -757,6 +757,20 @@ class OrderService:
             shipment = order.shipments[0] if order.shipments else None
             delivery_info = None
             if assignment and assignment.status == AssignmentStatus.ACCEPTED:
+                # Who is bringing it, not just that somebody is.
+                #
+                # This was an assignment id and a status string, so the
+                # buyer's tracking screen could say "picked up" and nothing
+                # else -- no name, no face, and no way to reach the one
+                # person who is about to knock on their door. The rider has
+                # had the buyer's name and number since assignments carried
+                # parties; this is the other half of that.
+                #
+                # The number is the rider's real one, for the same reason
+                # the rider gets the buyer's real one: masking both through
+                # a proxy is the right end state and needs a telephony
+                # provider we do not have yet.
+                rider = assignment.delivery_user
                 delivery_info = {
                     "assignment_id": assignment.assignment_id,
                     "status": assignment.status.value,
@@ -768,6 +782,19 @@ class OrderService:
                     "assigned_at": (
                         assignment.assigned_at.isoformat()
                         if assignment.assigned_at
+                        else None
+                    ),
+                    "rider": (
+                        {
+                            "name": rider.name,
+                            "phone_number": rider.phone_number,
+                            "profile_picture": rider.profile_picture,
+                            "vehicle_type": (
+                                rider.vehicle_type.value if rider.vehicle_type else None
+                            ),
+                            "rating": rider.rating,
+                        }
+                        if rider
                         else None
                     ),
                 }

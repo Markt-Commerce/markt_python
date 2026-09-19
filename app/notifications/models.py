@@ -48,6 +48,15 @@ class NotificationType(Enum):
     ORDER_CANCELLED = "order_cancelled"
     # 10.7: a rider reported a failed delivery attempt for this order.
     DELIVERY_FAILED = "delivery_failed"
+    # A rider moved a delivery forward -- accepted it, reached the shop,
+    # collected the parcel, set off, arrived. The buyer got none of this:
+    # every notification about their own order stopped at "paid", and the
+    # rest of it happened silently behind a status string they had to open
+    # the app and pull to refresh to see.
+    DELIVERY_STATUS_UPDATE = "delivery_status_update"
+    # The seller's half of the same events, and only the two that ask
+    # something of them: a rider is coming, and a rider is outside.
+    DELIVERY_PICKUP_UPDATE = "delivery_pickup_update"
     # Any of the three refund paths (cancel_order, refund_unresolved_item,
     # approve_return) actually credited the buyer's wallet.
     REFUND_ISSUED = "refund_issued"
