@@ -135,12 +135,26 @@ class DeliveryActiveAssignmentsResponseSchema(Schema):
 class ActiveAssignmentSchema(Schema):
     assignment_id = fields.String()
     order_id = fields.String()
+    order_number = fields.String(allow_none=True)
     pickup = fields.List(fields.Nested("LocationSchema"))
     dropoff = fields.Nested("LocationSchema")
     status = fields.String(
-        validate=validate.OneOf(["ASSIGNED", "ACCEPTED", "REJECTED"])
+        validate=validate.OneOf(
+            ["ASSIGNED", "ACCEPTED", "REJECTED", "OFFERED", "EXPIRED"]
+        )
     )
     assignedAt = fields.DateTime()
+
+    # Who and where, not just two coordinates. A run's stops have carried
+    # these since runs existed; a single order is the same job with one
+    # stop, and the rider was shown "Pickup from seller" with no name, no
+    # address and nobody to call.
+    seller_name = fields.String(allow_none=True)
+    pickup_address = fields.String(allow_none=True)
+    seller_phone = fields.String(allow_none=True)
+    buyer_name = fields.String(allow_none=True)
+    dropoff_address = fields.String(allow_none=True)
+    buyer_phone = fields.String(allow_none=True)
 
 
 # Request and response schema for updating logistical status of an active assignment

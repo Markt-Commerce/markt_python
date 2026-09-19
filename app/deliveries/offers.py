@@ -59,6 +59,25 @@ DECLINE_COOLDOWN = timedelta(minutes=10)
 # else.
 LAPSE_COOLDOWN = timedelta(minutes=2)
 
+# How many single orders a rider may be carrying at once.
+#
+# There was no limit at all: a rider could accept every order on the
+# dashboard and then deliver them at whatever pace they liked, while every
+# one of those buyers watched an order that was technically "on its way".
+#
+# One is what Uber Eats, Bolt Food and Glovo all do for an individual
+# courier, and the reason is the same everywhere: a rider holding five
+# orders is not five times faster, they are one rider with four orders
+# going cold. Batching is supposed to come from the platform, which can see
+# every order and route them together -- that is what delivery runs are. A
+# rider hoarding orders is batching by accident, in whatever order occurs
+# to them.
+#
+# Two rather than one, because a rider who has handed over their last
+# package but not yet scanned the code should be able to take the next job
+# rather than stand still.
+MAX_CONCURRENT_ORDERS = 2
+
 # After this long unclaimed, stop waiting for the neighbourhood and widen
 # the net.
 ESCALATE_AFTER = timedelta(minutes=10)

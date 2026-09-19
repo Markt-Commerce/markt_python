@@ -703,6 +703,30 @@ class DeliveryService:
 
             mine = next((a for a in assignments if a.delivery_user_id == user_id), None)
 
+            # How many they are already carrying. Unlimited before, so a
+            # rider could take every order on the dashboard and leave four
+            # of five buyers watching an order that was "on its way" and
+            # going cold. See offers.MAX_CONCURRENT_ORDERS.
+            carrying = (
+                session.query(DeliveryOrderAssignment)
+                .filter(
+                    DeliveryOrderAssignment.delivery_user_id == user_id,
+                    DeliveryOrderAssignment.order_id != order_id,
+                    DeliveryOrderAssignment.status == AssignmentStatus.ACCEPTED,
+                    (DeliveryOrderAssignment.logistical_status.is_(None))
+                    | (
+                        DeliveryOrderAssignment.logistical_status
+                        != LogisticalStatus.COMPLETED
+                    ),
+                )
+                .count()
+            )
+            if carrying >= offers.MAX_CONCURRENT_ORDERS:
+                raise ConflictError(
+                    "Finish what you are carrying before taking another. "
+                    f"You have {carrying}."
+                )
+
             # A rider inside a decline cooldown cannot accept. A rider whose
             # offer merely lapsed can: they were looking at it a moment ago,
             # and refusing them now -- when nobody else has taken it -- would
@@ -806,28 +830,99 @@ class DeliveryService:
                             "lat": assignment.order.shipping_address.latitude,
                             "lng": assignment.order.shipping_address.longitude,
                         },
+                        # Who and where, not just two coordinates. A rider
+                        # was shown "Pickup from seller" with no name, no
+                        # address and no way to call anyone -- a run's stops
+                        # have carried all three since runs existed, and a
+                        # single order is the same job with one stop.
+                        **DeliveryService._assignment_parties(assignment.order),
                     }
                     for assignment in active_assignments
                 ]
             }
 
     @staticmethod
+    def _assignment_parties(order: Order) -> Dict:
+        """The people at each end of a single-order delivery.
+
+        Phone numbers are included because a rider standing outside a shut
+        shop, or at a gate with no answer, has no other move -- every
+        delivery app in the world puts a call button on that screen. They
+        are the real numbers: masking them through a proxy is the right
+        end state and needs a telephony provider we do not have yet.
+        """
+        seller = next(
+            (item.seller for item in order.items if item.seller is not None), None
+        )
+        buyer_user = getattr(getattr(order, "buyer", None), "user", None)
+
+        shop_address = getattr(seller, "shop_address", None) if seller else None
+        if isinstance(shop_address, dict):
+            shop_address = (
+                ", ".join(
+                    str(part)
+                    for part in (
+                        shop_address.get("street"),
+                        shop_address.get("street_address"),
+                        shop_address.get("city"),
+                    )
+                    if part
+                )
+                or None
+            )
+
+        drop = order.shipping_address
+        drop_line = None
+        if drop is not None:
+            drop_line = (
+                ", ".join(
+                    str(part)
+                    for part in (
+                        getattr(drop, "street_address", None),
+                        getattr(drop, "city", None),
+                    )
+                    if part
+                )
+                or None
+            )
+
+        return {
+            "seller_name": getattr(seller, "shop_name", None) if seller else None,
+            "pickup_address": shop_address,
+            "seller_phone": (
+                getattr(getattr(seller, "user", None), "phone_number", None)
+                if seller
+                else None
+            ),
+            "buyer_name": getattr(buyer_user, "username", None),
+            "dropoff_address": drop_line,
+            "buyer_phone": getattr(buyer_user, "phone_number", None),
+            "order_number": order.order_number,
+        }
+
+    @staticmethod
     def get_assignment_pickups_from_order_item(order: Order) -> List[Dict[str, float]]:
+        # The shop's own coordinates, falling back to the seller's personal
+        # address. This resolved from seller.user.address alone, which is
+        # frequently unset -- so the pickup list came back empty and the
+        # active-delivery map had no pickup pin at all. Same fix as
+        # get_available_orders (riders could not see paid orders).
         pickups = []
         for item in order.items:
             seller = item.seller
-            if not seller or not getattr(seller, "user", None):
+            if not seller:
                 continue
-            seller_address = getattr(seller.user, "address", None)
-            if (
-                not seller_address
-                or seller_address.latitude is None
-                or seller_address.longitude is None
-            ):
+
+            lat = getattr(seller, "shop_latitude", None)
+            lng = getattr(seller, "shop_longitude", None)
+            if lat is None or lng is None:
+                seller_address = getattr(getattr(seller, "user", None), "address", None)
+                lat = getattr(seller_address, "latitude", None)
+                lng = getattr(seller_address, "longitude", None)
+
+            if lat is None or lng is None:
                 continue
-            pickups.append(
-                {"lat": seller_address.latitude, "lng": seller_address.longitude}
-            )
+            pickups.append({"lat": lat, "lng": lng})
         return pickups
 
     @staticmethod
