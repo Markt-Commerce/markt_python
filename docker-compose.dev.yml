@@ -86,7 +86,7 @@ services:
       - redis
     networks:
       - markt-dev-network
-    command: celery -A main.workers worker -l INFO -Q social
+    command: celery -A main.workers worker -l INFO -Q analytics,default,maintenance,media,notifications,realtime,social
 
   # Celery Beat (development)
   markt-celerybeat-dev:
