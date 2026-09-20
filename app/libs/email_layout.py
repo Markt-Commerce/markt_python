@@ -13,12 +13,14 @@ beats two.
 """
 
 import html
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 BRAND = "#E94C2A"
 INK = "#1A1A1A"
 MUTED = "#6B7280"
 HAIRLINE = "#E5E7EB"
+# The placeholder block where a product photo would be.
+WASH = "#F3F4F6"
 PAGE = "#F5F5F4"
 CARD = "#FFFFFF"
 
@@ -236,37 +238,129 @@ def progress(steps: List[str], current: int) -> str:
         return ""
     current = max(0, min(current, len(steps) - 1))
 
-    dots = ""
-    labels = ""
+    # One cell per step, all the same width, with the dot and its label
+    # stacked inside it.
+    #
+    # This was two separate tables -- one of dots and connectors, one of
+    # labels -- with different numbers of cells in each. Nothing made
+    # the two rows line up, and every connector asked for width="100%",
+    # so a client handed the first one the whole row and collapsed the
+    # rest: four dots rendered as one on the left and three bunched at
+    # the right, under labels that were still evenly spread. Equal
+    # percentage cells are the only thing that keeps a dot over its own
+    # word.
+    width = round(100 / len(steps), 4)
+    cells = ""
     for i, step in enumerate(steps):
         done = i <= current
         colour = BRAND if done else HAIRLINE
-        # The connector to the previous dot carries the colour of the step it
-        # leads into, so the line fills up as the order moves along.
-        if i:
-            dots += (
-                f'<td width="100%" style="padding:0;"><div style="height:2px;'
-                f'background:{colour};font-size:0;line-height:0;">&nbsp;</div></td>'
-            )
-        dots += (
-            f'<td width="14" style="padding:0;"><div style="width:14px;'
-            f"height:14px;border-radius:7px;background:{colour};"
-            f'font-size:0;line-height:0;">&nbsp;</div></td>'
+        # Each half-connector belongs to the dot it touches, and takes
+        # the colour of the later of the two steps -- so the line fills
+        # up as the order moves. The outer halves are blank, because a
+        # line running off the end points at nothing.
+        left = colour if i else "transparent"
+        right = (
+            (BRAND if i + 1 <= current else HAIRLINE)
+            if i < len(steps) - 1
+            else "transparent"
         )
-        labels += (
-            f'<td align="{"left" if i == 0 else "right" if i == len(steps) - 1 else "center"}"'
-            f' style="padding:6px 2px 0;color:{INK if done else MUTED};'
+
+        cells += (
+            f'<td width="{width}%" style="padding:0;" valign="top">'
+            # Rail: half-line, dot, half-line. A nested table rather
+            # than positioned divs, because Outlook does not position.
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
+            f'<td style="padding:0;"><div style="height:2px;background:{left};'
+            f'font-size:0;line-height:0;">&nbsp;</div></td>'
+            f'<td width="14" style="padding:0;"><div style="width:14px;height:14px;'
+            f'border-radius:7px;background:{colour};font-size:0;line-height:0;">'
+            f"&nbsp;</div></td>"
+            f'<td style="padding:0;"><div style="height:2px;background:{right};'
+            f'font-size:0;line-height:0;">&nbsp;</div></td>'
+            f"</tr></table>"
+            f'<div style="padding:6px 2px 0;text-align:center;color:{INK if done else MUTED};'
             f"font-size:11px;line-height:15px;"
-            f'font-weight:{"600" if i == current else "400"};">{esc(step)}</td>'
+            f'font-weight:{"600" if i == current else "400"};">{esc(step)}</div>'
+            f"</td>"
         )
 
     return f"""
       <tr><td style="padding:20px 24px 8px;">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
-          <tr>{dots}</tr>
+          <tr>{cells}</tr>
         </table>
+      </td></tr>"""
+
+
+def line_items(items: List[Dict], title: str = "What's in this order") -> str:
+    """The things bought, with their pictures.
+
+    A table of names and quantities asks the reader to remember what
+    they ordered. The photo they chose it from is the thing they
+    actually recognise -- especially on a delivery email, where the
+    question is "is this the parcel at my door".
+
+    Each row is its own table so a long product name wraps under itself
+    rather than pushing the price off the edge, and the image cell has
+    a fixed width so rows line up whether or not a picture resolved.
+    An item with no image keeps its row: a missing photo is not a
+    missing purchase.
+    """
+    if not items:
+        return ""
+
+    rows = ""
+    for item in items:
+        name = esc(item.get("product_name") or "Item")
+        quantity = item.get("quantity") or 1
+        price = item.get("price")
+        image = (item.get("image_url") or "").strip()
+
+        if image:
+            # Sized in the attribute as well as the style: Outlook reads
+            # the attribute and ignores the CSS.
+            thumb = (
+                f'<img src="{esc(image)}" width="56" height="56" alt="{name}" '
+                f'style="width:56px;height:56px;border-radius:8px;'
+                f'object-fit:cover;display:block;border:0;" />'
+            )
+        else:
+            thumb = (
+                '<div style="width:56px;height:56px;border-radius:8px;'
+                f'background:{WASH};font-size:0;line-height:0;">&nbsp;</div>'
+            )
+
+        money = f"\u20a6{_fmt(float(price))}" if price not in (None, "") else ""
+
+        rows += f"""
+          <tr><td style="padding:0 0 12px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td width="56" style="padding:0 12px 0 0;" valign="top">{thumb}</td>
+                <td valign="top" style="padding:0;">
+                  <div style="color:{INK};font-size:14px;line-height:19px;
+                              font-weight:600;">{name}</div>
+                  <div style="color:{MUTED};font-size:12px;line-height:17px;
+                              padding-top:2px;">Qty {esc(quantity)}</div>
+                </td>
+                <td align="right" valign="top"
+                    style="padding:0 0 0 12px;color:{INK};font-size:14px;
+                           line-height:19px;white-space:nowrap;">{money}</td>
+              </tr>
+            </table>
+          </td></tr>"""
+
+    heading = (
+        f'<tr><td style="padding:0 0 10px;color:{MUTED};font-size:11px;'
+        f'letter-spacing:.08em;text-transform:uppercase;">{esc(title)}</td></tr>'
+        if title
+        else ""
+    )
+
+    return f"""
+      <tr><td style="padding:8px 24px 4px;">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
-          <tr>{labels}</tr>
+          {heading}{rows}
         </table>
       </td></tr>"""
 
