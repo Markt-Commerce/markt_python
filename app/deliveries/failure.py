@@ -125,6 +125,99 @@ def _notify_buyer_of_failure(buyer_user_id, order_id, reason) -> None:
         )
 
 
+def record_abandoned_run(session, run_id: str, user_id: str) -> list:
+    """Open a recovery record for every parcel a departing rider holds.
+
+    A run given up after collecting used to leave nothing behind: the
+    run was held at RIDER_FAILED, the goods were in somebody's bag, and
+    no record anywhere said so. The resolution machinery already exists
+    -- resolve_failure picks an action and who pays, complete_recovery
+    records that it happened -- but nothing was creating the failures
+    that feed it, so a stranded parcel had no representation at all.
+
+    One failure per affected order, because recovery is decided per
+    order: the buyer of a collected parcel may get a redelivery while
+    the parcel beside it goes back to its seller.
+
+    "Affected" means the goods have left the shop. An order whose
+    seller the rider never reached is untouched -- it rides along when
+    the run is reassigned, and opening a failure for it would put a
+    decision in front of somebody that does not need making.
+
+    Returns the order ids, so the caller can tell the rider exactly
+    what they are still carrying.
+    """
+    from .models import DeliveryRunOrder, DeliveryRunStop, DeliveryRunStopStatus
+
+    collected_sellers = {
+        stop.seller_id
+        for stop in session.query(DeliveryRunStop)
+        .filter_by(delivery_run_id=run_id)
+        .all()
+        if stop.status == DeliveryRunStopStatus.PICKED_UP
+    }
+    if not collected_sellers:
+        return []
+
+    run_orders = session.query(DeliveryRunOrder).filter_by(delivery_run_id=run_id).all()
+    order_ids = [ro.order_id for ro in run_orders]
+    if not order_ids:
+        return []
+
+    orders = session.query(Order).filter(Order.id.in_(order_ids)).all()
+
+    # Anything already reported for this run stays as it is -- a rider
+    # who reported a failed drop and then broke down should not end up
+    # with two open records for the same parcel.
+    already = {
+        failure.order_id
+        for failure in session.query(DeliveryFailure)
+        .filter(
+            DeliveryFailure.delivery_run_id == run_id,
+            DeliveryFailure.outcome != DeliveryFailureOutcome.COMPLETED,
+        )
+        .all()
+    }
+
+    affected = []
+    for order in orders:
+        if order.id in already:
+            continue
+        holds_goods = any(
+            item.seller_id in collected_sellers
+            for item in (getattr(order, "items", None) or [])
+            if item.status != OrderItem.Status.CANCELLED
+        )
+        if not holds_goods:
+            continue
+
+        session.add(
+            DeliveryFailure(
+                delivery_run_id=run_id,
+                order_id=order.id,
+                reason=DeliveryFailureReason.RIDER_UNABLE,
+                reported_by_delivery_user_id=user_id,
+                report_notes="Rider could not continue the run while carrying this.",
+                is_perishable=_is_perishable(session, order),
+                outcome=DeliveryFailureOutcome.PENDING,
+            )
+        )
+        OrderEventService.emit(
+            session,
+            order_id=order.id,
+            event_type=OrderEventType.ITEM_DELIVERY_FAILED,
+            actor_type=ActorType.RIDER,
+            actor_id=user_id,
+            metadata={
+                "reason": DeliveryFailureReason.RIDER_UNABLE.value,
+                "delivery_run_id": run_id,
+            },
+        )
+        affected.append(order.id)
+
+    return affected
+
+
 class DeliveryFailureService:
     @staticmethod
     def report_failure(

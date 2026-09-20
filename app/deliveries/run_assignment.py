@@ -568,10 +568,28 @@ class DeliveryRunAssignmentService:
                         if stop.status == DeliveryRunStopStatus.PICKED_UP
                     ),
                 )
+                # Open a recovery record for each parcel the rider is
+                # holding, so they enter the pipeline resolve_failure
+                # and complete_recovery already provide. Holding the
+                # run stopped the harm; this is what makes the goods
+                # somebody's job rather than nobody's.
+                from .failure import record_abandoned_run
+
+                try:
+                    stranded = record_abandoned_run(session, run_id, user_id)
+                except Exception:
+                    # The rider has stopped either way. Failing to open
+                    # the paperwork must not also fail the release.
+                    logger.exception(
+                        "Could not open recovery records for run %s", run_id
+                    )
+                    stranded = []
+
                 return {
                     "run_id": run_id,
                     "status": run.status.value,
                     "recovery_needed": True,
+                    "orders_to_recover": stranded,
                 }
 
             # Nothing collected, so the progress that exists is just
@@ -601,4 +619,5 @@ class DeliveryRunAssignmentService:
                 "run_id": run_id,
                 "status": run.status.value,
                 "recovery_needed": False,
+                "orders_to_recover": [],
             }

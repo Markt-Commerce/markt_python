@@ -349,6 +349,10 @@ class DeliveryRunFailResponseSchema(Schema):
     # at RIDER_FAILED for recovery rather than reopened, and the app
     # tells the rider somebody will be in touch about what they have.
     recovery_needed = fields.Boolean()
+    # The orders whose goods are still with the rider. Each has a
+    # DeliveryFailure open against it, waiting on the same
+    # resolve/complete pipeline every other failure uses.
+    orders_to_recover = fields.List(fields.String())
 
 
 class DeliveryRunStopDetailSchema(Schema):
