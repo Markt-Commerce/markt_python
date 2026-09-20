@@ -103,6 +103,33 @@ def send_push_notification(self, notification_data: Dict):
         logger.error(f"Push notification failed: {str(e)}")
 
 
+def _product_thumbnail(product) -> str:
+    """A picture of the thing, for the order emails.
+
+    An order email that lists "Fresh Bush Pear x1" and an iPad by name
+    alone asks the reader to remember what they bought; the photo they
+    chose it from is the thing they actually recognise.
+
+    Best-effort in every direction: no images, an unprocessed upload, a
+    storage backend that cannot mint a URL -- all of them return empty
+    and the row simply renders without a picture. An email is not worth
+    failing over a thumbnail.
+    """
+    try:
+        images = getattr(product, "images", None) or []
+        if not images:
+            return ""
+        # The one the seller marked, else the first by sort_order --
+        # which is the order the relationship already loads them in.
+        chosen = next(
+            (i for i in images if getattr(i, "is_featured", False)), images[0]
+        )
+        media = getattr(chosen, "media", None)
+        return (media.get_url() if media else "") or ""
+    except Exception:  # pragma: no cover - defensive
+        return ""
+
+
 def _order_email_data(notification_data: Dict, meta: Dict) -> Dict:
     """Fill in what the order emails read, from the DB where needed.
 
@@ -152,6 +179,7 @@ def _order_email_data(notification_data: Dict, meta: Dict) -> Dict:
                         "product_name": (item.product.name if item.product else "Item"),
                         "quantity": item.quantity,
                         "price": item.price,
+                        "image_url": _product_thumbnail(item.product),
                     }
                     for item in order.items
                 ]

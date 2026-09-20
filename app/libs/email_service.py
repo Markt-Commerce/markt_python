@@ -586,15 +586,6 @@ class EmailService:
         address = order_data.get("delivery_address", "")
         order_url = order_data.get("order_url", "")
 
-        rows = [
-            [
-                str(item.get("product_name", "")),
-                str(item.get("quantity", 0)),
-                f"\u20a6{float(item.get('price', 0) or 0):,.2f}",
-            ]
-            for item in items
-        ]
-
         greeting = f"Thanks{', ' + buyer_name if buyer_name else ''} \u2014 "
         body = (
             L.header("Order confirmed", "We have your order")
@@ -612,7 +603,9 @@ class EmailService:
                     ["Total", f"\u20a6{float(total):,.2f}"],
                 ]
             )
-            + L.table_block(["Item", "Qty", "Price"], rows, title="What you ordered")
+            # Pictures rather than three columns of words. The photo a
+            # buyer chose the thing from is what they recognise.
+            + L.line_items(items, title="What you ordered")
             + (L.button("Track this order", order_url) if order_url else "")
         )
 
@@ -634,6 +627,8 @@ class EmailService:
         eta = order_data.get("eta", "")
         rider_name = order_data.get("rider_name", "")
 
+        items = order_data.get("items", []) or []
+
         headline, explain = self._STATUS_COPY.get(
             status,
             ("Your order was updated", f"It is now {status.replace('_', ' ')}."),
@@ -644,10 +639,15 @@ class EmailService:
         step = self._STEP_FOR_STATUS.get(status)
         tracker = L.progress(self.ORDER_STEPS, step) if step is not None else ""
 
+        # What it is, not just where it is. This email carried an order
+        # number, a ladder and nothing else -- so "Your order arrived"
+        # arrived without saying which order, and a buyer with two open
+        # had to go and look.
         body = (
             L.header(f"Order #{order_number}", headline)
             + tracker
             + L.note(explain)
+            + L.line_items(items)
             + L.detail_rows(
                 [
                     ["Order", f"#{order_number}"],
