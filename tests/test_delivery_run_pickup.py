@@ -46,45 +46,63 @@ def _make_item(id, status, seller_id):
 
 
 def test_create_stops_for_run_creates_one_stop_per_distinct_seller():
-    order1 = SimpleNamespace(
-        id="ORD_1",
-        items=[
-            _make_item(1, OrderItem.Status.PROCESSING, seller_id=10),
-            _make_item(2, OrderItem.Status.PROCESSING, seller_id=11),
-        ],
-    )
-    order2 = SimpleNamespace(
-        id="ORD_2",
-        items=[
-            _make_item(3, OrderItem.Status.PROCESSING, seller_id=10),
-            _make_item(4, OrderItem.Status.CANCELLED, seller_id=12),
-        ],
-    )
+    """One stop per shop, which is what makes a run a run.
+
+    The sellers come back from a single DISTINCT query now -- this used
+    to fetch each order and walk its items, one round trip per order on
+    a structure whose whole point is that there are several. Cancelled
+    lines are excluded in SQL rather than in Python, so seller 12
+    simply is not in the result.
+    """
     run_order1 = SimpleNamespace(order_id="ORD_1")
     run_order2 = SimpleNamespace(order_id="ORD_2")
 
     session = MagicMock()
+    queried = []
 
-    def stop_query(m):
-        m.filter_by.return_value.count.return_value = 0
+    def side_effect(*args):
+        m = MagicMock()
+        queried.append(args)
+        name = getattr(args[0], "__name__", None)
+        if name == "DeliveryRunStop":
+            m.filter_by.return_value.count.return_value = 0
+        elif name == "DeliveryRunOrder":
+            m.filter_by.return_value.all.return_value = [run_order1, run_order2]
+        else:
+            # The distinct seller_id query.
+            m.filter.return_value.distinct.return_value.all.return_value = [
+                (10,),
+                (11,),
+            ]
+        return m
 
-    def run_order_query(m):
-        m.filter_by.return_value.all.return_value = [run_order1, run_order2]
-
-    def order_query(m):
-        m.get.side_effect = lambda oid: {"ORD_1": order1, "ORD_2": order2}.get(oid)
-
-    session.query.side_effect = _query_side_effect(
-        DeliveryRunStop=stop_query,
-        DeliveryRunOrder=run_order_query,
-        Order=order_query,
-    )
+    session.query.side_effect = side_effect
 
     seller_ids = create_stops_for_run(session, "RUN_1")
 
-    # seller 12's only item is cancelled -- no stop for it.
     assert set(seller_ids) == {10, 11}
     assert session.add.call_count == 2
+    # Three queries whatever the run holds: the existing-stops check,
+    # the run orders, and the sellers.
+    assert len(queried) == 3
+
+
+def test_create_stops_for_run_does_nothing_for_an_empty_run():
+    session = MagicMock()
+
+    def side_effect(*args):
+        m = MagicMock()
+        name = getattr(args[0], "__name__", None)
+        if name == "DeliveryRunStop":
+            m.filter_by.return_value.count.return_value = 0
+        elif name == "DeliveryRunOrder":
+            m.filter_by.return_value.all.return_value = []
+        return m
+
+    session.query.side_effect = side_effect
+
+    assert create_stops_for_run(session, "RUN_1") == []
+    session.add.assert_not_called()
 
 
 def test_create_stops_for_run_is_idempotent():
