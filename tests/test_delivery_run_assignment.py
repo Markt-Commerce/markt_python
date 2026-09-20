@@ -322,6 +322,9 @@ def test_fail_run_reopens_for_reassignment():
         "run_id": "RUN_1",
         "status": DeliveryRunStatus.RIDER_ASSIGNMENT.value,
         "recovery_needed": False,
+        # Nothing was collected, so there is nothing to recover and no
+        # paperwork for anybody to work through.
+        "orders_to_recover": [],
     }
     assert assignment.status == AssignmentStatus.FAILED
     assert run.status == DeliveryRunStatus.RIDER_ASSIGNMENT

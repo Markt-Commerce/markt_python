@@ -480,6 +480,14 @@ class DeliveryFailureReason(Enum):
     BUYER_UNAVAILABLE = "buyer_unavailable"
     BAD_ADDRESS = "bad_address"
     BUYER_REFUSED = "buyer_refused"
+    # The rider stopped mid-run while carrying the goods -- breakdown,
+    # accident, emergency. Nothing is wrong with the order or the buyer:
+    # the parcels simply need collecting from whoever is holding them
+    # before anyone can deliver them. Its own reason because the cost
+    # question is a different one from a buyer who was not in, and
+    # because a run abandoned with goods aboard is the only failure
+    # nobody can act on until something physical happens first.
+    RIDER_UNABLE = "rider_unable"
 
 
 class DeliveryRecoveryAction(Enum):
