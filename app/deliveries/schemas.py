@@ -214,6 +214,44 @@ class ActiveAssignmentSchema(Schema):
     buyer_phone = fields.String(allow_none=True)
 
 
+class DeliveryJobHistoryQuerySchema(Schema):
+    page = fields.Int(validate=validate.Range(min=1), missing=1)
+    per_page = fields.Int(validate=validate.Range(min=1, max=50), missing=20)
+    # Absent means everything. The two named values are the only
+    # distinction a rider actually draws over their own history.
+    status = fields.String(
+        validate=validate.OneOf(["active", "completed"]), required=False
+    )
+
+
+class DeliveryJobSchema(Schema):
+    assignment_id = fields.String()
+    order_id = fields.String()
+    order_number = fields.String(allow_none=True)
+    assigned_at = fields.DateTime(allow_none=True)
+    logistical_status = fields.String(allow_none=True)
+    seller_name = fields.String(allow_none=True)
+    seller_image = fields.String(allow_none=True)
+    dropoff_address = fields.String(allow_none=True)
+    earnings = fields.Float(allow_none=True)
+
+
+class DeliveryJobPaginationSchema(Schema):
+    # Its own class rather than reusing the name PaginationSchema, which
+    # more than one blueprint already defines -- marshmallow resolves
+    # nested schemas by name through a global registry and refuses an
+    # ambiguous one.
+    page = fields.Int()
+    per_page = fields.Int()
+    total_items = fields.Int()
+    total_pages = fields.Int()
+
+
+class DeliveryJobHistoryResponseSchema(Schema):
+    jobs = fields.List(fields.Nested(DeliveryJobSchema))
+    pagination = fields.Nested(DeliveryJobPaginationSchema)
+
+
 class ParcelLineSchema(Schema):
     """One line of what the rider is collecting."""
 

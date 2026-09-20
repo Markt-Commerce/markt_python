@@ -205,12 +205,76 @@ class PaymentService:
             PaymentService._invalidate_payment_cache(payment.id)
             order_id_for_dispatch = payment.order_id
 
+            # Who has to agree to fulfil what. Gathered here because these
+            # outlive the session, and only on the transition -- a retried
+            # webhook must not reopen a window that has already been
+            # answered.
+            item_specs = (
+                [
+                    (item.id, item.seller_id, item.quantity, item.product_id)
+                    for item in order.items
+                    if item.seller_id
+                ]
+                if order and not already_completed
+                else []
+            )
+
         # Outside it: creating the courier job calls another company over the
         # network. It must not be able to roll back a payment that already
         # succeeded, nor leave a real job against an order that did not commit.
         if needs_dispatch:
             PaymentService._dispatch_delivery(order_id_for_dispatch)
+
+        PaymentService._open_seller_windows(item_specs)
         return True
+
+    @staticmethod
+    def _open_seller_windows(item_specs) -> None:
+        """Open the seller-acceptance window for each item of a paid order.
+
+        The payment-first checkout has always done this
+        (complete_checkout_payment, below). The cart checkout never did,
+        and the consequence was invisible until batching: an order with
+        no FulfilmentAllocation is not "fully routed and confirmed", so
+        DeliveryRunService._order_is_ready refuses it and it can never
+        join a delivery run. Every order placed through the app's own
+        basket was in that state -- paid, deliverable as a single order,
+        and permanently ineligible for the batched runs the whole 10.x
+        design is built around.
+
+        Relaxing the run's check was the other option and the wrong one:
+        READY_FOR_DELIVERY only means the money arrived, so an order
+        without an allocation is one no seller has agreed to fulfil, and
+        putting that on a rider's route is how a run reaches a shop that
+        is not expecting it.
+
+        Outside the payment transaction, and each item independently:
+        the money is in and the order exists either way.
+        """
+        if not item_specs:
+            return
+
+        from app.fulfilment.services import FulfilmentService
+
+        for order_item_id, seller_id, quantity, product_id in item_specs:
+            try:
+                FulfilmentService.create_allocation(
+                    order_item_id, seller_id, quantity, product_id=product_id
+                )
+            except ConflictError:
+                # Already open. Paystack retries anything that is not a
+                # 2xx and re-sends on its own besides, so arriving at an
+                # item whose window is already open is success.
+                logger.info(
+                    "Fulfilment for order item %s was already open; "
+                    "ignoring the duplicate",
+                    order_item_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Could not open the seller window for order item %s",
+                    order_item_id,
+                )
 
     @staticmethod
     def complete_checkout_payment(
