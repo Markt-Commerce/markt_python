@@ -34,6 +34,10 @@ import uuid
 from datetime import datetime
 from typing import Dict, List
 
+from app.delivery_pricing.order_delivery import (
+    DeliveryState,
+    advance_buyer_delivery,
+)
 from app.libs.errors import ConflictError, NotFoundError, ValidationError
 from app.libs.session import session_scope
 from app.orders.events import ActorType, OrderEventService, OrderEventType
@@ -187,6 +191,12 @@ class DeliveryRunPickupService:
                         run_order.pod_status = DeliveryRunOrderPodStatus.QR_ISSUED
                         run_order.qr_code = str(uuid.uuid4())
                         issued_for_orders.append(run_order.order_id)
+                    # The buyers' own trackers. A batched order is still
+                    # one buyer watching one parcel, and theirs sat at
+                    # "Rider requested" exactly like a solo order's did.
+                    advance_buyer_delivery(
+                        session, run_order.order_id, DeliveryState.IN_TRANSIT
+                    )
 
             return {
                 "delivery_run_id": run_id,
@@ -265,6 +275,7 @@ class DeliveryRunPodService:
 
             run_order.pod_status = DeliveryRunOrderPodStatus.DELIVERED
             run_order.delivered_at = datetime.utcnow()
+            advance_buyer_delivery(session, order_id, DeliveryState.DELIVERED)
 
             run_completed = False
             run = session.query(DeliveryRun).filter_by(id=run_id).first()

@@ -6,7 +6,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.deliveries.models import AssignmentStatus, DeliveryRunOrderPodStatus
+from app.deliveries.models import (
+    AssignmentStatus,
+    DeliveryRunOrderPodStatus,
+    LogisticalStatus,
+)
 from app.deliveries.services import DeliveryService
 from app.libs.errors import ForbiddenError
 
@@ -50,8 +54,12 @@ def test_get_buyer_pod_code_returns_single_order_code_when_accepted(mock_scope):
     order_mock.options.return_value.get.return_value = _order()
 
     assignment_mock = MagicMock()
-    assignment_mock.filter_by.return_value.order_by.return_value.first.return_value = (
-        SimpleNamespace(status=AssignmentStatus.ACCEPTED, escrow_qr_code="CODE123")
+    assignment_mock.filter_by.return_value.order_by.return_value.first.return_value = SimpleNamespace(
+        status=AssignmentStatus.ACCEPTED,
+        escrow_qr_code="CODE123",
+        # Mid-delivery: the code is still live. A COMPLETED one is
+        # spent, which test_buyer_delivery_tracker_advances covers.
+        logistical_status=LogisticalStatus.EN_ROUTE_TO_DROPOFF,
     )
 
     session = MagicMock()
@@ -62,7 +70,12 @@ def test_get_buyer_pod_code_returns_single_order_code_when_accepted(mock_scope):
 
     result = DeliveryService.get_buyer_pod_code("ORD_1", "USR_BUYER1")
 
-    assert result == {"ready": True, "system": "single_order", "code": "CODE123"}
+    assert result == {
+        "ready": True,
+        "system": "single_order",
+        "code": "CODE123",
+        "delivered": False,
+    }
 
 
 @patch("app.deliveries.services.session_scope")
@@ -90,7 +103,12 @@ def test_get_buyer_pod_code_falls_back_to_run_when_no_single_order_assignment(
 
     result = DeliveryService.get_buyer_pod_code("ORD_1", "USR_BUYER1")
 
-    assert result == {"ready": True, "system": "run", "code": "RUNCODE9"}
+    assert result == {
+        "ready": True,
+        "system": "run",
+        "code": "RUNCODE9",
+        "delivered": False,
+    }
 
 
 @patch("app.deliveries.services.session_scope")
@@ -116,4 +134,9 @@ def test_get_buyer_pod_code_not_ready_when_neither_system_has_a_code(mock_scope)
 
     result = DeliveryService.get_buyer_pod_code("ORD_1", "USR_BUYER1")
 
-    assert result == {"ready": False, "system": None, "code": None}
+    assert result == {
+        "ready": False,
+        "system": None,
+        "code": None,
+        "delivered": False,
+    }

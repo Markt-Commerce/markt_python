@@ -203,6 +203,33 @@ class DeliveryRunAssignmentService:
 
             create_stops_for_run(session, run_id)
 
+            # Every buyer on this run now has a rider. Their trackers said
+            # "Waiting for someone to take it" until the parcel arrived.
+            from app.delivery_pricing.order_delivery import (
+                DeliveryState,
+                advance_buyer_delivery,
+            )
+
+            # Queried rather than walked off `run`, and tolerant of
+            # finding nothing: accepting the run has already succeeded by
+            # this point, and updating the buyers' trackers must not be
+            # able to undo it.
+            from .models import DeliveryRunOrder
+
+            try:
+                attached = (
+                    session.query(DeliveryRunOrder)
+                    .filter_by(delivery_run_id=run_id)
+                    .all()
+                )
+            except Exception:
+                attached = []
+
+            for run_order in attached:
+                advance_buyer_delivery(
+                    session, run_order.order_id, DeliveryState.ASSIGNED
+                )
+
             return {
                 "run_id": run_id,
                 "status": run.status.value,
