@@ -40,6 +40,7 @@ from .schemas import (
     DeliveryRunDetailResponseSchema,
     DeliveryRunAcceptResponseSchema,
     DeliveryRunFailRequestSchema,
+    DeliveryRunFailResponseSchema,
     DeliveryRunStopActionResponseSchema,
     DeliveryRunPickupConfirmResponseSchema,
     DeliveryRunOrderPodQRResponseSchema,
@@ -340,10 +341,15 @@ class DeliveryRunReject(MethodView):
 class DeliveryRunFail(MethodView):
     @login_required
     @bp.arguments(DeliveryRunFailRequestSchema, location="json")
-    @bp.response(200, DeliveryRunAcceptResponseSchema)
+    @bp.response(200, DeliveryRunFailResponseSchema)
     def post(self, data, run_id):
         """10.7: rider reports they can no longer continue an accepted
-        run -- triggers reassignment where possible."""
+        run.
+
+        Reopens it for someone else only if nothing has been collected
+        yet. Once the rider is carrying parcels the run is held for
+        recovery instead -- see fail_run.
+        """
         return DeliveryRunAssignmentService.fail_run(
             current_user.id, run_id, reason=data.get("reason")
         )

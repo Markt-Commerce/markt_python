@@ -301,8 +301,15 @@ def test_fail_run_reopens_for_reassignment():
     def run_query(m):
         m.filter_by.return_value.with_for_update.return_value.first.return_value = run
 
+    def stop_query(m):
+        # Nothing collected: the rider broke down on the way to the
+        # first shop.
+        m.filter_by.return_value.all.return_value = []
+
     session.query.side_effect = _query_side_effect(
-        DeliveryRunAssignment=assignment_query, DeliveryRun=run_query
+        DeliveryRunAssignment=assignment_query,
+        DeliveryRun=run_query,
+        DeliveryRunStop=stop_query,
     )
 
     with patch("app.deliveries.run_assignment.session_scope") as mock_scope:
@@ -314,6 +321,7 @@ def test_fail_run_reopens_for_reassignment():
     assert result == {
         "run_id": "RUN_1",
         "status": DeliveryRunStatus.RIDER_ASSIGNMENT.value,
+        "recovery_needed": False,
     }
     assert assignment.status == AssignmentStatus.FAILED
     assert run.status == DeliveryRunStatus.RIDER_ASSIGNMENT
@@ -658,8 +666,8 @@ def test_fail_run_hands_back_a_clean_route(mock_scope):
     arrived = SimpleNamespace(
         status=DeliveryRunStopStatus.ARRIVED, arrived_at="then", picked_up_at=None
     )
-    collected = SimpleNamespace(
-        status=DeliveryRunStopStatus.PICKED_UP, arrived_at="then", picked_up_at="then"
+    also_arrived = SimpleNamespace(
+        status=DeliveryRunStopStatus.ARRIVED, arrived_at="then", picked_up_at=None
     )
 
     session = MagicMock()
@@ -671,7 +679,7 @@ def test_fail_run_hands_back_a_clean_route(mock_scope):
         m.filter_by.return_value.with_for_update.return_value.first.return_value = run
 
     def stop_query(m):
-        m.filter_by.return_value.all.return_value = [arrived, collected]
+        m.filter_by.return_value.all.return_value = [arrived, also_arrived]
 
     session.query.side_effect = _query_side_effect(
         DeliveryRunAssignment=assignment_query,
@@ -683,8 +691,68 @@ def test_fail_run_hands_back_a_clean_route(mock_scope):
     result = DeliveryRunAssignmentService.fail_run("DEL_1", "RUN_1")
 
     assert result["status"] == DeliveryRunStatus.RIDER_ASSIGNMENT.value
+    assert result["recovery_needed"] is False
     assert assignment.status == AssignmentStatus.FAILED
-    for stop in (arrived, collected):
+    for stop in (arrived, also_arrived):
         assert stop.status == DeliveryRunStopStatus.PENDING
         assert stop.arrived_at is None
         assert stop.picked_up_at is None
+
+
+@patch("app.deliveries.run_assignment.session_scope")
+def test_fail_run_holds_a_run_whose_parcels_are_already_in_the_bag(mock_scope):
+    """Abandoning a run after collecting is not the same act.
+
+    Before the first pickup nothing has moved and the run can be handed
+    to somebody else as if it were new. After it, the parcels are in
+    this rider's bag -- and reopening the run tells the next rider to
+    collect goods the shopkeeper has already handed over, then sends
+    them to a door with nothing to deliver.
+
+    So it is held at RIDER_FAILED rather than reopened, and the stops
+    are left alone: the record that a shop has been emptied is the only
+    thing pointing at where the goods went.
+    """
+    assignment = SimpleNamespace(status=AssignmentStatus.ACCEPTED)
+    run = SimpleNamespace(id="RUN_1", status=DeliveryRunStatus.PICKUP_IN_PROGRESS)
+    run.transition_to = lambda new_status, _r=run: DeliveryRun.transition_to(
+        _r, new_status
+    )
+    collected = SimpleNamespace(
+        status=DeliveryRunStopStatus.PICKED_UP, arrived_at="then", picked_up_at="then"
+    )
+    untouched = SimpleNamespace(
+        status=DeliveryRunStopStatus.PENDING, arrived_at=None, picked_up_at=None
+    )
+
+    session = MagicMock()
+
+    def assignment_query(m):
+        m.filter_by.return_value.first.return_value = assignment
+
+    def run_query(m):
+        m.filter_by.return_value.with_for_update.return_value.first.return_value = run
+
+    def stop_query(m):
+        m.filter_by.return_value.all.return_value = [collected, untouched]
+
+    session.query.side_effect = _query_side_effect(
+        DeliveryRunAssignment=assignment_query,
+        DeliveryRun=run_query,
+        DeliveryRunStop=stop_query,
+    )
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = DeliveryRunAssignmentService.fail_run("DEL_1", "RUN_1", reason="accident")
+
+    assert result["recovery_needed"] is True
+    assert result["status"] == DeliveryRunStatus.RIDER_FAILED.value
+    # Not back on the board.
+    assert run.status == DeliveryRunStatus.RIDER_FAILED
+    # The rider is released either way -- they are not still carrying a
+    # job they cannot do.
+    assert assignment.status == AssignmentStatus.FAILED
+    # And the collection record survives, because it is the only thing
+    # saying where the goods are.
+    assert collected.status == DeliveryRunStopStatus.PICKED_UP
+    assert collected.picked_up_at == "then"

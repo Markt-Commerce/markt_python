@@ -530,16 +530,55 @@ class DeliveryRunAssignmentService:
             except ValueError:
                 raise ConflictError(f"Cannot fail a run at status {run.status.value}")
 
-            # The pickup progress belonged to the rider who left, not
-            # to the run. Without this the next rider inherits stops
-            # already marked ARRIVED, or PICKED_UP for parcels that are
-            # in somebody else's bag -- so the shop they actually have
-            # to visit is the one the app tells them is done.
             from .models import DeliveryRunStop, DeliveryRunStopStatus
 
-            for stop in (
+            stops = (
                 session.query(DeliveryRunStop).filter_by(delivery_run_id=run_id).all()
-            ):
+            )
+            # Has anything actually left a shop?
+            #
+            # This is the whole question. Before the first pickup,
+            # nothing has moved: the run can be handed to someone else
+            # as if it were new. After it, parcels are in this rider's
+            # bag, and reopening the run tells the next rider to
+            # collect goods the shopkeeper has already handed over.
+            carrying = any(
+                stop.status == DeliveryRunStopStatus.PICKED_UP for stop in stops
+            )
+
+            if carrying:
+                # Left at RIDER_FAILED deliberately, not reopened. The
+                # run cannot be worked by anybody until the parcels
+                # this rider is holding are recovered, and there is no
+                # flow for that -- so the honest thing is to stop here
+                # and let a person pick it up, rather than put a run on
+                # the board whose goods are in a stranger's bag.
+                #
+                # RIDER_FAILED -> RIDER_ASSIGNMENT stays a legal
+                # transition, so resuming it later is a decision
+                # someone makes, not one this makes for them.
+                logger.error(
+                    "Run %s failed by rider %s after collecting from %s shop(s) "
+                    "-- held at RIDER_FAILED, parcels need recovering",
+                    run_id,
+                    user_id,
+                    sum(
+                        1
+                        for stop in stops
+                        if stop.status == DeliveryRunStopStatus.PICKED_UP
+                    ),
+                )
+                return {
+                    "run_id": run_id,
+                    "status": run.status.value,
+                    "recovery_needed": True,
+                }
+
+            # Nothing collected, so the progress that exists is just
+            # "I arrived" -- which belonged to the rider who left, not
+            # to the run. Clearing it stops the next rider being told
+            # they have already visited a shop they have never seen.
+            for stop in stops:
                 stop.status = DeliveryRunStopStatus.PENDING
                 stop.arrived_at = None
                 stop.picked_up_at = None
@@ -558,4 +597,8 @@ class DeliveryRunAssignmentService:
                 reason or "no reason given",
             )
 
-            return {"run_id": run_id, "status": run.status.value}
+            return {
+                "run_id": run_id,
+                "status": run.status.value,
+                "recovery_needed": False,
+            }
