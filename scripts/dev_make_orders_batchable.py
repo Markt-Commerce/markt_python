@@ -51,6 +51,20 @@ def main() -> int:
         action="store_true",
         help="Say what would change and change nothing.",
     )
+    parser.add_argument(
+        "--close-now",
+        action="store_true",
+        help=(
+            "Push the resulting run all the way to RIDER_ASSIGNMENT, which "
+            "is the only status riders can see. Attaching an order leaves "
+            "the run OPEN until its cutoff (two hours out), and a run with "
+            "fewer than THIN_VOLUME_THRESHOLD orders is cancelled at that "
+            "cutoff unless its buyers consented to the single-drop "
+            "fallback -- so a two-order test run left alone quietly "
+            "disappears instead of reaching anybody. This records that "
+            "consent, brings the cutoff forward, and runs the close pass."
+        ),
+    )
     args = parser.parse_args()
 
     from main.setup import create_flask_app
@@ -157,7 +171,66 @@ def main() -> int:
                 "the address -- run scripts/seed_markets_and_areas.py "
                 "--backfill first."
             )
+
+        if args.close_now:
+            _close_now(session, [order.id for order in orders])
+
+        from app.deliveries.models import DeliveryRun, DeliveryRunOrder
+
+        for run in session.query(DeliveryRun).all():
+            count = (
+                session.query(DeliveryRunOrder)
+                .filter_by(delivery_run_id=run.id)
+                .count()
+            )
+            print(
+                f"  {run.id}: {run.status.value}, {count} order(s), "
+                f"base_price={run.base_price}"
+            )
     return 0
+
+
+def _close_now(session, order_ids):
+    """Take the runs these orders landed in as far as RIDER_ASSIGNMENT."""
+    from datetime import datetime as dt
+
+    from app.deliveries.models import DeliveryRun, DeliveryRunOrder, DeliveryRunStatus
+    from app.deliveries.runs import DeliveryRunService, THIN_VOLUME_THRESHOLD
+
+    run_orders = (
+        session.query(DeliveryRunOrder)
+        .filter(DeliveryRunOrder.order_id.in_(order_ids))
+        .all()
+    )
+    run_ids = {run_order.delivery_run_id for run_order in run_orders}
+    if not run_ids:
+        print("\nNothing attached, so nothing to close.")
+        return
+
+    for run_id in run_ids:
+        attached = (
+            session.query(DeliveryRunOrder).filter_by(delivery_run_id=run_id).all()
+        )
+        if len(attached) < THIN_VOLUME_THRESHOLD:
+            # Without this every order on a thin run is free-cancelled at
+            # cutoff and the run is cancelled with it. Recording consent
+            # is what a buyer choosing "go now" in the app would do.
+            print(
+                f"\n  {run_id} has {len(attached)} order(s), under the "
+                f"thin-volume threshold of {THIN_VOLUME_THRESHOLD} -- "
+                "recording fallback consent so it survives its cutoff."
+            )
+            for run_order in attached:
+                run_order.fallback_consent = True
+
+        run = session.query(DeliveryRun).filter_by(id=run_id).first()
+        if run and run.status == DeliveryRunStatus.OPEN:
+            run.cutoff_at = dt.utcnow()
+
+    session.commit()
+
+    closed = DeliveryRunService.close_runs_past_cutoff()
+    print(f"  Close pass: {closed}")
 
 
 if __name__ == "__main__":
