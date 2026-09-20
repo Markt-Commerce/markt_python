@@ -1,11 +1,19 @@
 """Typed delivery-failure reporting and recovery resolution (10.7).
 
-Scope: wired to the run-based delivery flow only (DeliveryRunAssignment/
-DeliveryRunOrder) -- the pre-existing single-order flow
-(DeliveryOrderAssignment) has no equivalent failure-reporting path yet,
-left unwired here (flagged in the Implementation Checklist) rather than
-guessed at, since its assignment/auth shape is different enough to need
-its own consideration.
+Both delivery models report through here. The run flow came first; the
+single-order flow had no failure path at all, so a rider at a door with
+nobody behind it could complete the delivery, or abandon it, and
+nothing else -- there was no way to say what had happened. The
+DeliveryFailure row is the same shape either way, which the table
+already anticipated: delivery_run_id is nullable and its docstring says
+"within a run or otherwise".
+
+What differs is only what it does to the rider's own assignment. A run
+carries other orders, so the rider keeps it and works on. A single
+order is the whole job, so their assignment goes to FAILED -- which
+frees their concurrency slot, drops it out of "carrying", and puts the
+order back on the board for someone else. AssignmentStatus.FAILED was
+added for exactly this and was, until now, unreachable from this path.
 
 Reporting (report_failure) is rider-authenticated, same pattern as the
 rest of this run-delivery surface. Resolving *what happens next*
@@ -25,7 +33,7 @@ from app.libs.session import session_scope
 from app.notifications.models import NotificationType
 from app.notifications.services import NotificationService
 from app.orders.events import ActorType, OrderEventService, OrderEventType
-from app.orders.models import OrderItem
+from app.orders.models import Order, OrderItem
 
 from .models import (
     AssignmentStatus,
@@ -33,9 +41,11 @@ from .models import (
     DeliveryFailure,
     DeliveryFailureOutcome,
     DeliveryFailureReason,
+    DeliveryOrderAssignment,
     DeliveryRecoveryAction,
     DeliveryRunAssignment,
     DeliveryRunOrder,
+    LogisticalStatus,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,6 +71,58 @@ def _serialize(failure: DeliveryFailure) -> dict:
         "resolved_at": failure.resolved_at,
         "completed_at": failure.completed_at,
     }
+
+
+def _is_perishable(session, order) -> bool:
+    """10.5: perishables need the fastest recovery path, so this is
+    computed once at report time rather than re-derived by whoever picks
+    the failure up."""
+    product_ids = {
+        item.product_id
+        for item in (getattr(order, "items", None) or [])
+        if item.status != OrderItem.Status.CANCELLED
+    }
+    if not product_ids:
+        return False
+    return (
+        session.query(ProductHandling)
+        .filter(
+            ProductHandling.product_id.in_(product_ids),
+            ProductHandling.handling_class == HandlingClass.PERISHABLE,
+        )
+        .first()
+        is not None
+    )
+
+
+def _notify_buyer_of_failure(buyer_user_id, order_id, reason) -> None:
+    """Told after the transaction commits, never inside it.
+
+    create_notification opens its own session_scope, so calling it while
+    the caller's transaction is still open would commit that transaction
+    early -- see app.fulfilment.rerouting._notify_buyer_item_unfulfilled
+    for the fuller story.
+    """
+    if not buyer_user_id:
+        return
+    try:
+        NotificationService.create_notification(
+            user_id=buyer_user_id,
+            notification_type=NotificationType.DELIVERY_FAILED,
+            reference_type="order",
+            reference_id=order_id,
+            metadata_={
+                "message": (
+                    "A delivery attempt for your order failed. "
+                    "We're working on next steps."
+                ),
+                "reason": reason.value,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Failed to notify buyer of delivery failure for order %s", order_id
+        )
 
 
 class DeliveryFailureService:
@@ -97,22 +159,7 @@ class DeliveryFailureService:
             if not run_order:
                 raise NotFoundError("Order not attached to this run")
 
-            active_item_product_ids = {
-                item.product_id
-                for item in run_order.order.items
-                if item.status != OrderItem.Status.CANCELLED
-            }
-            is_perishable = False
-            if active_item_product_ids:
-                is_perishable = (
-                    session.query(ProductHandling)
-                    .filter(
-                        ProductHandling.product_id.in_(active_item_product_ids),
-                        ProductHandling.handling_class == HandlingClass.PERISHABLE,
-                    )
-                    .first()
-                    is not None
-                )
+            is_perishable = _is_perishable(session, run_order.order)
 
             failure = DeliveryFailure(
                 delivery_run_id=run_id,
@@ -178,26 +225,107 @@ class DeliveryFailureService:
         # commit that transaction early (see
         # app.fulfilment.rerouting._notify_buyer_item_unfulfilled's own
         # docstring for the fuller story on why that matters).
-        if buyer_user_id:
-            try:
-                NotificationService.create_notification(
-                    user_id=buyer_user_id,
-                    notification_type=NotificationType.DELIVERY_FAILED,
-                    reference_type="order",
-                    reference_id=order_id,
-                    metadata_={
-                        "message": (
-                            "A delivery attempt for your order failed. "
-                            "We're working on next steps."
-                        ),
-                        "reason": reason.value,
-                    },
+        _notify_buyer_of_failure(buyer_user_id, order_id, reason)
+
+        return result
+
+    @staticmethod
+    def report_single_order_failure(
+        user_id: str,
+        assignment_id: str,
+        reason: DeliveryFailureReason,
+        notes: Optional[str] = None,
+    ) -> dict:
+        """A rider reports that a single-order delivery could not be made.
+
+        The run flow has had this since 10.7; the single-order flow had
+        nothing. A rider at a door with nobody behind it could mark the
+        delivery complete, which is a lie, or walk away and leave the
+        assignment open forever. Neither told the buyer anything.
+
+        The recorded failure is identical to a run's -- same table, same
+        reason enum, same admin-gated resolution -- with delivery_run_id
+        left null, which is what that nullable column is for.
+
+        What differs is the rider's own assignment. A run carries other
+        orders and the rider works on; a single order is the whole job,
+        so the assignment goes to FAILED. That frees their concurrency
+        slot, drops it out of "carrying", and -- because
+        get_available_orders only hides orders with an ACCEPTED
+        assignment -- puts it back on the board for someone else.
+
+        Deliberately no cooldown against the reporting rider: a bad
+        address is a bad address for the next rider too, and the honest
+        answer to that is a support decision (resolve_failure), not a
+        timer. Worth revisiting if riders start bouncing orders.
+        """
+        with session_scope() as session:
+            assignment = (
+                session.query(DeliveryOrderAssignment)
+                .filter_by(
+                    assignment_id=assignment_id,
+                    delivery_user_id=user_id,
+                    status=AssignmentStatus.ACCEPTED,
                 )
-            except Exception:
-                logger.exception(
-                    "Failed to notify buyer of delivery failure for order %s",
-                    order_id,
-                )
+                .first()
+            )
+            if not assignment:
+                raise NotFoundError("No active delivery found to report")
+
+            if assignment.logistical_status == LogisticalStatus.COMPLETED:
+                raise ConflictError("This delivery is already confirmed as delivered")
+
+            order_id = assignment.order_id
+            order = session.query(Order).filter_by(id=order_id).first()
+
+            failure = DeliveryFailure(
+                # Null: there is no run. The column is nullable for
+                # exactly this case.
+                delivery_run_id=None,
+                order_id=order_id,
+                reason=reason,
+                reported_by_delivery_user_id=user_id,
+                report_notes=notes,
+                is_perishable=_is_perishable(session, order),
+                outcome=DeliveryFailureOutcome.PENDING,
+            )
+            session.add(failure)
+            session.flush()
+
+            OrderEventService.emit(
+                session,
+                order_id=order_id,
+                event_type=OrderEventType.ITEM_DELIVERY_FAILED,
+                actor_type=ActorType.RIDER,
+                actor_id=user_id,
+                metadata={"reason": reason.value, "assignment_id": assignment_id},
+            )
+
+            # The one state change the buyer most needs to see.
+            from app.delivery_pricing.order_delivery import (
+                DeliveryState,
+                advance_buyer_delivery,
+            )
+
+            advance_buyer_delivery(session, order_id, DeliveryState.FAILED)
+
+            # Releases the rider, and the order with them.
+            assignment.status = AssignmentStatus.FAILED
+
+            buyer_user_id = getattr(
+                getattr(getattr(order, "buyer", None), "user", None), "id", None
+            )
+
+            logger.warning(
+                "Single-order delivery failure: order %s, assignment %s, " "reason %s",
+                order_id,
+                assignment_id,
+                reason.value,
+            )
+
+            result = _serialize(failure)
+
+        _notify_buyer_of_failure(buyer_user_id, order_id, reason)
 
         return result
 
