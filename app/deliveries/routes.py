@@ -29,6 +29,8 @@ from .schemas import (
     DeliveryPartnerPhotoResponseSchema,
     DeliveryPartnerUpdateSchema,
     DeliveryActiveAssignmentsResponseSchema,
+    DeliveryJobHistoryQuerySchema,
+    DeliveryJobHistoryResponseSchema,
     LogisticStatusUpdateSchema,
     DeliveryOrderQRResponseSchema,
     DeliveryOrderQRConfirmRequestSchema,
@@ -222,6 +224,26 @@ class DeliveryActiveAssignments(MethodView):
     def get(self):
         """Get active assignments for the delivery partner"""
         return DeliveryService.get_active_assignments(current_user.id)
+
+
+@bp.route("/assignments/history")
+class DeliveryJobHistory(MethodView):
+    @login_required
+    @bp.arguments(DeliveryJobHistoryQuerySchema, location="query")
+    @bp.response(200, DeliveryJobHistoryResponseSchema)
+    def get(self, query):
+        """Every delivery this rider has taken, newest first.
+
+        /assignments/active only ever showed what they are carrying now,
+        so there was nowhere to answer "what did I deliver on Tuesday"
+        or to tie a wallet credit back to the job that earned it.
+        """
+        return DeliveryService.get_job_history(
+            current_user.id,
+            status=query.get("status"),
+            page=query.get("page", 1),
+            per_page=query.get("per_page", 20),
+        )
 
 
 @bp.route("/assignments/<string:assignment_id>/status")

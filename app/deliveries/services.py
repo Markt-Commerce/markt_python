@@ -1083,6 +1083,120 @@ class DeliveryService:
             )
         return lines
 
+    # What a rider can filter their own history by. Deliberately their
+    # words rather than the enum's: a rider thinks "did I deliver it or
+    # did something go wrong", not in terms of LogisticalStatus members.
+    JOB_FILTERS = {
+        "active": "Still carrying",
+        "completed": "Delivered",
+    }
+
+    @staticmethod
+    def get_job_history(
+        user_id: str, status: Optional[str] = None, page: int = 1, per_page: int = 20
+    ) -> Dict:
+        """Every delivery this rider has taken, newest first.
+
+        There was no way to see past work at all. The active list is the
+        only assignment endpoint, and it shows what a rider is carrying
+        right now -- so a rider asking "what did I deliver on Tuesday",
+        or checking a payout that looks short, had the earnings ledger
+        and nothing to tie its rows back to. The wallet says a number
+        arrived; this says which job it was for.
+        """
+        with session_scope() as session:
+            query = session.query(DeliveryOrderAssignment).filter(
+                DeliveryOrderAssignment.delivery_user_id == user_id,
+                DeliveryOrderAssignment.status == AssignmentStatus.ACCEPTED,
+            )
+
+            if status == "completed":
+                query = query.filter(
+                    DeliveryOrderAssignment.logistical_status
+                    == LogisticalStatus.COMPLETED
+                )
+            elif status == "active":
+                query = query.filter(
+                    (DeliveryOrderAssignment.logistical_status.is_(None))
+                    | (
+                        DeliveryOrderAssignment.logistical_status
+                        != LogisticalStatus.COMPLETED
+                    )
+                )
+
+            total = query.count()
+            rows = (
+                query.options(
+                    joinedload(DeliveryOrderAssignment.order).joinedload(
+                        Order.shipping_address
+                    ),
+                    joinedload(DeliveryOrderAssignment.order)
+                    .joinedload(Order.items)
+                    .joinedload(OrderItem.seller),
+                )
+                .order_by(DeliveryOrderAssignment.assigned_at.desc())
+                .offset((max(page, 1) - 1) * per_page)
+                .limit(per_page)
+                .all()
+            )
+
+            jobs = []
+            for assignment in rows:
+                order = assignment.order
+                seller = None
+                if order is not None:
+                    seller = next(
+                        (
+                            item.seller
+                            for item in order.items
+                            if item.seller is not None
+                        ),
+                        None,
+                    )
+                jobs.append(
+                    {
+                        "assignment_id": assignment.assignment_id,
+                        "order_id": assignment.order_id,
+                        "order_number": getattr(order, "order_number", None),
+                        "assigned_at": assignment.assigned_at,
+                        "logistical_status": (
+                            assignment.logistical_status.value
+                            if assignment.logistical_status
+                            else None
+                        ),
+                        "seller_name": (
+                            getattr(seller, "shop_name", None) if seller else None
+                        ),
+                        "seller_image": DeliveryService._shop_image(seller),
+                        "dropoff_address": (
+                            DeliveryService._assignment_parties(order).get(
+                                "dropoff_address"
+                            )
+                            if order is not None
+                            else None
+                        ),
+                        # What this job paid. Read from the order's own
+                        # shipping fee through the same function the
+                        # payout uses, so the history cannot quietly
+                        # disagree with the wallet.
+                        "earnings": (
+                            earning_for_drop(order.shipping_fee, stops=1)
+                            if order is not None
+                            else None
+                        ),
+                    }
+                )
+
+            return {
+                "jobs": jobs,
+                "pagination": {
+                    "page": page,
+                    "per_page": per_page,
+                    "total_items": total,
+                    "total_pages": (total + per_page - 1) // per_page,
+                },
+            }
+
     @staticmethod
     def _shop_address_line(seller) -> Optional[str]:
         """Seller.shop_address is a JSON blob; a rider needs one line."""
