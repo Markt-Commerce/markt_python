@@ -200,9 +200,26 @@ class ActiveAssignmentSchema(Schema):
     seller_image = fields.String(allow_none=True)
     pickup_address = fields.String(allow_none=True)
     seller_phone = fields.String(allow_none=True)
+    # What is actually in the parcel. A rider was given a count and sent
+    # to a stall, with nothing to check against what they were handed.
+    #
+    # Sourced from `parcel`, not `items`, while staying `items` on the
+    # wire. Marshmallow resolves a missing key by falling back to
+    # getattr, and every dict has an `.items` method -- so a partial dump
+    # that happened not to carry this key handed the serialiser a bound
+    # method to iterate and raised TypeError instead of omitting a field.
+    items = fields.List(fields.Nested("ParcelLineSchema"), attribute="parcel")
     buyer_name = fields.String(allow_none=True)
     dropoff_address = fields.String(allow_none=True)
     buyer_phone = fields.String(allow_none=True)
+
+
+class ParcelLineSchema(Schema):
+    """One line of what the rider is collecting."""
+
+    name = fields.String()
+    quantity = fields.Integer()
+    variant = fields.String(allow_none=True)
 
 
 # Request and response schema for updating logistical status of an active assignment
