@@ -369,6 +369,10 @@ class DeliveryRunOrderDetailSchema(Schema):
     order_id = fields.String()
     order_number = fields.String(allow_none=True)
     buyer_name = fields.String(allow_none=True)
+    # Sourced from `parcel`, not `items` -- see ActiveAssignmentSchema
+    # for why a field called `items` on a dict source is a trap.
+    items = fields.List(fields.Nested("ParcelLineSchema"), attribute="parcel")
+    buyer_phone = fields.String(allow_none=True)
     delivery_address = fields.Nested(DeliveryRunOrderAddressSchema, allow_none=True)
     pod_status = fields.String(
         validate=validate.OneOf(["pending", "qr_issued", "delivered"])

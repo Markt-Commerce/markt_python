@@ -1468,6 +1468,67 @@ class DeliveryService:
     }
 
     @staticmethod
+    def notify_run_progress(
+        session, order_ids, rider_name: Optional[str], buyer_text, seller_text
+    ) -> list:
+        """Gather who to tell about a batched run reaching a step.
+
+        Returns the payloads rather than sending them, because this
+        runs inside the transaction that recorded the movement and
+        create_notification opens its own session_scope. The caller
+        sends them after the commit -- same discipline as the
+        single-order path, which is the one that had any of this.
+        """
+        notices = []
+        if not order_ids:
+            return notices
+
+        try:
+            orders = (
+                session.query(Order)
+                .options(
+                    joinedload(Order.buyer),
+                    joinedload(Order.items).joinedload(OrderItem.seller),
+                )
+                .filter(Order.id.in_(list(order_ids)))
+                .all()
+            )
+        except Exception:
+            logger.exception("Could not work out who to notify about %s", order_ids)
+            return notices
+
+        for order in orders:
+            buyer_user = getattr(getattr(order, "buyer", None), "user", None)
+            seller_user_ids = []
+            for item in getattr(order, "items", None) or []:
+                seller_user_id = getattr(getattr(item, "seller", None), "user_id", None)
+                if seller_user_id and seller_user_id not in seller_user_ids:
+                    seller_user_ids.append(seller_user_id)
+
+            notices.append(
+                {
+                    "order_id": order.id,
+                    "order_number": order.order_number,
+                    "buyer_user_id": getattr(buyer_user, "id", None),
+                    "seller_user_ids": seller_user_ids,
+                    "rider_name": rider_name or "Your rider",
+                }
+            )
+
+        return [(audience, buyer_text, seller_text) for audience in notices]
+
+    @staticmethod
+    def send_run_notices(notices) -> None:
+        """Send what notify_run_progress gathered, after the commit."""
+        for audience, buyer_text, seller_text in notices or []:
+            DeliveryService._send_delivery_notice(
+                audience,
+                buyer_text=buyer_text,
+                seller_text=seller_text,
+                status_value="RUN",
+            )
+
+    @staticmethod
     def _delivery_audience(session, assignment) -> Dict:
         """The people behind one assignment, as plain values.
 
