@@ -341,6 +341,16 @@ class DeliveryRunFailRequestSchema(Schema):
     reason = fields.String(allow_none=True)
 
 
+class DeliveryRunFailResponseSchema(Schema):
+    run_id = fields.String()
+    status = fields.String()
+    # True when the rider was already carrying parcels, which is the
+    # case the run cannot simply be handed to somebody else. It is held
+    # at RIDER_FAILED for recovery rather than reopened, and the app
+    # tells the rider somebody will be in touch about what they have.
+    recovery_needed = fields.Boolean()
+
+
 class DeliveryRunStopDetailSchema(Schema):
     seller_id = fields.Integer()
     seller_name = fields.String(allow_none=True)
