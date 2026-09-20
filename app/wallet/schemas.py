@@ -85,6 +85,9 @@ class SellerPayoutAccountResponseSchema(Schema):
 
 
 class BankSchema(Schema):
+    # Paystack's own id. `code` is what a transfer is addressed to, but
+    # it is not unique across their list, so it cannot be a list key.
+    id = fields.Int(allow_none=True)
     name = fields.Str()
     code = fields.Str()
     slug = fields.Str(allow_none=True)
