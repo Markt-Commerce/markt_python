@@ -396,6 +396,27 @@ class DeliveryRunOrderPodConfirm(MethodView):
         )
 
 
+@bp.route("/assignments/<string:assignment_id>/report-failure")
+class DeliveryAssignmentReportFailure(MethodView):
+    @login_required
+    @bp.arguments(DeliveryFailureReportRequestSchema, location="json")
+    @bp.response(200, DeliveryFailureSchema)
+    def post(self, data, assignment_id):
+        """A rider reports that a single-order delivery could not be
+        made.
+
+        The run flow has had this since 10.7. A rider on a single order
+        could only mark it delivered or walk away, so "nobody was
+        home" had nowhere to go and the buyer heard nothing.
+        """
+        return DeliveryFailureService.report_single_order_failure(
+            current_user.id,
+            assignment_id,
+            DeliveryFailureReason(data["reason"]),
+            notes=data.get("notes"),
+        )
+
+
 @bp.route("/runs/<string:run_id>/orders/<string:order_id>/report-failure")
 class DeliveryRunOrderReportFailure(MethodView):
     @login_required
