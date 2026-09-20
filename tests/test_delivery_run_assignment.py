@@ -157,6 +157,8 @@ def test_accept_run_success(mock_create_stops):
 
     def assignment_query(m):
         m.filter_by.return_value.first.return_value = None
+        # And the "are you already on a run" check, a join.
+        m.join.return_value.filter.return_value.first.return_value = None
 
     session.query.side_effect = _query_side_effect(
         DeliveryRun=run_query,
@@ -206,6 +208,8 @@ def test_accept_run_raises_conflict_when_already_rejected():
 
     def assignment_query(m):
         m.filter_by.return_value.first.return_value = already_rejected
+        # And the "are you already on a run" check, a join.
+        m.join.return_value.filter.return_value.first.return_value = None
 
     session.query.side_effect = _query_side_effect(
         DeliveryRun=run_query,
@@ -455,6 +459,11 @@ def test_get_run_detail_builds_stops_and_orders(mock_accepted):
             "order_id": "ORD_1",
             "order_number": "1001",
             "buyer_name": "Ada",
+            # A run's drops carry a number and a manifest now: a rider
+            # at the wrong gate could not call anyone, and four bags
+            # from one shop had nothing tying each to its buyer.
+            "buyer_phone": None,
+            "parcel": [],
             "delivery_address": {
                 "street_address": "1 Main St",
                 "city": "Ibadan",
@@ -509,7 +518,8 @@ def test_get_run_detail_handles_missing_seller_and_order(mock_accepted):
         m.filter_by.return_value.all.return_value = [run_order]
 
     def order_query(m):
-        m.options.return_value.get.return_value = None
+        # Fetched in one filtered query now, and this order is missing.
+        m.options.return_value.filter.return_value.all.return_value = []
 
     session.query.side_effect = _query_side_effect(
         DeliveryRun=run_query,
@@ -539,6 +549,8 @@ def test_get_run_detail_handles_missing_seller_and_order(mock_accepted):
             "order_id": "ORD_1",
             "order_number": None,
             "buyer_name": None,
+            "buyer_phone": None,
+            "parcel": [],
             "delivery_address": None,
             "pod_status": DeliveryRunOrderPodStatus.PENDING.value,
             "delivered_at": None,
@@ -574,3 +586,105 @@ def test_get_active_run_delegates_to_get_run_detail(mock_get_detail):
 
     assert result == {"run_id": "RUN_9"}
     mock_get_detail.assert_called_once_with("DEL_1", "RUN_9")
+
+
+@patch("app.deliveries.run_assignment.session_scope")
+def test_accept_run_refuses_a_rider_who_is_already_on_one(mock_scope):
+    """One run at a time.
+
+    Single orders have been capped since offers existed; runs had no
+    cap at all. And get_active_run returns only the most recent
+    accepted assignment -- so a rider taking a second run did not get
+    two, they got the new one and lost the route back to the first,
+    with its buyers still waiting and nothing in the app pointing at
+    them.
+    """
+    run = SimpleNamespace(
+        id="RUN_2", status=DeliveryRunStatus.RIDER_ASSIGNMENT, run_orders=[]
+    )
+    run.transition_to = lambda new_status, _r=run: DeliveryRun.transition_to(
+        _r, new_status
+    )
+    delivery_user = SimpleNamespace(
+        id="DEL_1", status=DeliveryStatus.ACTIVE, name="Ada"
+    )
+
+    session = MagicMock()
+
+    def run_query(m):
+        m.filter_by.return_value.with_for_update.return_value.first.return_value = run
+
+    def user_query(m):
+        m.filter_by.return_value.first.return_value = delivery_user
+
+    def assignment_query(m):
+        m.filter_by.return_value.first.return_value = None
+        # Already carrying RUN_1.
+        m.join.return_value.filter.return_value.first.return_value = SimpleNamespace(
+            delivery_run_id="RUN_1"
+        )
+
+    session.query.side_effect = _query_side_effect(
+        DeliveryRun=run_query,
+        DeliveryUser=user_query,
+        DeliveryRunAssignment=assignment_query,
+    )
+    mock_scope.return_value.__enter__.return_value = session
+
+    with pytest.raises(ConflictError):
+        DeliveryRunAssignmentService.accept_run("DEL_1", "RUN_2")
+
+    # The run they tried to take is left exactly where it was, for
+    # whoever does have a free slot.
+    assert run.status == DeliveryRunStatus.RIDER_ASSIGNMENT
+    session.add.assert_not_called()
+
+
+@patch("app.deliveries.run_assignment.session_scope")
+def test_fail_run_hands_back_a_clean_route(mock_scope):
+    """Pickup progress belongs to the rider who left, not to the run.
+
+    fail_run reopens the run for someone else, and it used to leave
+    every stop exactly as the departing rider had marked it -- so the
+    next rider was told they had already arrived at a shop they had
+    never seen, or that parcels sitting in somebody else's bag were
+    collected.
+    """
+    run = SimpleNamespace(id="RUN_1", status=DeliveryRunStatus.PICKUP_IN_PROGRESS)
+    run.transition_to = lambda new_status, _r=run: DeliveryRun.transition_to(
+        _r, new_status
+    )
+    assignment = SimpleNamespace(status=AssignmentStatus.ACCEPTED)
+    arrived = SimpleNamespace(
+        status=DeliveryRunStopStatus.ARRIVED, arrived_at="then", picked_up_at=None
+    )
+    collected = SimpleNamespace(
+        status=DeliveryRunStopStatus.PICKED_UP, arrived_at="then", picked_up_at="then"
+    )
+
+    session = MagicMock()
+
+    def assignment_query(m):
+        m.filter_by.return_value.first.return_value = assignment
+
+    def run_query(m):
+        m.filter_by.return_value.with_for_update.return_value.first.return_value = run
+
+    def stop_query(m):
+        m.filter_by.return_value.all.return_value = [arrived, collected]
+
+    session.query.side_effect = _query_side_effect(
+        DeliveryRunAssignment=assignment_query,
+        DeliveryRun=run_query,
+        DeliveryRunStop=stop_query,
+    )
+    mock_scope.return_value.__enter__.return_value = session
+
+    result = DeliveryRunAssignmentService.fail_run("DEL_1", "RUN_1")
+
+    assert result["status"] == DeliveryRunStatus.RIDER_ASSIGNMENT.value
+    assert assignment.status == AssignmentStatus.FAILED
+    for stop in (arrived, collected):
+        assert stop.status == DeliveryRunStopStatus.PENDING
+        assert stop.arrived_at is None
+        assert stop.picked_up_at is None

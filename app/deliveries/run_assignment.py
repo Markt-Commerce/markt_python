@@ -172,6 +172,42 @@ class DeliveryRunAssignmentService:
             if delivery_user.status == DeliveryStatus.SUSPENDED:
                 raise ForbiddenError("Your account has been suspended")
 
+            # One run at a time.
+            #
+            # Single orders have been capped at MAX_CONCURRENT_ORDERS
+            # since offers existed; runs had no cap at all. Worse,
+            # get_active_run returns only the most recent accepted
+            # assignment -- so a rider who took a second run did not
+            # get two, they got the new one and lost the route to the
+            # first, with its buyers still waiting and no way back to
+            # them in the app.
+            #
+            # A run is already several orders. Two at once is not a
+            # rider working harder, it is a rider who cannot see half
+            # of what they are carrying.
+            live = (
+                session.query(DeliveryRunAssignment)
+                .join(
+                    DeliveryRun,
+                    DeliveryRun.id == DeliveryRunAssignment.delivery_run_id,
+                )
+                .filter(
+                    DeliveryRunAssignment.delivery_user_id == user_id,
+                    DeliveryRunAssignment.delivery_run_id != run_id,
+                    DeliveryRunAssignment.status == AssignmentStatus.ACCEPTED,
+                    DeliveryRun.status.in_(
+                        (
+                            DeliveryRunStatus.RIDER_ACCEPTED,
+                            DeliveryRunStatus.PICKUP_IN_PROGRESS,
+                            DeliveryRunStatus.DELIVERY_IN_PROGRESS,
+                        )
+                    ),
+                )
+                .first()
+            )
+            if live:
+                raise ConflictError("Finish the run you are on before taking another.")
+
             already_rejected = (
                 session.query(DeliveryRunAssignment)
                 .filter_by(
@@ -230,11 +266,30 @@ class DeliveryRunAssignmentService:
                     session, run_order.order_id, DeliveryState.ASSIGNED
                 )
 
-            return {
+            # The run flow sent no notifications at all. A buyer whose
+            # order was batched heard nothing from the moment they paid
+            # until the parcel turned up -- while a buyer on a single
+            # order got told at every step. Same delivery, same rider,
+            # entirely different experience depending on something the
+            # buyer never chose.
+            from app.deliveries.services import DeliveryService
+
+            notices = DeliveryService.notify_run_progress(
+                session,
+                [ro.order_id for ro in attached],
+                getattr(delivery_user, "name", None),
+                buyer_text="{rider} is collecting order {order} for you.",
+                seller_text="{rider} is on the way to collect order {order} from your shop.",
+            )
+
+            result = {
                 "run_id": run_id,
                 "status": run.status.value,
                 "assignment_id": assignment.id,
             }
+
+        DeliveryService.send_run_notices(notices)
+        return result
 
     @staticmethod
     def get_active_run(user_id: str) -> Dict:
@@ -278,7 +333,8 @@ class DeliveryRunAssignmentService:
         {run_id, status, assignment_id} -- no way to recover the stop/
         order list on app restart or after navigating away."""
         from app.deliveries.services import DeliveryService
-        from app.orders.models import Order
+        from app.orders.models import Order, OrderItem
+        from app.users.models import Buyer
 
         from .pickup import _accepted_assignment
         from .models import DeliveryRunOrder, DeliveryRunStop
@@ -314,8 +370,10 @@ class DeliveryRunAssignmentService:
                 for order in (
                     session.query(Order)
                     .options(
-                        joinedload(Order.buyer),
+                        joinedload(Order.buyer).joinedload(Buyer.user),
                         joinedload(Order.shipping_address),
+                        joinedload(Order.items).joinedload(OrderItem.product),
+                        joinedload(Order.items).joinedload(OrderItem.variant),
                     )
                     .filter(Order.id.in_([ro.order_id for ro in run_orders]))
                     .all()
@@ -332,6 +390,27 @@ class DeliveryRunAssignmentService:
                         "order_number": order.order_number if order else None,
                         "buyer_name": (
                             order.buyer.buyername if order and order.buyer else None
+                        ),
+                        # A run's drops had no phone number, so a rider at
+                        # the wrong gate on a batched delivery could not
+                        # call anyone -- while the same rider on a single
+                        # order could. Nothing about the two jobs makes
+                        # that difference reasonable.
+                        "buyer_phone": (
+                            getattr(
+                                getattr(getattr(order, "buyer", None), "user", None),
+                                "phone_number",
+                                None,
+                            )
+                            if order
+                            else None
+                        ),
+                        # Which parcel is whose. A rider carrying four
+                        # bags from the same shop had a buyer's name and
+                        # an address and nothing tying either to the bag
+                        # in their hand.
+                        "parcel": (
+                            DeliveryService._parcel_manifest(order) if order else []
                         ),
                         "delivery_address": (
                             {
@@ -450,6 +529,20 @@ class DeliveryRunAssignmentService:
                 run.transition_to(DeliveryRunStatus.RIDER_FAILED)
             except ValueError:
                 raise ConflictError(f"Cannot fail a run at status {run.status.value}")
+
+            # The pickup progress belonged to the rider who left, not
+            # to the run. Without this the next rider inherits stops
+            # already marked ARRIVED, or PICKED_UP for parcels that are
+            # in somebody else's bag -- so the shop they actually have
+            # to visit is the one the app tells them is done.
+            from .models import DeliveryRunStop, DeliveryRunStopStatus
+
+            for stop in (
+                session.query(DeliveryRunStop).filter_by(delivery_run_id=run_id).all()
+            ):
+                stop.status = DeliveryRunStopStatus.PENDING
+                stop.arrived_at = None
+                stop.picked_up_at = None
 
             # 10.7: reassignment where possible -- reopen immediately
             # rather than leaving it stranded at RIDER_FAILED for a

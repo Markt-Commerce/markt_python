@@ -38,6 +38,7 @@ from app.delivery_pricing.order_delivery import (
     DeliveryState,
     advance_buyer_delivery,
 )
+from app.deliveries.services import DeliveryService
 from app.libs.errors import ConflictError, NotFoundError, ValidationError
 from app.libs.session import session_scope
 from app.orders.events import ActorType, OrderEventService, OrderEventType
@@ -145,7 +146,8 @@ class DeliveryRunPickupService:
         -- once every stop in the run is done -- issues a POD QR per
         order and advances the run to DELIVERY_IN_PROGRESS."""
         with session_scope() as session:
-            if not _accepted_assignment(session, run_id, user_id):
+            assignment = _accepted_assignment(session, run_id, user_id)
+            if not assignment:
                 raise NotFoundError("No accepted assignment found for this run")
 
             run = session.query(DeliveryRun).filter_by(id=run_id).first()
@@ -207,13 +209,30 @@ class DeliveryRunPickupService:
                         session, run_order.order_id, DeliveryState.IN_TRANSIT
                     )
 
-            return {
+            # Everything is collected and the rider is moving, so every
+            # buyer on the run hears it. The run flow sent nothing at
+            # all before this -- a batched buyer's order went silent
+            # from payment until the parcel arrived.
+            notices = []
+            if remaining == 0:
+                notices = DeliveryService.notify_run_progress(
+                    session,
+                    [ro.order_id for ro in run_orders],
+                    getattr(getattr(assignment, "delivery_user", None), "name", None),
+                    buyer_text="{rider} has your order {order} and is on the way.",
+                    seller_text=None,
+                )
+
+            result = {
                 "delivery_run_id": run_id,
                 "seller_id": seller_id,
                 "status": stop.status.value,
                 "run_status": run.status.value,
                 "pod_issued_for_orders": issued_for_orders,
             }
+
+        DeliveryService.send_run_notices(notices)
+        return result
 
 
 class DeliveryRunPodService:
