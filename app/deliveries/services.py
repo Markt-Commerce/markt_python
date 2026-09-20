@@ -42,6 +42,10 @@ from .models import (
 )
 from app.notifications.models import NotificationType
 from app.notifications.services import NotificationService
+from app.delivery_pricing.order_delivery import (
+    DeliveryState,
+    advance_buyer_delivery,
+)
 from app.orders.events import ActorType, OrderEventService, OrderEventType
 from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
 from app.orders.services import OrderService
@@ -902,6 +906,10 @@ class DeliveryService:
             mine.expires_at = None
             session.flush()
 
+            # The buyer's tracker has a "Rider assigned" step and nothing
+            # was ever reaching it.
+            advance_buyer_delivery(session, order_id, DeliveryState.ASSIGNED)
+
             audience = DeliveryService._delivery_audience(session, mine)
             result = {
                 "status": AssignmentStatus.ASSIGNED.value,
@@ -1213,6 +1221,12 @@ class DeliveryService:
                         if item.status == OrderItem.Status.PROCESSING:
                             item.transition_to(OrderItem.Status.SHIPPED)
 
+            advance_buyer_delivery(
+                session,
+                assignment.order_id,
+                DeliveryService._BUYER_DELIVERY_STATE.get(logistical_status),
+            )
+
             # Who to tell, gathered while the session is still open.
             # NotificationService.create_notification opens its own
             # session_scope, so firing from in here would nest one
@@ -1249,6 +1263,20 @@ class DeliveryService:
     _SELLER_PROGRESS = {
         LogisticalStatus.ARRIVED_PICKUP: "{rider} is at your shop to collect order {order}.",
         LogisticalStatus.PICKED_UP: "{rider} has collected order {order} from your shop.",
+    }
+
+    # What the buyer's tracker should read at each step the rider reports.
+    #
+    # Coarser than LogisticalStatus on purpose: OrderDelivery.state is the
+    # buyer's view of their own parcel, and "the rider is standing in the
+    # shop" is not a state a buyer tracks. ARRIVED_PICKUP and
+    # DELIVERED_PENDING_QR are therefore absent -- the first is still
+    # ASSIGNED, and the second is still IN_TRANSIT, because a parcel at the
+    # door with the code not yet confirmed has not been delivered.
+    _BUYER_DELIVERY_STATE = {
+        LogisticalStatus.PICKED_UP: DeliveryState.PICKED_UP,
+        LogisticalStatus.EN_ROUTE_TO_DROPOFF: DeliveryState.IN_TRANSIT,
+        LogisticalStatus.COMPLETED: DeliveryState.DELIVERED,
     }
 
     @staticmethod
@@ -1392,11 +1420,31 @@ class DeliveryService:
                 .order_by(DeliveryOrderAssignment.assigned_at.desc())
                 .first()
             )
+            # A code that has already been used is not a code any more.
+            #
+            # This returned the escrow code for as long as the assignment
+            # existed, which is forever -- so after the rider had scanned
+            # it and gone, the buyer's app still offered "View my delivery
+            # code" and still drew a live QR for a delivery that was over.
+            # Nothing was listening for that code any more, and showing a
+            # spent one invites somebody to try it.
+            if (
+                assignment
+                and assignment.logistical_status == LogisticalStatus.COMPLETED
+            ):
+                return {
+                    "ready": False,
+                    "system": "single_order",
+                    "code": None,
+                    "delivered": True,
+                }
+
             if assignment and assignment.escrow_qr_code:
                 return {
                     "ready": True,
                     "system": "single_order",
                     "code": assignment.escrow_qr_code,
+                    "delivered": False,
                 }
 
             from .models import DeliveryRunOrder, DeliveryRunOrderPodStatus
@@ -1404,13 +1452,36 @@ class DeliveryService:
             run_order = (
                 session.query(DeliveryRunOrder).filter_by(order_id=order_id).first()
             )
+            if run_order and run_order.pod_status == (
+                DeliveryRunOrderPodStatus.DELIVERED
+            ):
+                return {
+                    "ready": False,
+                    "system": "run",
+                    "code": None,
+                    "delivered": True,
+                }
+
             if (
                 run_order
                 and run_order.pod_status == DeliveryRunOrderPodStatus.QR_ISSUED
             ):
-                return {"ready": True, "system": "run", "code": run_order.qr_code}
+                return {
+                    "ready": True,
+                    "system": "run",
+                    "code": run_order.qr_code,
+                    "delivered": False,
+                }
 
-            return {"ready": False, "system": None, "code": None}
+            # Not ready and not delivered: no rider yet, or a rider who
+            # has not finished collecting. The buyer is waiting, which is
+            # a different thing from being finished.
+            return {
+                "ready": False,
+                "system": None,
+                "code": None,
+                "delivered": False,
+            }
 
     @staticmethod
     def get_order_qr_code(user_id: str, order_id: str) -> Dict:
@@ -1499,6 +1570,9 @@ class DeliveryService:
                     item.delivered_at = datetime.utcnow()
 
             assignment.logistical_status = LogisticalStatus.COMPLETED
+            # The buyer's own tracker, which this path never touched --
+            # the last thing it said was "Rider requested".
+            advance_buyer_delivery(session, order.id, DeliveryState.DELIVERED)
             rider_id = assignment.delivery_user_id
             reference_id = assignment.assignment_id
             # One stop: the whole shipping fee is this trip's revenue.

@@ -144,6 +144,16 @@ class DeliveryFailureService:
                 metadata={"reason": reason.value, "delivery_run_id": run_id},
             )
 
+            # The buyer's tracker too. It was told a rider had been
+            # requested and then nothing ever again -- including this,
+            # which is the one state change they most need to see.
+            from app.delivery_pricing.order_delivery import (
+                DeliveryState,
+                advance_buyer_delivery,
+            )
+
+            advance_buyer_delivery(session, order_id, DeliveryState.FAILED)
+
             buyer_user_id = (
                 run_order.order.buyer.user_id
                 if run_order.order and run_order.order.buyer
