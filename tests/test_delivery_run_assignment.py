@@ -394,6 +394,9 @@ def test_get_run_detail_builds_stops_and_orders(mock_accepted):
         delivered_at=None,
     )
     order = SimpleNamespace(
+        # Keyed by id now that the orders are fetched in one query and
+        # matched back to their run_orders.
+        id="ORD_1",
         order_number="1001",
         buyer=SimpleNamespace(buyername="Ada"),
         shipping_address=SimpleNamespace(
@@ -417,7 +420,9 @@ def test_get_run_detail_builds_stops_and_orders(mock_accepted):
         m.filter_by.return_value.all.return_value = [run_order]
 
     def order_query(m):
-        m.options.return_value.get.return_value = order
+        # Every order on the run in one filtered query now, not a
+        # .get() per run_order.
+        m.options.return_value.filter.return_value.all.return_value = [order]
 
     session.query.side_effect = _query_side_effect(
         DeliveryRun=run_query,

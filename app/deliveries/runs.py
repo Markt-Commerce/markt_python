@@ -15,7 +15,10 @@ half-built here.
 import logging
 from decimal import Decimal
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Dict, List, Optional
+
+from sqlalchemy import func
+from sqlalchemy.orm import joinedload
 
 from app.fulfilment.models import FulfilmentAllocation, FulfilmentAllocationStatus
 from app.inventory.models import HandlingClass, ProductHandling
@@ -175,15 +178,45 @@ class DeliveryRunService:
 
     @staticmethod
     def _order_weight_grams(session, order_id: str) -> float:
-        items = session.query(OrderItem).filter_by(order_id=order_id).all()
-        total = 0.0
-        for item in items:
-            if item.status == OrderItem.Status.CANCELLED:
-                continue
-            product = session.query(Product).get(item.product_id)
-            weight = (product.weight or 0.0) if product else 0.0
-            total += weight * item.quantity
-        return total
+        return DeliveryRunService._order_weights_grams(session, [order_id]).get(
+            order_id, 0.0
+        )
+
+    @staticmethod
+    def _order_weights_grams(session, order_ids: List[str]) -> Dict[str, float]:
+        """Weight per order, in one query for all of them.
+
+        This was a query for the items and then another per item for its
+        product -- and the attach pass called it once per candidate
+        order and again for every order already on the target run,
+        inside that same loop. Ten candidates against a run of ten meant
+        a hundred of these, each firing a handful of queries of its own.
+        """
+        if not order_ids:
+            return {}
+
+        rows = (
+            session.query(
+                OrderItem.order_id,
+                func.coalesce(
+                    func.sum(
+                        func.coalesce(Product.weight, 0.0)
+                        * func.coalesce(OrderItem.quantity, 0)
+                    ),
+                    0.0,
+                ),
+            )
+            .outerjoin(Product, Product.id == OrderItem.product_id)
+            .filter(
+                OrderItem.order_id.in_(order_ids),
+                OrderItem.status != OrderItem.Status.CANCELLED,
+            )
+            .group_by(OrderItem.order_id)
+            .all()
+        )
+        weights = {order_id: float(total or 0.0) for order_id, total in rows}
+        # An order whose lines are all cancelled produces no row at all.
+        return {order_id: weights.get(order_id, 0.0) for order_id in order_ids}
 
     @staticmethod
     def _order_is_ready(session, order: Order) -> bool:
@@ -200,16 +233,28 @@ class DeliveryRunService:
         if not active_items:
             return False
 
-        for item in active_items:
-            latest = (
-                session.query(FulfilmentAllocation)
-                .filter_by(order_item_id=item.id)
-                .order_by(FulfilmentAllocation.id.desc())
-                .first()
+        # One query for the whole order, not one per line. The attach
+        # pass runs this over every candidate order every five minutes.
+        item_ids = [item.id for item in active_items]
+        rows = (
+            session.query(
+                FulfilmentAllocation.order_item_id, FulfilmentAllocation.status
             )
-            if not latest or latest.status not in READY_ALLOCATION_STATUSES:
-                return False
-        return True
+            .filter(FulfilmentAllocation.order_item_id.in_(item_ids))
+            .order_by(FulfilmentAllocation.id.asc())
+            .all()
+        )
+        # Ascending, so the last write per item is the latest allocation --
+        # the same one the previous per-item `.order_by(id.desc()).first()`
+        # picked.
+        latest_status = {}
+        for order_item_id, status in rows:
+            latest_status[order_item_id] = status
+
+        return all(
+            latest_status.get(item_id) in READY_ALLOCATION_STATUSES
+            for item_id in item_ids
+        )
 
     @staticmethod
     def _resolve_single_market(session, order: Order) -> Optional[int]:
@@ -225,9 +270,12 @@ class DeliveryRunService:
         active_items = [
             item for item in order.items if item.status != OrderItem.Status.CANCELLED
         ]
+        # item.seller rather than a query per line -- the caller eager
+        # loads it, so this costs nothing where it used to cost one
+        # round trip per item of every candidate order.
         market_ids = set()
         for item in active_items:
-            seller = session.query(Seller).get(item.seller_id)
+            seller = item.seller
             if not seller or not seller.market_id:
                 return None
             market_ids.add(seller.market_id)
@@ -302,7 +350,30 @@ class DeliveryRunService:
             )
             if attached_order_ids:
                 query = query.filter(~Order.id.in_(attached_order_ids))
-            candidate_orders = query.all()
+            # Everything the loop below touches, up front. Without these
+            # each candidate order cost a query for its items, one per
+            # item for the seller, and one for the shipping address --
+            # every five minutes, over every paid order not yet on a run.
+            candidate_orders = (
+                query.options(
+                    joinedload(Order.shipping_address),
+                    joinedload(Order.items).joinedload(OrderItem.seller),
+                )
+                .populate_existing()
+                .all()
+            )
+
+            # Weights for every order in play, in one query: the
+            # candidates, and whatever is already sitting on the runs
+            # they might join.
+            weights = DeliveryRunService._order_weights_grams(
+                session,
+                [order.id for order in candidate_orders] + list(attached_order_ids),
+            )
+            # Running total per run, so a run's weight is summed once
+            # rather than recomputed for every candidate that looks at
+            # it.
+            run_weights: Dict[str, float] = {}
 
             for order in candidate_orders:
                 if not DeliveryRunService._order_is_ready(session, order):
@@ -316,7 +387,7 @@ class DeliveryRunService:
                     skipped_unresolved += 1
                     continue
 
-                weight = DeliveryRunService._order_weight_grams(session, order.id)
+                weight = weights.get(order.id, 0.0)
                 run = DeliveryRunService.get_or_create_open_run(
                     session, market_id, area_id
                 )
@@ -326,16 +397,18 @@ class DeliveryRunService:
                 # checked -- re-check and roll to a fresh run rather than
                 # re-running the package-count search, which would just
                 # return this same weight-full run again.
-                current_weight = sum(
-                    DeliveryRunService._order_weight_grams(session, ro.order_id)
-                    for ro in run.run_orders
-                )
-                if current_weight + weight > run.max_weight_grams:
+                if run.id not in run_weights:
+                    run_weights[run.id] = sum(
+                        weights.get(ro.order_id, 0.0) for ro in run.run_orders
+                    )
+                if run_weights[run.id] + weight > run.max_weight_grams:
                     run = DeliveryRunService._create_open_run(
                         session, market_id, area_id
                     )
+                    run_weights[run.id] = 0.0
 
                 session.add(DeliveryRunOrder(delivery_run_id=run.id, order_id=order.id))
+                run_weights[run.id] = run_weights.get(run.id, 0.0) + weight
                 DeliveryRunService._tighten_cutoff_for_perishables(session, run, order)
                 attached += 1
 
