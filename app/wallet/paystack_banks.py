@@ -59,8 +59,12 @@ class PaystackBankClient:
 
         # Only what a picker needs. Paystack returns a dozen fields per bank;
         # forwarding all of them would tie the client to their payload shape.
-        banks = [
+        #
+        # `id` is included because `code` is not unique and the client
+        # needs something that is -- see the dedupe below.
+        rows = [
             {
+                "id": b.get("id"),
                 "name": b.get("name"),
                 "code": b.get("code"),
                 "slug": b.get("slug"),
@@ -69,6 +73,8 @@ class PaystackBankClient:
             for b in (body.get("data") or [])
             if b.get("active") and b.get("code")
         ]
+
+        banks = PaystackBankClient._dedupe_by_code(rows)
         banks.sort(key=lambda b: (b["name"] or "").lower())
 
         try:
@@ -77,6 +83,31 @@ class PaystackBankClient:
             logger.warning("Bank list cache write failed: %s", exc)
 
         return banks
+
+    @staticmethod
+    def _dedupe_by_code(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """One row per bank code.
+
+        Paystack's list is not unique on `code` -- five NGN codes come
+        back twice under two registered names, e.g. 50572 as both
+        "BANKIT MFB" and "BANKIT MICROFINANCE BANK LTD". The duplicates
+        crashed the rider app's list, which keyed rows by code, and they
+        were noise regardless: `code` is the entire destination of a
+        transfer, so two rows carrying the same one do exactly the same
+        thing whichever is picked.
+
+        The shorter name wins, because these pairs are consistently a
+        readable name and its registry spelling -- "U and C MFB" against
+        "U&C Microfinance Bank Ltd (U AND C MFB)" -- and the readable one
+        is what somebody is scanning a list for.
+        """
+        by_code: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            code = row["code"]
+            kept = by_code.get(code)
+            if kept is None or len(row["name"] or "") < len(kept["name"] or ""):
+                by_code[code] = row
+        return list(by_code.values())
 
     @classmethod
     def resolve_account(cls, account_number: str, bank_code: str) -> Dict[str, Any]:
