@@ -975,15 +975,35 @@ class DeliveryService:
     @staticmethod
     def get_active_assignments(user_id: str) -> Dict:
         with session_scope() as session:
+            # ACCEPTED is the assignment's status for the whole job and
+            # never changes, so a delivery the rider finished stayed in
+            # "My active deliveries" forever, wearing a Completed pill,
+            # pushing the actual work off the bottom of the screen. The
+            # step is what says whether it is still live.
             active_assignments = (
                 session.query(DeliveryOrderAssignment)
-                .filter_by(delivery_user_id=user_id, status=AssignmentStatus.ACCEPTED)
+                .filter(
+                    DeliveryOrderAssignment.delivery_user_id == user_id,
+                    DeliveryOrderAssignment.status == AssignmentStatus.ACCEPTED,
+                    (DeliveryOrderAssignment.logistical_status.is_(None))
+                    | (
+                        DeliveryOrderAssignment.logistical_status
+                        != LogisticalStatus.COMPLETED
+                    ),
+                )
                 # Eagerly load the order and its nested relationships
                 .options(
                     joinedload(DeliveryOrderAssignment.order).joinedload(
                         Order.shipping_address
                     ),
-                    joinedload(DeliveryOrderAssignment.order).joinedload(Order.items),
+                    # Through to the product, since the manifest names
+                    # each line -- otherwise this is one query per item.
+                    joinedload(DeliveryOrderAssignment.order)
+                    .joinedload(Order.items)
+                    .joinedload(OrderItem.product),
+                    joinedload(DeliveryOrderAssignment.order)
+                    .joinedload(Order.items)
+                    .joinedload(OrderItem.variant),
                 )
                 .all()
             )
@@ -1030,6 +1050,38 @@ class DeliveryService:
                     for assignment in active_assignments
                 ]
             }
+
+    @staticmethod
+    def _parcel_manifest(order) -> List[Dict]:
+        """What the rider is collecting, line by line.
+
+        A rider was told "3 items" and sent to a stall. There is no way to
+        check that against what is handed over, so the only thing standing
+        between a buyer and the wrong parcel was the shopkeeper
+        remembering which bag was which.
+
+        This is the pickup-side equivalent of the delivery code: the
+        order number identifies the parcel, and the lines let the rider
+        confirm the contents before they accept responsibility for them.
+        """
+        lines = []
+        for item in getattr(order, "items", None) or []:
+            status = getattr(item, "status", None)
+            # A cancelled line is not in the bag, and listing it would
+            # have the rider hunting for something nobody packed.
+            if status is not None and status == OrderItem.Status.CANCELLED:
+                continue
+
+            product = getattr(item, "product", None)
+            variant = getattr(item, "variant", None)
+            lines.append(
+                {
+                    "name": getattr(product, "name", None) or "Item",
+                    "quantity": getattr(item, "quantity", None) or 1,
+                    "variant": getattr(variant, "name", None),
+                }
+            )
+        return lines
 
     @staticmethod
     def _shop_address_line(seller) -> Optional[str]:
@@ -1116,6 +1168,7 @@ class DeliveryService:
             "dropoff_address": drop_line,
             "buyer_phone": getattr(buyer_user, "phone_number", None),
             "order_number": order.order_number,
+            "parcel": DeliveryService._parcel_manifest(order),
         }
 
     @staticmethod
