@@ -277,6 +277,7 @@ class DeliveryRunAssignmentService:
         initial accept_run response, which only returns a thin
         {run_id, status, assignment_id} -- no way to recover the stop/
         order list on app restart or after navigating away."""
+        from app.deliveries.services import DeliveryService
         from app.orders.models import Order
 
         from .pickup import _accepted_assignment
@@ -305,16 +306,25 @@ class DeliveryRunAssignmentService:
                 session.query(DeliveryRunOrder).filter_by(delivery_run_id=run_id).all()
             )
 
-            orders_detail = []
-            for run_order in run_orders:
-                order = (
+            # Every order on the run in one query. This was a `.get()`
+            # per run_order inside the loop below, so opening a run of
+            # ten drops cost ten round trips before anything was drawn.
+            orders_by_id = {}
+            if run_orders:
+                for order in (
                     session.query(Order)
                     .options(
                         joinedload(Order.buyer),
                         joinedload(Order.shipping_address),
                     )
-                    .get(run_order.order_id)
-                )
+                    .filter(Order.id.in_([ro.order_id for ro in run_orders]))
+                    .all()
+                ):
+                    orders_by_id[order.id] = order
+
+            orders_detail = []
+            for run_order in run_orders:
+                order = orders_by_id.get(run_order.order_id)
                 shipping = order.shipping_address if order else None
                 orders_detail.append(
                     {
@@ -357,9 +367,14 @@ class DeliveryRunAssignmentService:
                     {
                         "seller_id": stop.seller_id,
                         "seller_name": stop.seller.shop_name if stop.seller else None,
-                        "shop_address": (
-                            stop.seller.shop_address if stop.seller else None
-                        ),
+                        # Flattened, not the raw column. Seller.shop_address
+                        # is a JSON blob and the schema field is a String,
+                        # so marshmallow ran str() over the dict and the
+                        # rider's route printed
+                        # "{'street': '12 Adeola Odeku Street', 'city': ...}"
+                        # where an address should be. The single-order path
+                        # has always used this helper.
+                        "shop_address": DeliveryService._shop_address_line(stop.seller),
                         "lat": stop.seller.shop_latitude if stop.seller else None,
                         "lng": stop.seller.shop_longitude if stop.seller else None,
                         "status": stop.status.value,

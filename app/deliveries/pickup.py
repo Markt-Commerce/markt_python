@@ -70,14 +70,23 @@ def create_stops_for_run(session, run_id: str) -> List[int]:
         return []
 
     run_orders = session.query(DeliveryRunOrder).filter_by(delivery_run_id=run_id).all()
-    seller_ids = set()
-    for run_order in run_orders:
-        order = session.query(Order).get(run_order.order_id)
-        if not order:
-            continue
-        for item in order.items:
-            if item.status != OrderItem.Status.CANCELLED:
-                seller_ids.add(item.seller_id)
+    if not run_orders:
+        return []
+
+    # One query for the distinct sellers, rather than fetching each
+    # order and walking its items. This runs on every run accept, and
+    # the whole point of a run is that there are several orders on it.
+    seller_ids = {
+        seller_id
+        for (seller_id,) in session.query(OrderItem.seller_id)
+        .filter(
+            OrderItem.order_id.in_([ro.order_id for ro in run_orders]),
+            OrderItem.status != OrderItem.Status.CANCELLED,
+            OrderItem.seller_id.isnot(None),
+        )
+        .distinct()
+        .all()
+    }
 
     for seller_id in seller_ids:
         session.add(

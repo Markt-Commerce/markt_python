@@ -1004,6 +1004,22 @@ class DeliveryService:
                     joinedload(DeliveryOrderAssignment.order)
                     .joinedload(Order.items)
                     .joinedload(OrderItem.variant),
+                    # _assignment_parties walks the seller and the buyer
+                    # through to their User rows for the shop name, the
+                    # two phone numbers and the pickup address, and
+                    # get_assignment_pickups_from_order_item falls back
+                    # to the seller's personal address for coordinates.
+                    # None of it was loaded, so a rider carrying two
+                    # deliveries paid for about a dozen extra round
+                    # trips every time this list refreshed.
+                    joinedload(DeliveryOrderAssignment.order)
+                    .joinedload(Order.items)
+                    .joinedload(OrderItem.seller)
+                    .joinedload(Seller.user)
+                    .joinedload(User.address),
+                    joinedload(DeliveryOrderAssignment.order)
+                    .joinedload(Order.buyer)
+                    .joinedload(Buyer.user),
                 )
                 .all()
             )
@@ -1168,13 +1184,13 @@ class DeliveryService:
                             getattr(seller, "shop_name", None) if seller else None
                         ),
                         "seller_image": DeliveryService._shop_image(seller),
-                        "dropoff_address": (
-                            DeliveryService._assignment_parties(order).get(
-                                "dropoff_address"
-                            )
-                            if order is not None
-                            else None
-                        ),
+                        # Read straight off the shipping address. This
+                        # called _assignment_parties for one field of
+                        # the dict it builds, and that walks the seller
+                        # and the buyer through to their User rows --
+                        # four extra queries per row of a paginated
+                        # list, for two phone numbers nothing here shows.
+                        "dropoff_address": DeliveryService._dropoff_line(order),
                         # What this job paid. Read from the order's own
                         # shipping fee through the same function the
                         # payout uses, so the history cannot quietly
@@ -1196,6 +1212,24 @@ class DeliveryService:
                     "total_pages": (total + per_page - 1) // per_page,
                 },
             }
+
+    @staticmethod
+    def _dropoff_line(order) -> Optional[str]:
+        """Where it is going, as one line."""
+        drop = getattr(order, "shipping_address", None) if order else None
+        if drop is None:
+            return None
+        return (
+            ", ".join(
+                str(part)
+                for part in (
+                    getattr(drop, "street_address", None),
+                    getattr(drop, "city", None),
+                )
+                if part
+            )
+            or None
+        )
 
     @staticmethod
     def _shop_address_line(seller) -> Optional[str]:
@@ -1254,20 +1288,7 @@ class DeliveryService:
 
         shop_address = DeliveryService._shop_address_line(seller)
 
-        drop = order.shipping_address
-        drop_line = None
-        if drop is not None:
-            drop_line = (
-                ", ".join(
-                    str(part)
-                    for part in (
-                        getattr(drop, "street_address", None),
-                        getattr(drop, "city", None),
-                    )
-                    if part
-                )
-                or None
-            )
+        drop_line = DeliveryService._dropoff_line(order)
 
         return {
             "seller_name": getattr(seller, "shop_name", None) if seller else None,

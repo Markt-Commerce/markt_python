@@ -94,6 +94,13 @@ def test_get_or_create_open_run_creates_new_when_existing_is_full():
 # --- _order_is_ready ----------------------------------------------------
 
 
+def _stub_allocation_rows(session, rows):
+    """The (order_item_id, status) rows the readiness query returns."""
+    session.query.return_value.filter.return_value.order_by.return_value.all.return_value = (
+        rows
+    )
+
+
 def test_order_is_ready_true_when_all_items_accepted_or_preparing():
     item1 = SimpleNamespace(id=1, status=OrderItem.Status.PROCESSING)
     item2 = SimpleNamespace(id=2, status=OrderItem.Status.PROCESSING)
@@ -102,21 +109,20 @@ def test_order_is_ready_true_when_all_items_accepted_or_preparing():
     alloc2 = SimpleNamespace(status=FulfilmentAllocationStatus.PREPARING)
 
     session = MagicMock()
-    session.query.return_value.filter_by.return_value.order_by.return_value.first.side_effect = [
-        alloc1,
-        alloc2,
-    ]
+    # One query for the whole order now, returning (item_id, status)
+    # rows in ascending id order -- the last per item wins.
+    _stub_allocation_rows(session, [(1, alloc1.status), (2, alloc2.status)])
 
     assert DeliveryRunService._order_is_ready(session, order) is True
+    # The point of the change: not one round trip per line.
+    assert session.query.call_count == 1
 
 
 def test_order_is_ready_false_when_item_missing_allocation():
     item1 = SimpleNamespace(id=1, status=OrderItem.Status.PROCESSING)
     order = SimpleNamespace(items=[item1])
     session = MagicMock()
-    session.query.return_value.filter_by.return_value.order_by.return_value.first.return_value = (
-        None
-    )
+    _stub_allocation_rows(session, [])
 
     assert DeliveryRunService._order_is_ready(session, order) is False
 
@@ -150,8 +156,9 @@ def test_resolve_single_market_returns_market_when_all_items_share_one():
     order = SimpleNamespace(items=[item1, item2])
     seller1 = SimpleNamespace(market_id=5)
     seller2 = SimpleNamespace(market_id=5)
+    item1.seller = seller1
+    item2.seller = seller2
     session = MagicMock()
-    session.query.return_value.get.side_effect = [seller1, seller2]
 
     assert DeliveryRunService._resolve_single_market(session, order) == 5
 
@@ -162,8 +169,9 @@ def test_resolve_single_market_returns_none_when_items_span_markets():
     order = SimpleNamespace(items=[item1, item2])
     seller1 = SimpleNamespace(market_id=5)
     seller2 = SimpleNamespace(market_id=6)
+    item1.seller = seller1
+    item2.seller = seller2
     session = MagicMock()
-    session.query.return_value.get.side_effect = [seller1, seller2]
 
     assert DeliveryRunService._resolve_single_market(session, order) is None
 
@@ -171,34 +179,57 @@ def test_resolve_single_market_returns_none_when_items_span_markets():
 def test_resolve_single_market_returns_none_when_seller_has_no_market():
     item1 = SimpleNamespace(id=1, status=OrderItem.Status.PROCESSING, seller_id=10)
     order = SimpleNamespace(items=[item1])
-    seller1 = SimpleNamespace(market_id=None)
+    item1.seller = SimpleNamespace(market_id=None)
     session = MagicMock()
-    session.query.return_value.get.side_effect = [seller1]
 
     assert DeliveryRunService._resolve_single_market(session, order) is None
+    # Sellers come off the eager-loaded relationship now, so resolving a
+    # market costs no queries of its own at all.
+    session.query.assert_not_called()
 
 
 # --- _order_weight_grams --------------------------------------------------
 
 
-def test_order_weight_grams_sums_active_items_only():
-    item1 = SimpleNamespace(
-        id=1, status=OrderItem.Status.PROCESSING, product_id="P1", quantity=2
-    )
-    item2 = SimpleNamespace(
-        id=2, status=OrderItem.Status.CANCELLED, product_id="P2", quantity=5
-    )
-    product1 = SimpleNamespace(weight=100.0)
+def _stub_weight_rows(session, rows):
+    """The grouped (order_id, total) rows the weight query returns."""
+    chain = session.query.return_value.outerjoin.return_value
+    chain.filter.return_value.group_by.return_value.all.return_value = rows
+
+
+def test_order_weight_grams_reads_the_grouped_total():
+    # Cancelled lines are excluded in SQL now rather than in Python, so
+    # what is asserted here is that the single row comes back intact.
     session = MagicMock()
-    session.query.return_value.filter_by.return_value.all.return_value = [
-        item1,
-        item2,
-    ]
-    session.query.return_value.get.return_value = product1
+    _stub_weight_rows(session, [("ORD_1", 200.0)])
 
-    total = DeliveryRunService._order_weight_grams(session, "ORD_1")
+    assert DeliveryRunService._order_weight_grams(session, "ORD_1") == 200.0
 
-    assert total == 200.0
+
+def test_an_order_with_no_weighable_lines_is_zero_not_missing():
+    # An order whose lines are all cancelled produces no row at all, and
+    # the caller compares the result against a ceiling.
+    session = MagicMock()
+    _stub_weight_rows(session, [])
+
+    assert DeliveryRunService._order_weight_grams(session, "ORD_1") == 0.0
+
+
+def test_weights_are_fetched_for_every_order_at_once():
+    session = MagicMock()
+    _stub_weight_rows(session, [("ORD_1", 200.0), ("ORD_2", 50.0)])
+
+    out = DeliveryRunService._order_weights_grams(session, ["ORD_1", "ORD_2", "ORD_3"])
+
+    assert out == {"ORD_1": 200.0, "ORD_2": 50.0, "ORD_3": 0.0}
+    # One round trip for all three, which is the point of the change.
+    assert session.query.call_count == 1
+
+
+def test_asking_for_nothing_queries_nothing():
+    session = MagicMock()
+    assert DeliveryRunService._order_weights_grams(session, []) == {}
+    session.query.assert_not_called()
 
 
 # --- calculate_surge_multiplier ---------------------------------------------
@@ -429,13 +460,19 @@ def test_close_runs_past_cutoff_keeps_consented_order_cancels_the_rest(
 # --- attach_eligible_orders ------------------------------------------------
 
 
+def _stub_candidates(session, orders):
+    """The candidate-order query, which is eager-loaded."""
+    chain = session.query.return_value.join.return_value.filter.return_value
+    chain.options.return_value.populate_existing.return_value.all.return_value = orders
+
+
 @patch("app.deliveries.runs.DeliveryRunService.get_or_create_open_run")
-@patch("app.deliveries.runs.DeliveryRunService._order_weight_grams")
+@patch("app.deliveries.runs.DeliveryRunService._order_weights_grams")
 @patch("app.deliveries.runs.DeliveryRunService._resolve_single_market")
 @patch("app.deliveries.runs.DeliveryRunService._order_is_ready")
 @patch("app.deliveries.runs.session_scope")
 def test_attach_eligible_orders_attaches_ready_order(
-    mock_scope, mock_ready, mock_market, mock_weight, mock_get_run
+    mock_scope, mock_ready, mock_market, mock_weights, mock_get_run
 ):
     shipping_address = SimpleNamespace(area_id=7)
     order = SimpleNamespace(id="ORD_1", items=[], shipping_address=shipping_address)
@@ -443,14 +480,12 @@ def test_attach_eligible_orders_attaches_ready_order(
 
     session = MagicMock()
     session.query.return_value.all.return_value = []
-    session.query.return_value.join.return_value.filter.return_value.all.return_value = [
-        order
-    ]
+    _stub_candidates(session, [order])
     mock_scope.return_value.__enter__.return_value = session
 
     mock_ready.return_value = True
     mock_market.return_value = 3
-    mock_weight.return_value = 100.0
+    mock_weights.return_value = {"ORD_1": 100.0}
     mock_get_run.return_value = run
 
     result = DeliveryRunService.attach_eligible_orders()
@@ -464,12 +499,12 @@ def test_attach_eligible_orders_attaches_ready_order(
 
 @patch("app.deliveries.runs.DeliveryRunService._create_open_run")
 @patch("app.deliveries.runs.DeliveryRunService.get_or_create_open_run")
-@patch("app.deliveries.runs.DeliveryRunService._order_weight_grams")
+@patch("app.deliveries.runs.DeliveryRunService._order_weights_grams")
 @patch("app.deliveries.runs.DeliveryRunService._resolve_single_market")
 @patch("app.deliveries.runs.DeliveryRunService._order_is_ready")
 @patch("app.deliveries.runs.session_scope")
 def test_attach_eligible_orders_rolls_to_new_run_on_weight_overflow(
-    mock_scope, mock_ready, mock_market, mock_weight, mock_get_run, mock_create_run
+    mock_scope, mock_ready, mock_market, mock_weights, mock_get_run, mock_create_run
 ):
     shipping_address = SimpleNamespace(area_id=7)
     order = SimpleNamespace(id="ORD_1", items=[], shipping_address=shipping_address)
@@ -481,16 +516,15 @@ def test_attach_eligible_orders_rolls_to_new_run_on_weight_overflow(
 
     session = MagicMock()
     session.query.return_value.all.return_value = []
-    session.query.return_value.join.return_value.filter.return_value.all.return_value = [
-        order
-    ]
+    _stub_candidates(session, [order])
     mock_scope.return_value.__enter__.return_value = session
 
     mock_ready.return_value = True
     mock_market.return_value = 3
-    # Call order: this order's own weight first, then each existing
-    # run_order's weight while summing current_weight.
-    mock_weight.side_effect = [600.0, 900.0]
+    # One lookup for everything in play now, rather than a call per
+    # order: this candidate is 600g and the run already holds 900g,
+    # which is over RUN_FULL's 1000g ceiling.
+    mock_weights.return_value = {"ORD_1": 600.0, "ORD_OTHER": 900.0}
     mock_get_run.return_value = full_run
     mock_create_run.return_value = new_run
 
@@ -512,9 +546,7 @@ def test_attach_eligible_orders_skips_when_market_unresolved(
     order = SimpleNamespace(id="ORD_1", items=[], shipping_address=shipping_address)
     session = MagicMock()
     session.query.return_value.all.return_value = []
-    session.query.return_value.join.return_value.filter.return_value.all.return_value = [
-        order
-    ]
+    _stub_candidates(session, [order])
     mock_scope.return_value.__enter__.return_value = session
 
     mock_ready.return_value = True
@@ -534,9 +566,7 @@ def test_attach_eligible_orders_skips_when_not_ready(mock_scope, mock_ready):
     )
     session = MagicMock()
     session.query.return_value.all.return_value = []
-    session.query.return_value.join.return_value.filter.return_value.all.return_value = [
-        order
-    ]
+    _stub_candidates(session, [order])
     mock_scope.return_value.__enter__.return_value = session
 
     mock_ready.return_value = False
