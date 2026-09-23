@@ -21,13 +21,19 @@ def test_notify_relevant_sellers_notifies_category_matched_sellers(
         id="REQ_1", title="Need Rice", market_id=None, categories=[category]
     )
 
-    seller1 = SimpleNamespace(user_id="USR_S1")
-    seller2 = SimpleNamespace(user_id="USR_S2")
+    seller1 = SimpleNamespace(id=1, user_id="USR_S1")
+    seller2 = SimpleNamespace(id=2, user_id="USR_S2")
     session = MagicMock()
     session.query.return_value.join.return_value = session.query.return_value
     session.query.return_value.filter.return_value = session.query.return_value
     session.query.return_value.distinct.return_value = session.query.return_value
-    session.query.return_value.limit.return_value.all.return_value = [
+    # The id pass comes back as row tuples, because it selects one column --
+    # which is the whole point of the change: DISTINCT over a full Seller row
+    # cannot run at all, since Seller.policies is a `json` column and
+    # Postgres has no equality operator for it.
+    session.query.return_value.limit.return_value.all.return_value = [(1,), (2,)]
+    # The second pass loads the sellers those ids belong to.
+    session.query.return_value.filter.return_value.all.return_value = [
         seller1,
         seller2,
     ]

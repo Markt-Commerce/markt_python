@@ -1237,8 +1237,23 @@ class BuyerRequestService:
             if not primary_rc:
                 return
 
-            query = (
-                session.query(Seller)
+            # DISTINCT on seller *ids*, then load the sellers.
+            #
+            # This selected DISTINCT over the whole Seller row, and
+            # Seller.policies is a plain `json` column. Postgres has no
+            # equality operator for `json` (only for `jsonb`), so it cannot
+            # dedupe a row containing one and the query dies with
+            # "could not identify an equality operator for type json" --
+            # a 500 on every buyer request that named a category with a
+            # matching seller in it. A request with no categories, or with
+            # categories nobody sells in, never reached this line, which is
+            # why it looked intermittent.
+            #
+            # The join is one-to-many by nature (a seller with three matching
+            # products appears three times), so the dedupe is necessary. It
+            # just has to happen on something Postgres can compare.
+            id_query = (
+                session.query(Seller.id)
                 .join(Product, Product.seller_id == Seller.id)
                 .join(ProductCategory, ProductCategory.product_id == Product.id)
                 .filter(
@@ -1249,7 +1264,7 @@ class BuyerRequestService:
                 .distinct()
             )
             if request.market_id:
-                query = query.filter(
+                id_query = id_query.filter(
                     Seller.market_id == request.market_id,
                     Seller.market_verification_status
                     == MarketVerificationStatus.VERIFIED,
@@ -1257,7 +1272,12 @@ class BuyerRequestService:
 
             # Cap so one broad-category request can't fan out unboundedly.
             # Read before the city filter, which narrows rather than widens.
-            sellers = query.limit(50).all()
+            seller_ids = [row[0] for row in id_query.limit(50).all()]
+            sellers = (
+                session.query(Seller).filter(Seller.id.in_(seller_ids)).all()
+                if seller_ids
+                else []
+            )
             sellers = BuyerRequestService._sellers_in_buyers_city(
                 session, request, sellers
             )
