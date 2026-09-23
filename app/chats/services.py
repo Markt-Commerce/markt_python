@@ -1578,10 +1578,19 @@ class DiscountService:
                     event="discount_offered",
                     data={
                         "discount": discount_response,
+                        # The same shape the REST fetch returns, message_data
+                        # included. Without it the card in the chat has
+                        # nothing to draw itself from -- it is read from
+                        # `message_data`, not from the content string -- so a
+                        # client rendering this event live would show an
+                        # empty discount card where a refresh showed a full
+                        # one.
                         "message": {
                             "id": chat_message.id,
+                            "room_id": room_id,
                             "content": message_content,
                             "message_type": "discount",
+                            "message_data": message_data,
                             "sender_id": seller_id,
                             "created_at": chat_message.created_at.isoformat(),
                         },
