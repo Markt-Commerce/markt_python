@@ -80,7 +80,20 @@ class BuyerRequest(BaseModel, UniqueIdMixin):
     categories = db.relationship("RequestCategory", back_populates="request")
     # comments = db.relationship("RequestComment", back_populates="request")
     offers = db.relationship("SellerOffer", back_populates="request")
-    images = db.relationship("RequestImage", back_populates="request")
+    # order_by, because the order is the buyer's.
+    #
+    # sort_order is written from the position each photo was picked in
+    # (BuyerRequestService.create_request), and then nothing read it back:
+    # without an ORDER BY, Postgres returns rows in whatever order it finds
+    # them, which is usually insertion order and is never promised to be.
+    # So "here is the plug end, here is the socket end" could arrive the
+    # other way round, and on a request that is the whole meaning of the
+    # photos.
+    images = db.relationship(
+        "RequestImage",
+        back_populates="request",
+        order_by="RequestImage.sort_order",
+    )
 
     created_at = db.Column(db.DateTime, server_default=db.func.now())
     updated_at = db.Column(db.DateTime, onupdate=db.func.now())

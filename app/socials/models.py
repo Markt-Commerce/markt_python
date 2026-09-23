@@ -300,8 +300,14 @@ class Post(BaseModel, UniqueIdMixin):
     # Relationships
     user = db.relationship("User", back_populates="posts")
     categories = db.relationship("PostCategory", back_populates="post")
+    # Same as RequestImage: sort_order is written from the pick order and
+    # was never read back, so a multi-photo post could render in a different
+    # order than it was composed in.
     social_media = db.relationship(
-        "SocialMediaPost", back_populates="post", cascade="all, delete-orphan"
+        "SocialMediaPost",
+        back_populates="post",
+        cascade="all, delete-orphan",
+        order_by="SocialMediaPost.sort_order",
     )
     tagged_products = db.relationship(
         "PostProduct", back_populates="post", cascade="all, delete-orphan"
