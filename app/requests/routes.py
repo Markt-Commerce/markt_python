@@ -22,7 +22,6 @@ from .schemas import (
     BuyerRequestSearchResultSchema,
 )
 
-
 bp = Blueprint(
     "requests", __name__, description="Buyer request operations", url_prefix="/requests"
 )

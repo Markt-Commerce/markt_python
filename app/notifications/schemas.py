@@ -29,3 +29,14 @@ class MarkAsReadRequestSchema(Schema):
 
 class MarkAsReadResponseSchema(Schema):
     updated = fields.Int()
+
+
+class PushTokenSchema(Schema):
+    token = fields.Str(required=True)
+    platform = fields.Str(
+        required=False, validate=validate.OneOf(["ios", "android", "web"])
+    )
+
+
+class PushTokenDeleteSchema(Schema):
+    token = fields.Str(required=True)
