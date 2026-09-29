@@ -35,3 +35,20 @@ def verify_auth_token(token: str):
         return _serializer().loads(token, max_age=TOKEN_MAX_AGE_SECONDS)
     except (BadSignature, SignatureExpired):
         return None
+
+
+def verify_auth_token_with_timestamp(token: str):
+    """Like verify_auth_token but also returns when the token was issued.
+
+    Returns ``(user_id, issued_at)`` for a valid token or ``(None, None)``
+    otherwise. ``issued_at`` (a timezone-aware UTC datetime from itsdangerous)
+    lets the request loader enforce force-logout: a token minted before a
+    user's ``tokens_valid_from`` is rejected even though its signature is
+    still valid and unexpired."""
+    try:
+        user_id, issued_at = _serializer().loads(
+            token, max_age=TOKEN_MAX_AGE_SECONDS, return_timestamp=True
+        )
+        return user_id, issued_at
+    except (BadSignature, SignatureExpired):
+        return None, None
