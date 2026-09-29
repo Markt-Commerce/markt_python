@@ -30,6 +30,11 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
     # edits the DB" treatment already used for MarketVerificationStatus.FLAGGED
     # and SellerReliabilityScore.gaming_flagged.
     is_admin = db.Column(db.Boolean, default=False, nullable=False)
+    # Staff role for the admin surface (see app/admin). null = not staff.
+    # is_admin stays the master gate -- a super_admin role or is_admin implies
+    # every permission (app.admin.permissions). Like is_admin there is no
+    # self-serve path to set this: a super_admin (or the DB) assigns it.
+    admin_role = db.Column(db.String(32), nullable=True)
     is_active = db.Column(db.Boolean, default=True)
     deactivated_at = db.Column(db.DateTime)
     # Set when the user deletes their account (Apple App Store 5.1.1(v)).

@@ -117,6 +117,26 @@ def admin_required(f):
     return decorated_function
 
 
+def staff_required(f):
+    """Gate the admin area to any staff member (legacy is_admin OR an
+    admin_role). Use this for admin endpoints that need no finer permission;
+    use require_permission(...) for a specific capability."""
+
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not current_user.is_authenticated:
+            abort(401, message="Authentication required")
+
+        from app.admin.permissions import is_staff
+
+        if not is_staff(current_user):
+            raise ForbiddenError(message="Admin access required")
+
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
 def dual_role_required(f):
     """Decorator to require both buyer and seller roles"""
 
@@ -405,15 +425,25 @@ def _log_activity(
 
 
 def _has_permission(user, permission: str) -> bool:
-    """Check if user has the required permission"""
-    # This is a simplified implementation
-    # In a real system, you'd have a proper permission system
+    """Check if user has the required permission.
 
-    # Admin users have all permissions
-    if hasattr(user, "is_admin") and user.is_admin:
+    Admin-surface permissions (the namespaced strings in
+    app.admin.permissions) are resolved through the RBAC matrix, which is the
+    source of truth for staff capabilities. Everything else falls back to the
+    legacy role map below, so existing seller/buyer permission checks are
+    unchanged.
+    """
+    from app.admin.permissions import has_permission as admin_has_permission
+
+    # Staff RBAC (also returns True for is_admin / super_admin).
+    if admin_has_permission(user, permission):
         return True
 
-    # Role-based permissions
+    # Admin users retain blanket access to the legacy permissions too.
+    if getattr(user, "is_admin", False):
+        return True
+
+    # Role-based permissions (legacy, non-admin)
     permission_map = {
         "product.create": user.is_seller,
         "product.update": user.is_seller,
