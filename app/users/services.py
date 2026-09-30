@@ -282,6 +282,13 @@ class AuthService:
             if not user or user.deleted_at or not user.check_password(password):
                 raise AuthError("Invalid credentials")
 
+            # An admin ban or suspension blocks sign-in with a clear reason
+            # (the loaders in main.setup also enforce it on live sessions).
+            if user.banned_at:
+                raise AuthError("Account is banned")
+            if user.suspended_at:
+                raise AuthError("Account is suspended")
+
             # Check if user is active
             if not user.is_active:
                 raise AuthError("Account is deactivated")

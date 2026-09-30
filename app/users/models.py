@@ -30,6 +30,11 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
     # edits the DB" treatment already used for MarketVerificationStatus.FLAGGED
     # and SellerReliabilityScore.gaming_flagged.
     is_admin = db.Column(db.Boolean, default=False, nullable=False)
+    # Staff role for the admin surface (see app/admin). null = not staff.
+    # is_admin stays the master gate -- a super_admin role or is_admin implies
+    # every permission (app.admin.permissions). Like is_admin there is no
+    # self-serve path to set this: a super_admin (or the DB) assigns it.
+    admin_role = db.Column(db.String(32), nullable=True)
     is_active = db.Column(db.Boolean, default=True)
     deactivated_at = db.Column(db.DateTime)
     # Set when the user deletes their account (Apple App Store 5.1.1(v)).
@@ -44,6 +49,24 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
     email_verified = db.Column(db.Boolean, default=False)
     # Last login timestamp for session management
     last_login_at = db.Column(db.DateTime)
+
+    # --- Admin account controls (app/admin) ---
+    # Three separate states, deliberately not folded into is_active: is_active
+    # is the user's OWN reversible deactivation, and an admin reinstating a
+    # user must not silently undo a deactivation the user chose. deleted_at is
+    # the irreversible self-deletion. These two are admin actions:
+    #   suspended_at -- temporary hold (support/moderation), reversible.
+    #   banned_at    -- moderation removal, reversible but weightier.
+    # Both block authentication (see is_login_blocked, honoured by the loaders
+    # in main.setup and by AuthService.login_user).
+    suspended_at = db.Column(db.DateTime, nullable=True, index=True)
+    suspension_reason = db.Column(db.String(255), nullable=True)
+    banned_at = db.Column(db.DateTime, nullable=True, index=True)
+    ban_reason = db.Column(db.String(255), nullable=True)
+    # Force-logout epoch: any bearer token issued before this instant is
+    # rejected by the request loader. Bumping it invalidates every existing
+    # token at once without a server-side token store.
+    tokens_valid_from = db.Column(db.DateTime, nullable=True)
 
     # Relationships
     address = db.relationship("UserAddress", uselist=False, back_populates="user")
@@ -186,6 +209,57 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
         self.is_active = True
         self.deactivated_at = None
 
+    # --- Admin controls -------------------------------------------------
+    @property
+    def is_suspended(self) -> bool:
+        return self.suspended_at is not None
+
+    @property
+    def is_banned(self) -> bool:
+        return self.banned_at is not None
+
+    @property
+    def is_login_blocked(self) -> bool:
+        """True if this account must not authenticate: deleted, banned or
+        suspended. The single check the auth loaders consult so every one of
+        those states takes effect on every request, not just at next login."""
+        return bool(self.deleted_at or self.banned_at or self.suspended_at)
+
+    def suspend(self, reason=None):
+        self.suspended_at = datetime.utcnow()
+        self.suspension_reason = reason
+
+    def unsuspend(self):
+        self.suspended_at = None
+        self.suspension_reason = None
+
+    def ban(self, reason=None):
+        self.banned_at = datetime.utcnow()
+        self.ban_reason = reason
+
+    def unban(self):
+        self.banned_at = None
+        self.ban_reason = None
+
+    def revoke_tokens(self):
+        """Force-logout: invalidate every bearer token issued before now."""
+        self.tokens_valid_from = datetime.utcnow()
+
+    def is_token_revoked(self, issued_at) -> bool:
+        """Whether a bearer token minted at ``issued_at`` is now rejected.
+
+        ``issued_at`` comes from itsdangerous, which returns a timezone-aware
+        UTC datetime; tokens_valid_from is stored naive-UTC, so normalise
+        before comparing to avoid a naive/aware TypeError."""
+        if not self.tokens_valid_from or issued_at is None:
+            return False
+        ia = issued_at
+        if getattr(ia, "tzinfo", None) is not None:
+            from datetime import timezone
+
+            ia = ia.astimezone(timezone.utc).replace(tzinfo=None)
+        return ia < self.tokens_valid_from
+
 
 class SocialAccount(BaseModel):
     """A verified third-party identity linked to a Markt user.
@@ -322,6 +396,14 @@ class Seller(BaseModel):
     verification_status = db.Column(
         db.Enum(SellerVerificationStatus), default=SellerVerificationStatus.UNVERIFIED
     )
+    # Latest admin note behind the current verification_status (why a shop was
+    # verified or rejected). The full history lives in admin_audit_logs; this
+    # is the denormalised "current reason" a reviewer sees on the shop.
+    verification_note = db.Column(db.String(500), nullable=True)
+    # Editorial promotion of a shop (admin-curated). Distinct from
+    # verification_status, which is KYC/trust, and from is_active, which is
+    # whether the shop can sell at all.
+    is_featured = db.Column(db.Boolean, default=False, nullable=False)
     is_active = db.Column(db.Boolean, default=True)
     deactivated_at = db.Column(db.DateTime)
     paystack_subaccount_code = db.Column(db.String(50), nullable=True)

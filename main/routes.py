@@ -31,6 +31,7 @@ def register_blueprints(app, api):
         "moderation",
         "location",
         "delivery_pricing",
+        "admin",
     ]
 
     for module in modules:

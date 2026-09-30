@@ -102,8 +102,10 @@ def create_app():
             if user:
                 # A deleted account keeps its row so other people's posts,
                 # reviews and order history stay coherent, but it must never
-                # authenticate again (see AccountDeletionService).
-                return None if user.deleted_at else user
+                # authenticate again (see AccountDeletionService). An admin
+                # ban or suspension is enforced here too, so it takes effect
+                # on the current session immediately, not just at next login.
+                return None if user.is_login_blocked else user
 
             delivery_user = DeliveryUser.query.get(user_id)
             if delivery_user:
@@ -126,18 +128,22 @@ def create_app():
             if not token:
                 return None
 
-            from app.libs.auth_tokens import verify_auth_token
+            from app.libs.auth_tokens import verify_auth_token_with_timestamp
 
-            user_id = verify_auth_token(token)
+            user_id, issued_at = verify_auth_token_with_timestamp(token)
             if not user_id:
                 return None
 
             user = User.query.get(user_id)
             if user:
                 # Bearer tokens are stateless signed user ids with a 30-day
-                # life, so this is the only thing that stops a token issued
-                # before deletion from continuing to work.
-                return None if user.deleted_at else user
+                # life, so these checks are the only thing that stops a token
+                # from continuing to work after the account is deleted,
+                # banned or suspended, or after an admin force-logout
+                # (tokens_valid_from) invalidated tokens issued before it.
+                if user.is_login_blocked or user.is_token_revoked(issued_at):
+                    return None
+                return user
             return DeliveryUser.query.get(user_id)
 
         # Register routes
