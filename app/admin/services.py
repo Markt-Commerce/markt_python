@@ -11,7 +11,12 @@ from typing import Any, Optional
 
 from sqlalchemy import or_
 
-from app.libs.errors import ConflictError, ForbiddenError, NotFoundError, ValidationError
+from app.libs.errors import (
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    ValidationError,
+)
 from app.libs.session import read_scope, session_scope
 
 from .models import AdminAuditLog
@@ -283,9 +288,14 @@ class AdminUserService:
             before = {"status": _account_status(user)}
             user.suspend(reason)
             AdminAuditService.record(
-                session, actor, "user.suspend",
-                target_type="user", target_id=user_id, reason=reason,
-                before=before, after={"status": _account_status(user)},
+                session,
+                actor,
+                "user.suspend",
+                target_type="user",
+                target_id=user_id,
+                reason=reason,
+                before=before,
+                after={"status": _account_status(user)},
             )
             return AdminUserService._detail(user)
 
@@ -296,9 +306,14 @@ class AdminUserService:
             before = {"status": _account_status(user)}
             user.unsuspend()
             AdminAuditService.record(
-                session, actor, "user.reinstate",
-                target_type="user", target_id=user_id, reason=reason,
-                before=before, after={"status": _account_status(user)},
+                session,
+                actor,
+                "user.reinstate",
+                target_type="user",
+                target_id=user_id,
+                reason=reason,
+                before=before,
+                after={"status": _account_status(user)},
             )
             return AdminUserService._detail(user)
 
@@ -311,9 +326,14 @@ class AdminUserService:
             before = {"status": _account_status(user)}
             user.ban(reason)
             AdminAuditService.record(
-                session, actor, "user.ban",
-                target_type="user", target_id=user_id, reason=reason,
-                before=before, after={"status": _account_status(user)},
+                session,
+                actor,
+                "user.ban",
+                target_type="user",
+                target_id=user_id,
+                reason=reason,
+                before=before,
+                after={"status": _account_status(user)},
             )
             return AdminUserService._detail(user)
 
@@ -324,9 +344,14 @@ class AdminUserService:
             before = {"status": _account_status(user)}
             user.unban()
             AdminAuditService.record(
-                session, actor, "user.unban",
-                target_type="user", target_id=user_id, reason=reason,
-                before=before, after={"status": _account_status(user)},
+                session,
+                actor,
+                "user.unban",
+                target_type="user",
+                target_id=user_id,
+                reason=reason,
+                before=before,
+                after={"status": _account_status(user)},
             )
             return AdminUserService._detail(user)
 
@@ -338,9 +363,13 @@ class AdminUserService:
             before = {"email_verified": bool(user.email_verified)}
             user.email_verified = True
             AdminAuditService.record(
-                session, actor, "user.verify_email",
-                target_type="user", target_id=user_id,
-                before=before, after={"email_verified": True},
+                session,
+                actor,
+                "user.verify_email",
+                target_type="user",
+                target_id=user_id,
+                before=before,
+                after={"email_verified": True},
             )
             return AdminUserService._detail(user)
 
@@ -362,8 +391,11 @@ class AdminUserService:
 
         with session_scope() as session:
             AdminAuditService.record(
-                session, actor, "user.resend_verification",
-                target_type="user", target_id=user_id,
+                session,
+                actor,
+                "user.resend_verification",
+                target_type="user",
+                target_id=user_id,
             )
         return {"sent": True, "email": email}
 
@@ -374,8 +406,12 @@ class AdminUserService:
             AdminUserService._require_not_deleted(user)
             user.revoke_tokens()
             AdminAuditService.record(
-                session, actor, "user.force_logout",
-                target_type="user", target_id=user_id, reason=reason,
+                session,
+                actor,
+                "user.force_logout",
+                target_type="user",
+                target_id=user_id,
+                reason=reason,
                 after={"tokens_valid_from": _iso(user.tokens_valid_from)},
             )
             return AdminUserService._detail(user)
@@ -387,7 +423,8 @@ class AdminUserService:
         from app.users.models import User
 
         changes = {
-            k: v for k, v in (changes or {}).items()
+            k: v
+            for k, v in (changes or {}).items()
             if k in AdminUserService.EDITABLE_FIELDS
         }
         if not changes:
@@ -410,9 +447,13 @@ class AdminUserService:
             for k, v in changes.items():
                 setattr(user, k, v)
             AdminAuditService.record(
-                session, actor, "user.edit",
-                target_type="user", target_id=user_id,
-                before=before, after=changes,
+                session,
+                actor,
+                "user.edit",
+                target_type="user",
+                target_id=user_id,
+                before=before,
+                after=changes,
             )
             return AdminUserService._detail(user)
 
@@ -424,7 +465,10 @@ class AdminUserService:
         with session_scope() as session:
             user = AdminUserService._load(session, user_id)
             AdminUserService._require_not_deleted(user)
-            before = {"is_buyer": bool(user.is_buyer), "is_seller": bool(user.is_seller)}
+            before = {
+                "is_buyer": bool(user.is_buyer),
+                "is_seller": bool(user.is_seller),
+            }
 
             if is_buyer is not None:
                 if is_buyer and not user.buyer_account:
@@ -434,8 +478,11 @@ class AdminUserService:
                     )
                 user.is_buyer = bool(is_buyer)
                 if user.buyer_account:
-                    (user.buyer_account.activate() if is_buyer
-                     else user.buyer_account.deactivate())
+                    (
+                        user.buyer_account.activate()
+                        if is_buyer
+                        else user.buyer_account.deactivate()
+                    )
 
             if is_seller is not None:
                 if is_seller and not user.seller_account:
@@ -445,14 +492,21 @@ class AdminUserService:
                     )
                 user.is_seller = bool(is_seller)
                 if user.seller_account:
-                    (user.seller_account.activate() if is_seller
-                     else user.seller_account.deactivate())
+                    (
+                        user.seller_account.activate()
+                        if is_seller
+                        else user.seller_account.deactivate()
+                    )
 
             after = {"is_buyer": bool(user.is_buyer), "is_seller": bool(user.is_seller)}
             AdminAuditService.record(
-                session, actor, "user.manage_roles",
-                target_type="user", target_id=user_id,
-                before=before, after=after,
+                session,
+                actor,
+                "user.manage_roles",
+                target_type="user",
+                target_id=user_id,
+                before=before,
+                after=after,
             )
             # The user's cached current_role may now point at a disabled role;
             # drop it so the next login recomputes rather than trusting stale

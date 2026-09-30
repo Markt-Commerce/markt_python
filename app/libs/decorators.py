@@ -4,7 +4,8 @@ from typing import Optional, Callable, Any
 from datetime import datetime
 
 # package imports
-from flask import request, abort, current_app, g
+from flask import request, current_app, g
+from flask_smorest import abort
 from flask_login import current_user, login_required
 from functools import wraps
 

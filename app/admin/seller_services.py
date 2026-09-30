@@ -177,9 +177,14 @@ class AdminSellerService:
             seller.verification_status = SellerVerificationStatus.VERIFIED
             seller.verification_note = note
             AdminAuditService.record(
-                session, actor, "seller.verify",
-                target_type="seller", target_id=seller_id, reason=note,
-                before=before, after={"verification_status": "verified"},
+                session,
+                actor,
+                "seller.verify",
+                target_type="seller",
+                target_id=seller_id,
+                reason=note,
+                before=before,
+                after={"verification_status": "verified"},
             )
             return AdminSellerService._detail(seller)
 
@@ -199,9 +204,14 @@ class AdminSellerService:
             seller.verification_status = SellerVerificationStatus.REJECTED
             seller.verification_note = reason
             AdminAuditService.record(
-                session, actor, "seller.reject",
-                target_type="seller", target_id=seller_id, reason=reason,
-                before=before, after={"verification_status": "rejected"},
+                session,
+                actor,
+                "seller.reject",
+                target_type="seller",
+                target_id=seller_id,
+                reason=reason,
+                before=before,
+                after={"verification_status": "rejected"},
             )
             return AdminSellerService._detail(seller)
 
@@ -215,9 +225,14 @@ class AdminSellerService:
             before = {"is_active": bool(seller.is_active)}
             seller.deactivate()
             AdminAuditService.record(
-                session, actor, "seller.suspend",
-                target_type="seller", target_id=seller_id, reason=reason,
-                before=before, after={"is_active": False},
+                session,
+                actor,
+                "seller.suspend",
+                target_type="seller",
+                target_id=seller_id,
+                reason=reason,
+                before=before,
+                after={"is_active": False},
             )
             return AdminSellerService._detail(seller)
 
@@ -228,9 +243,14 @@ class AdminSellerService:
             before = {"is_active": bool(seller.is_active)}
             seller.activate()
             AdminAuditService.record(
-                session, actor, "seller.unsuspend",
-                target_type="seller", target_id=seller_id, reason=reason,
-                before=before, after={"is_active": True},
+                session,
+                actor,
+                "seller.unsuspend",
+                target_type="seller",
+                target_id=seller_id,
+                reason=reason,
+                before=before,
+                after={"is_active": True},
             )
             return AdminSellerService._detail(seller)
 
@@ -251,8 +271,12 @@ class AdminSellerService:
             }
             seller.market_verification_status = new_status
             AdminAuditService.record(
-                session, actor, "seller.market_review",
-                target_type="seller", target_id=seller_id, reason=reason,
+                session,
+                actor,
+                "seller.market_review",
+                target_type="seller",
+                target_id=seller_id,
+                reason=reason,
                 before=before,
                 after={"market_verification_status": new_status.value},
             )
@@ -279,9 +303,13 @@ class AdminSellerService:
             for k, v in changes.items():
                 setattr(seller, k, v)
             AdminAuditService.record(
-                session, actor, "seller.edit_payout",
-                target_type="seller", target_id=seller_id,
-                before=before, after=changes,
+                session,
+                actor,
+                "seller.edit_payout",
+                target_type="seller",
+                target_id=seller_id,
+                before=before,
+                after=changes,
             )
             return AdminSellerService._detail(seller)
 
@@ -292,9 +320,13 @@ class AdminSellerService:
             before = {"is_featured": bool(seller.is_featured)}
             seller.is_featured = bool(featured)
             AdminAuditService.record(
-                session, actor,
+                session,
+                actor,
                 "seller.feature" if featured else "seller.unfeature",
-                target_type="seller", target_id=seller_id, reason=reason,
-                before=before, after={"is_featured": bool(featured)},
+                target_type="seller",
+                target_id=seller_id,
+                reason=reason,
+                before=before,
+                after={"is_featured": bool(featured)},
             )
             return AdminSellerService._detail(seller)

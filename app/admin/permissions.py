@@ -111,7 +111,10 @@ def _role_of(user):
 
 
 def is_super_admin(user) -> bool:
-    return bool(getattr(user, "is_admin", False)) or _role_of(user) is AdminRole.SUPER_ADMIN
+    return (
+        bool(getattr(user, "is_admin", False))
+        or _role_of(user) is AdminRole.SUPER_ADMIN
+    )
 
 
 def is_staff(user) -> bool:

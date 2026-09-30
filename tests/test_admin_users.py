@@ -13,7 +13,12 @@ import pytest
 from main.setup import create_app
 
 from app.admin.services import AdminUserService, _account_status
-from app.libs.errors import ConflictError, ForbiddenError, NotFoundError, ValidationError
+from app.libs.errors import (
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    ValidationError,
+)
 from app.users.models import User
 
 
