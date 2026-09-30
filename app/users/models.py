@@ -396,6 +396,14 @@ class Seller(BaseModel):
     verification_status = db.Column(
         db.Enum(SellerVerificationStatus), default=SellerVerificationStatus.UNVERIFIED
     )
+    # Latest admin note behind the current verification_status (why a shop was
+    # verified or rejected). The full history lives in admin_audit_logs; this
+    # is the denormalised "current reason" a reviewer sees on the shop.
+    verification_note = db.Column(db.String(500), nullable=True)
+    # Editorial promotion of a shop (admin-curated). Distinct from
+    # verification_status, which is KYC/trust, and from is_active, which is
+    # whether the shop can sell at all.
+    is_featured = db.Column(db.Boolean, default=False, nullable=False)
     is_active = db.Column(db.Boolean, default=True)
     deactivated_at = db.Column(db.DateTime)
     paystack_subaccount_code = db.Column(db.String(50), nullable=True)

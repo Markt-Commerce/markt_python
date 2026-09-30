@@ -3,6 +3,8 @@
 - AdminAuditService: the audit recorder every admin action writes through.
 - AdminUserService: §1 user management (view, suspend/ban, verification,
   force-logout, profile correction, role toggling).
+- AdminSellerService: §2 seller verification & shop (queue, verify/reject,
+  suspend, market-verification review, payout edit, feature toggle).
 """
 
 from typing import Any, Optional

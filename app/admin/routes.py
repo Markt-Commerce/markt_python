@@ -17,12 +17,20 @@ from .schemas import (
     AdminMeSchema,
     AdminReasonSchema,
     AdminResendVerificationResponseSchema,
+    AdminSellerDetailSchema,
+    AdminSellerListQuerySchema,
+    AdminSellerListResponseSchema,
+    AdminSellerMarketReviewSchema,
+    AdminSellerPayoutEditSchema,
+    AdminSellerRejectSchema,
+    AdminSellerVerifySchema,
     AdminUserDetailSchema,
     AdminUserEditSchema,
     AdminUserListQuerySchema,
     AdminUserListResponseSchema,
     AdminUserRolesSchema,
 )
+from .seller_services import AdminSellerService
 from .services import AdminUserService
 
 bp = Blueprint(
@@ -212,6 +220,168 @@ class AdminUserRoles(MethodView):
                 user_id,
                 is_buyer=data.get("is_buyer"),
                 is_seller=data.get("is_seller"),
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+# ==================== §2 Seller verification & shop ====================
+
+
+@bp.route("/sellers")
+class AdminSellers(MethodView):
+    @login_required
+    @require_permission(Permission.SELLER_VIEW)
+    @bp.arguments(AdminSellerListQuerySchema, location="query")
+    @bp.response(200, AdminSellerListResponseSchema)
+    def get(self, args):
+        """Verification queue / shop directory, filterable by verification
+        status, market-verification status, active and featured flags."""
+        return AdminSellerService.list_sellers(
+            q=args.get("q"),
+            verification_status=args.get("verification_status"),
+            market_status=args.get("market_status"),
+            is_active=args.get("is_active"),
+            is_featured=args.get("is_featured"),
+            page=args.get("page", 1),
+            per_page=args.get("per_page", 20),
+        )
+
+
+@bp.route("/sellers/<int:seller_id>")
+class AdminSellerDetail(MethodView):
+    @login_required
+    @require_permission(Permission.SELLER_VIEW)
+    @bp.response(200, AdminSellerDetailSchema)
+    def get(self, seller_id):
+        """Full shop detail incl. verification data, payout and market info."""
+        try:
+            return AdminSellerService.get_seller(seller_id)
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/sellers/<int:seller_id>/verify")
+class AdminSellerVerify(MethodView):
+    @login_required
+    @require_permission(Permission.SELLER_VERIFY)
+    @bp.arguments(AdminSellerVerifySchema)
+    @bp.response(200, AdminSellerDetailSchema)
+    def post(self, data, seller_id):
+        """Approve a shop's verification."""
+        try:
+            return AdminSellerService.verify_seller(
+                current_user, seller_id, data.get("note")
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/sellers/<int:seller_id>/reject")
+class AdminSellerReject(MethodView):
+    @login_required
+    @require_permission(Permission.SELLER_VERIFY)
+    @bp.arguments(AdminSellerRejectSchema)
+    @bp.response(200, AdminSellerDetailSchema)
+    def post(self, data, seller_id):
+        """Reject a shop's verification (reason required)."""
+        try:
+            return AdminSellerService.reject_seller(
+                current_user, seller_id, data["reason"]
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/sellers/<int:seller_id>/suspend")
+class AdminSellerSuspend(MethodView):
+    @login_required
+    @require_permission(Permission.SELLER_SUSPEND)
+    @bp.arguments(AdminReasonSchema)
+    @bp.response(200, AdminSellerDetailSchema)
+    def post(self, data, seller_id):
+        """Stop a shop selling (deactivates the seller account)."""
+        try:
+            return AdminSellerService.suspend_seller(
+                current_user, seller_id, data.get("reason")
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/sellers/<int:seller_id>/unsuspend")
+class AdminSellerUnsuspend(MethodView):
+    @login_required
+    @require_permission(Permission.SELLER_SUSPEND)
+    @bp.arguments(AdminReasonSchema)
+    @bp.response(200, AdminSellerDetailSchema)
+    def post(self, data, seller_id):
+        """Reactivate a suspended shop."""
+        try:
+            return AdminSellerService.unsuspend_seller(
+                current_user, seller_id, data.get("reason")
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/sellers/<int:seller_id>/market-verification")
+class AdminSellerMarketReview(MethodView):
+    @login_required
+    @require_permission(Permission.SELLER_MARKET_REVIEW)
+    @bp.arguments(AdminSellerMarketReviewSchema)
+    @bp.response(200, AdminSellerDetailSchema)
+    def post(self, data, seller_id):
+        """Confirm or override a shop's market-verification status."""
+        try:
+            return AdminSellerService.review_market_verification(
+                current_user, seller_id, data["status"], data.get("reason")
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/sellers/<int:seller_id>/payout")
+class AdminSellerPayout(MethodView):
+    @login_required
+    @require_permission(Permission.SELLER_EDIT_PAYOUT)
+    @bp.arguments(AdminSellerPayoutEditSchema)
+    @bp.response(200, AdminSellerDetailSchema)
+    def patch(self, data, seller_id):
+        """Edit/verify a shop's payout bank details."""
+        try:
+            return AdminSellerService.edit_payout(current_user, seller_id, data)
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/sellers/<int:seller_id>/feature")
+class AdminSellerFeature(MethodView):
+    @login_required
+    @require_permission(Permission.SELLER_FEATURE)
+    @bp.arguments(AdminReasonSchema)
+    @bp.response(200, AdminSellerDetailSchema)
+    def post(self, data, seller_id):
+        """Feature (promote) a shop."""
+        try:
+            return AdminSellerService.set_featured(
+                current_user, seller_id, True, data.get("reason")
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/sellers/<int:seller_id>/unfeature")
+class AdminSellerUnfeature(MethodView):
+    @login_required
+    @require_permission(Permission.SELLER_FEATURE)
+    @bp.arguments(AdminReasonSchema)
+    @bp.response(200, AdminSellerDetailSchema)
+    def post(self, data, seller_id):
+        """Remove a shop from featured."""
+        try:
+            return AdminSellerService.set_featured(
+                current_user, seller_id, False, data.get("reason")
             )
         except APIError as e:
             abort(e.status_code, message=e.message)
