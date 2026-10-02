@@ -1,5 +1,7 @@
 from marshmallow import Schema, fields, validate
 
+from app.users.schemas import NormalisedEmail
+
 
 class AdminMeSchema(Schema):
     """The signed-in staff member's own admin standing -- a sanity/bootstrap
@@ -11,6 +13,18 @@ class AdminMeSchema(Schema):
     is_super_admin = fields.Bool()
     admin_role = fields.Str(allow_none=True)
     permissions = fields.List(fields.Str())
+
+
+class AdminLoginSchema(Schema):
+    email = NormalisedEmail(required=True)
+    password = fields.Str(required=True, load_only=True)
+
+
+class AdminLoginResponseSchema(AdminMeSchema):
+    """/admin/me plus the bearer token, so the console can render the shell
+    without a second round trip."""
+
+    access_token = fields.Str()
 
 
 # --- §1 user management --------------------------------------------------

@@ -5,15 +5,28 @@ management and §2 seller verification land on this same blueprint in the
 following increments.
 """
 
+from io import BytesIO
+
+from flask import request
 from flask.views import MethodView
 from flask_login import current_user
 from flask_smorest import Blueprint, abort
+from werkzeug.utils import secure_filename
 
-from app.libs.decorators import login_required, require_permission, staff_required
+from app.libs.decorators import (
+    login_required,
+    rate_limit,
+    require_permission,
+    staff_required,
+)
 from app.libs.errors import APIError
+from app.users.verification import VerificationThrottled
 
-from .permissions import Permission, is_super_admin, permissions_for
+from .auth_services import AdminAuthService, admin_me_payload
+from .permissions import Permission
 from .schemas import (
+    AdminLoginResponseSchema,
+    AdminLoginSchema,
     AdminMeSchema,
     AdminReasonSchema,
     AdminResendVerificationResponseSchema,
@@ -48,14 +61,39 @@ class AdminMe(MethodView):
     @bp.response(200, AdminMeSchema)
     def get(self):
         """The signed-in staff member's role and resolved permissions."""
-        return {
-            "user_id": current_user.id,
-            "email": current_user.email,
-            "is_admin": bool(current_user.is_admin),
-            "is_super_admin": is_super_admin(current_user),
-            "admin_role": current_user.admin_role,
-            "permissions": sorted(permissions_for(current_user)),
-        }
+        return admin_me_payload(current_user)
+
+
+# ==================== Staff sign-in ====================
+
+
+@bp.route("/auth/login")
+class AdminLogin(MethodView):
+    @rate_limit(10)
+    @bp.arguments(AdminLoginSchema)
+    @bp.response(200, AdminLoginResponseSchema)
+    @bp.alt_response(401, description="Invalid credentials or blocked account")
+    @bp.alt_response(403, description="Not staff, or email not verified")
+    def post(self, credentials):
+        """Sign a staff member in to the admin console.
+
+        Unlike /users/login this needs no buyer or seller profile, and sends
+        no verification code. Returns a bearer token plus the /admin/me body.
+        """
+        try:
+            return AdminAuthService.login(credentials["email"], credentials["password"])
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/auth/logout")
+class AdminLogout(MethodView):
+    @login_required
+    @bp.response(204)
+    def post(self):
+        """Sign out by revoking every bearer token this account holds."""
+        AdminAuthService.logout(current_user.id)
+        return None
 
 
 # ==================== §1 User management ====================
@@ -98,6 +136,30 @@ class AdminUserDetail(MethodView):
         """Correct basic profile fields (phone, username, avatar)."""
         try:
             return AdminUserService.edit_profile(current_user, user_id, data)
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/users/<user_id>/profile-picture")
+class AdminUserProfilePicture(MethodView):
+    @login_required
+    @require_permission(Permission.USER_EDIT)
+    @bp.response(200, AdminUserDetailSchema)
+    @bp.alt_response(400, description="No file in the request")
+    @bp.alt_response(422, description="Not a usable image")
+    def post(self, user_id):
+        """Replace a user's profile picture (multipart/form-data, field
+        ``file``). JPEG, PNG, WebP or GIF, up to 10 MB."""
+        file = request.files.get("file")
+        if not file or not file.filename:
+            abort(400, message="No file provided")
+        filename = secure_filename(file.filename)
+        if not filename:
+            abort(400, message="Invalid filename")
+        try:
+            return AdminUserService.upload_profile_picture(
+                current_user, user_id, BytesIO(file.read()), filename
+            )
         except APIError as e:
             abort(e.status_code, message=e.message)
 
@@ -186,6 +248,13 @@ class AdminUserResendVerification(MethodView):
         """Send the user a fresh email-verification code."""
         try:
             return AdminUserService.resend_verification(current_user, user_id)
+        except VerificationThrottled as e:
+            abort(
+                429,
+                message=e.message,
+                errors={"retry_after": e.retry_after},
+                headers={"Retry-After": str(e.retry_after)},
+            )
         except APIError as e:
             abort(e.status_code, message=e.message)
 

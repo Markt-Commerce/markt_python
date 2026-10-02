@@ -12,6 +12,8 @@ from typing import Any, Optional
 from sqlalchemy import or_
 
 from app.libs.errors import (
+    APIError,
+    AuthError,
     ConflictError,
     ForbiddenError,
     NotFoundError,
@@ -387,7 +389,22 @@ class AdminUserService:
 
         from app.users.services import AuthService
 
-        AuthService.send_email_verification(email)  # may raise AuthError
+        # AuthService reports every failure as AuthError, which is a 401.
+        # On this endpoint a 401 would tell the console the *operator's*
+        # session had ended, so translate to what actually went wrong.
+        # VerificationThrottled passes through for the route to turn into 429.
+        try:
+            AuthService.send_email_verification(email)
+        except AuthError as e:
+            if e.message == "Email already verified":
+                raise ValidationError("Email already verified")
+            if e.message == "User not found":
+                raise NotFoundError("User not found")
+            raise APIError(
+                "The verification email could not be sent. "
+                "Try again in a few minutes.",
+                status_code=503,
+            )
 
         with session_scope() as session:
             AdminAuditService.record(
@@ -454,6 +471,52 @@ class AdminUserService:
                 target_id=user_id,
                 before=before,
                 after=changes,
+            )
+            return AdminUserService._detail(user)
+
+    @staticmethod
+    def upload_profile_picture(actor, user_id, file_stream, filename) -> dict:
+        """Replace a user's profile picture with an uploaded image.
+
+        Reuses the customer upload path (UserService.upload_profile_picture),
+        which stores the image, generates variants and removes the old one,
+        so an admin-set avatar is indistinguishable from a self-set one."""
+        from app.media.errors import MediaUploadError
+        from app.media.services import media_service
+        from app.users.services import UserService
+
+        with read_scope() as session:
+            user = AdminUserService._load(session, user_id)
+            AdminUserService._require_not_deleted(user)
+            before = {"profile_picture": user.profile_picture}
+
+        # Validate up front: UserService folds every failure, including a bad
+        # file, into one AuthError (a 401), which would read as the operator's
+        # session ending. Checking here lets a bad file come back as a 422.
+        try:
+            media_service._validate_image(file_stream, filename)
+        except MediaUploadError as e:
+            raise ValidationError(str(e))
+        file_stream.seek(0)
+
+        try:
+            UserService.upload_profile_picture(user_id, file_stream, filename)
+        except AuthError:
+            raise APIError(
+                "The image could not be stored. Try again in a few minutes.",
+                status_code=503,
+            )
+
+        with session_scope() as session:
+            user = AdminUserService._load(session, user_id)
+            AdminAuditService.record(
+                session,
+                actor,
+                "user.edit",
+                target_type="user",
+                target_id=user_id,
+                before=before,
+                after={"profile_picture": user.profile_picture},
             )
             return AdminUserService._detail(user)
 
