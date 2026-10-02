@@ -137,8 +137,11 @@ def test_edit_payout_applies_only_payout_fields(mock_scope):
     result = AdminSellerService.edit_payout(
         _actor(),
         1,
-        {"payout_bank_code": "058", "payout_account_number": "0123456789",
-         "shop_name": "hacked"},  # non-payout field must be ignored
+        {
+            "payout_bank_code": "058",
+            "payout_account_number": "0123456789",
+            "shop_name": "hacked",
+        },  # non-payout field must be ignored
     )
     assert seller.payout_bank_code == "058"
     assert seller.payout_account_number == "0123456789"

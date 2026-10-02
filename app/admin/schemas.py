@@ -1,5 +1,7 @@
 from marshmallow import Schema, fields, validate
 
+from app.users.schemas import NormalisedEmail
+
 
 class AdminMeSchema(Schema):
     """The signed-in staff member's own admin standing -- a sanity/bootstrap
@@ -13,6 +15,18 @@ class AdminMeSchema(Schema):
     permissions = fields.List(fields.Str())
 
 
+class AdminLoginSchema(Schema):
+    email = NormalisedEmail(required=True)
+    password = fields.Str(required=True, load_only=True)
+
+
+class AdminLoginResponseSchema(AdminMeSchema):
+    """/admin/me plus the bearer token, so the console can render the shell
+    without a second round trip."""
+
+    access_token = fields.Str()
+
+
 # --- §1 user management --------------------------------------------------
 
 STATUSES = ["active", "suspended", "banned", "deactivated", "deleted"]
@@ -20,7 +34,9 @@ ROLES = ["buyer", "seller", "admin", "staff"]
 
 
 class AdminUserListQuerySchema(Schema):
-    q = fields.Str(required=False, metadata={"description": "Search email/username/id/phone"})
+    q = fields.Str(
+        required=False, metadata={"description": "Search email/username/id/phone"}
+    )
     role = fields.Str(required=False, validate=validate.OneOf(ROLES))
     status = fields.Str(required=False, validate=validate.OneOf(STATUSES))
     page = fields.Int(required=False, load_default=1)
@@ -105,18 +121,25 @@ class AdminResendVerificationResponseSchema(Schema):
 
 # --- §2 seller verification & shop --------------------------------------
 
-SELLER_VERIFICATION_STATUSES = ["unverified", "pending", "verified", "rejected", "suspended"]
+SELLER_VERIFICATION_STATUSES = [
+    "unverified",
+    "pending",
+    "verified",
+    "rejected",
+    "suspended",
+]
 MARKET_STATUSES = ["unverified", "verified", "flagged"]
 
 
 class AdminSellerListQuerySchema(Schema):
-    q = fields.Str(required=False, metadata={"description": "Search shop name/slug/owner email/username"})
+    q = fields.Str(
+        required=False,
+        metadata={"description": "Search shop name/slug/owner email/username"},
+    )
     verification_status = fields.Str(
         required=False, validate=validate.OneOf(SELLER_VERIFICATION_STATUSES)
     )
-    market_status = fields.Str(
-        required=False, validate=validate.OneOf(MARKET_STATUSES)
-    )
+    market_status = fields.Str(required=False, validate=validate.OneOf(MARKET_STATUSES))
     is_active = fields.Bool(required=False)
     is_featured = fields.Bool(required=False)
     page = fields.Int(required=False, load_default=1)
@@ -173,7 +196,9 @@ class AdminSellerListResponseSchema(Schema):
 class AdminSellerVerifySchema(Schema):
     """Optional note stored as the current verification reason."""
 
-    note = fields.Str(required=False, allow_none=True, validate=validate.Length(max=500))
+    note = fields.Str(
+        required=False, allow_none=True, validate=validate.Length(max=500)
+    )
 
 
 class AdminSellerRejectSchema(Schema):
@@ -182,7 +207,9 @@ class AdminSellerRejectSchema(Schema):
 
 class AdminSellerMarketReviewSchema(Schema):
     status = fields.Str(required=True, validate=validate.OneOf(MARKET_STATUSES))
-    reason = fields.Str(required=False, allow_none=True, validate=validate.Length(max=255))
+    reason = fields.Str(
+        required=False, allow_none=True, validate=validate.Length(max=255)
+    )
 
 
 class AdminSellerPayoutEditSchema(Schema):
