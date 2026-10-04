@@ -757,3 +757,37 @@ class SavedAddressUpdateSchema(SavedAddressSchema):
     formatted_address = fields.Str(validate=validate.Length(min=3, max=500))
     latitude = fields.Float(validate=validate.Range(-90, 90))
     longitude = fields.Float(validate=validate.Range(-180, 180))
+
+
+class BootstrapSchema(Schema):
+    """GET /users/bootstrap -- see app/users/bootstrap.py.
+
+    Every section but `profile` is nullable: null means "not available right
+    now, fetch it from its own endpoint", never zero. A count of 0 is a real
+    answer and is sent as 0.
+    """
+
+    profile = fields.Nested(UserProfileSchema, dump_only=True)
+    unread_notifications = fields.Int(dump_only=True, allow_none=True)
+    # Buyer mode only; null for sellers.
+    cart_item_count = fields.Int(dump_only=True, allow_none=True)
+    # Seller mode only; null for buyers.
+    seller_needs_action = fields.Int(dump_only=True, allow_none=True)
+    gamification = fields.Nested(
+        lambda: _gamification_schemas().GamMeSchema(),
+        dump_only=True,
+        allow_none=True,
+    )
+    unseen_achievements = fields.Nested(
+        lambda: _gamification_schemas().UnseenAchievementsSchema(),
+        dump_only=True,
+        allow_none=True,
+    )
+
+
+def _gamification_schemas():
+    # Imported late so the users package does not depend on gamification at
+    # import time.
+    from app.gamification import schemas
+
+    return schemas
