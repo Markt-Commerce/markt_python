@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 # package imports
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
 from sqlalchemy import func
 from redis.exceptions import RedisError, ConnectionError as RedisConnectionError
 
@@ -32,7 +32,7 @@ from app.products.services import ProductService, ProductStatsService
 from app.orders.models import Order, OrderStatus, OrderItem
 from app.notifications.models import NotificationType
 from app.media.services import media_service
-from app.media.models import Media, SocialMediaPost
+from app.media.models import Media, ProductImage, SocialMediaPost
 from app.categories.models import (
     ProductCategory,
     PostCategory,
@@ -67,6 +67,31 @@ from .models import (
 from .constants import POST_STATUS_TRANSITIONS
 
 logger = logging.getLogger(__name__)
+
+
+def _feed_post_products(post):
+    """A feed post's tags, dumped exactly as the post detail endpoint dumps
+    them. Never raises: a broken tag must not drop the post from the feed."""
+    from .schemas import PostProductSchema
+
+    try:
+        return PostProductSchema(many=True).dump(post.tagged_products or [])
+    except Exception as e:
+        logger.warning(f"feed: could not serialise tags for {post.id}: {e}")
+        return []
+
+
+def _tagged_product_card(product_loader):
+    """Loader options for what TaggedProductSchema reads off a tagged product.
+
+    The schema shows each tag's first image and shop name. Without these, every
+    tagged product cost two more queries (images, then seller) while the post
+    was being serialized. Untagged posts load nothing extra.
+    """
+    return [
+        product_loader.selectinload(Product.images).joinedload(ProductImage.media),
+        product_loader.joinedload(Product.seller),
+    ]
 
 
 class _SignalPost:
@@ -753,6 +778,11 @@ class NicheService:
                     joinedload(NichePost.post)
                     .joinedload(Post.tagged_products)
                     .joinedload(PostProduct.product),
+                    *_tagged_product_card(
+                        joinedload(NichePost.post)
+                        .joinedload(Post.tagged_products)
+                        .joinedload(PostProduct.product)
+                    ),
                     joinedload(NichePost.post).joinedload(Post.likes),
                     joinedload(NichePost.post).joinedload(Post.comments),
                 )
@@ -1163,6 +1193,11 @@ class PostService:
                         joinedload(Post.tagged_products).joinedload(
                             PostProduct.product
                         ),
+                        *_tagged_product_card(
+                            joinedload(Post.tagged_products).joinedload(
+                                PostProduct.product
+                            )
+                        ),
                         joinedload(Post.niche_posts).joinedload(NichePost.niche),
                     )
                     .get(post_id)
@@ -1229,6 +1264,11 @@ class PostService:
                         joinedload(Post.tagged_products).joinedload(
                             PostProduct.product
                         ),
+                        *_tagged_product_card(
+                            joinedload(Post.tagged_products).joinedload(
+                                PostProduct.product
+                            )
+                        ),
                         joinedload(Post.niche_posts).joinedload(NichePost.niche),
                     )
                     .get(post_id)
@@ -1283,6 +1323,9 @@ class PostService:
                 .options(
                     joinedload(Post.social_media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
+                    *_tagged_product_card(
+                        joinedload(Post.tagged_products).joinedload(PostProduct.product)
+                    ),
                     # Add these to load the relationships needed for counting
                     joinedload(Post.likes),
                     joinedload(Post.comments),
@@ -1524,6 +1567,9 @@ class PostService:
                 .options(
                     joinedload(Post.social_media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
+                    *_tagged_product_card(
+                        joinedload(Post.tagged_products).joinedload(PostProduct.product)
+                    ),
                     joinedload(Post.categories).joinedload(PostCategory.category),
                 )
             )
@@ -1549,6 +1595,9 @@ class PostService:
                 .options(
                     joinedload(Post.social_media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
+                    *_tagged_product_card(
+                        joinedload(Post.tagged_products).joinedload(PostProduct.product)
+                    ),
                     joinedload(Post.categories).joinedload(PostCategory.category),
                 )
             )
@@ -1680,6 +1729,9 @@ class PostService:
                     joinedload(Post.user),
                     joinedload(Post.social_media),
                     joinedload(Post.tagged_products).joinedload(PostProduct.product),
+                    *_tagged_product_card(
+                        joinedload(Post.tagged_products).joinedload(PostProduct.product)
+                    ),
                     joinedload(Post.likes),
                     joinedload(Post.comments),
                     # Add niche posts relationship
@@ -2564,6 +2616,16 @@ class FeedService:
                             joinedload(Post.user),
                             joinedload(Post.social_media),
                             joinedload(Post.niche_posts).joinedload(NichePost.niche),
+                            # Tags ride along with the page, so a card can show
+                            # its tagged products without a request per tag.
+                            joinedload(Post.tagged_products).joinedload(
+                                PostProduct.product
+                            ),
+                            *_tagged_product_card(
+                                joinedload(Post.tagged_products).joinedload(
+                                    PostProduct.product
+                                )
+                            ),
                         )
                         .filter(
                             Post.id.in_(post_ids),
@@ -2721,6 +2783,10 @@ class FeedService:
                                     "comments_count": comments_counts.get(post.id, 0),
                                     "liked_by_me": post.id in liked_post_ids,
                                     "is_saved": post.id in saved_post_ids,
+                                    # Same shape as the post detail endpoint
+                                    # (PostDetailSchema.products), so the app
+                                    # reads tags one way wherever they appear.
+                                    "products": _feed_post_products(post),
                                     "created_at": post.created_at.isoformat(),
                                     "score": score,
                                     "niche": (
@@ -4496,6 +4562,11 @@ class TrendingService:
                             joinedload(Post.social_media),
                             joinedload(Post.tagged_products).joinedload(
                                 PostProduct.product
+                            ),
+                            *_tagged_product_card(
+                                joinedload(Post.tagged_products).joinedload(
+                                    PostProduct.product
+                                )
                             ),
                             joinedload(Post.likes),
                             joinedload(Post.comments),
