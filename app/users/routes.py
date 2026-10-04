@@ -64,6 +64,7 @@ from .schemas import (
     ShopSearchArgs,
     SavedAddressSchema,
     SavedAddressUpdateSchema,
+    BootstrapSchema,
 )
 from .services import (
     AuthService,
@@ -290,6 +291,26 @@ class AccountDeletion(MethodView):
         # deleted_at rather than being revoked here.
         logout_user()
         return result
+
+
+@bp.route("/bootstrap")
+class UserBootstrap(MethodView):
+    @login_required
+    @bp.response(200, BootstrapSchema)
+    def get(self):
+        """Profile, badge counts and gamification in one call, for app start.
+
+        Replaces five requests on a cold start; see app/users/bootstrap.py.
+        The individual endpoints are unchanged.
+        """
+        from .bootstrap import build_bootstrap
+
+        try:
+            return build_bootstrap(current_user)
+        except AuthError as e:
+            abort(e.status_code, message=e.message)
+        except ValueError as e:
+            abort(400, message=str(e))
 
 
 @bp.route("/profile")
