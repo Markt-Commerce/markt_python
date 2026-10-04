@@ -3,7 +3,7 @@ from marshmallow import Schema, fields, validate
 from app.libs.schemas import PaginationSchema, PaginationQueryArgs
 from app.libs.errors import ValidationError
 
-from app.products.schemas import ProductSchema
+from app.products.schemas import ProductSchema, ProductSimpleSchema
 from app.users.schemas import UserSimpleSchema, SellerSimpleSchema
 from app.categories.schemas import CategorySchema
 
@@ -362,8 +362,37 @@ class CollectionSchema(Schema):
 # Use SocialMediaPostSchema from app.media.schemas for media operations
 
 
+class TaggedProductSchema(ProductSimpleSchema):
+    """What a post needs to show a tagged product without a second request.
+
+    `product_id` alone made the app fetch /products/{id} for every tag on
+    every post it opened. This is the card: name, price, first image (with
+    ProductSimpleSchema's never-raises thumbnail), the shop it belongs to, and
+    whether it can be bought right now -- a tag can outlive its stock, and the
+    card should not offer "Add to cart" for something that is gone.
+    """
+
+    price = fields.Float(dump_only=True)
+    is_available = fields.Method("get_is_available", dump_only=True)
+    shop_name = fields.Method("get_shop_name", dump_only=True)
+
+    def get_is_available(self, obj):
+        try:
+            return bool(obj.is_available())
+        except Exception:
+            return False
+
+    def get_shop_name(self, obj):
+        seller = getattr(obj, "seller", None)
+        return getattr(seller, "shop_name", None) if seller else None
+
+
 class PostProductSchema(Schema):
     product_id = fields.Str(required=True)
+    # Output only, so the create and update payloads -- which share this
+    # schema -- are unchanged: clients still send just `product_id`. Null when
+    # the tagged product no longer exists.
+    product = fields.Nested(TaggedProductSchema, dump_only=True, allow_none=True)
 
 
 class PostCreateSchema(Schema):
@@ -602,6 +631,8 @@ class FeedPostSchema(Schema):
     created_at = fields.Str(dump_only=True)
     score = fields.Float(dump_only=True)
     niche = fields.Nested(NicheFeedInfoSchema, dump_only=True, allow_none=True)
+    # Same entries as PostDetailSchema.products: {product_id, product: card}.
+    products = fields.List(fields.Nested(PostProductSchema), dump_only=True)
 
 
 class FeedProductSchema(Schema):
