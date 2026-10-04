@@ -451,7 +451,17 @@ class CommentUpdateSchema(Schema):
 
 class PostDetailSchema(PostSchema):
     social_media = fields.List(fields.Nested("SocialMediaPostSchema"))
-    products = fields.List(fields.Nested(PostProductSchema))
+    # The model's relationship is `tagged_products`, not `products`, so this
+    # field used to look up an attribute that does not exist and marshmallow
+    # dropped it from every response. Tags were saved on create and update but
+    # never came back, and the app's post screen -- which reads
+    # `products[].product_id` to show the tagged product -- always had nothing
+    # to show. Same key and shape as the create payload, so no client changes.
+    products = fields.List(
+        fields.Nested(PostProductSchema),
+        attribute="tagged_products",
+        dump_only=True,
+    )
     user = fields.Nested("UserSimpleSchema")
     status = fields.Enum(PostStatus, by_value=True, dump_only=True)
     # Matches the feed's field of the same name. False for anonymous callers.
