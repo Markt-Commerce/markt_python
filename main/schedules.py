@@ -28,13 +28,13 @@ CELERYBEAT_SCHEDULE = {
     },
     "update-category-trending": {
         "task": "app.socials.tasks.update_category_trending",
-        "schedule": crontab(hour="*/2"),  # Every 2 hours
+        "schedule": crontab(minute="0", hour="*/2"),  # Every 2 hours
         "options": {"queue": "social"},
     },
     # Analytics and cleanup tasks
     "update-feed-analytics": {
         "task": "app.socials.tasks.update_feed_analytics",
-        "schedule": crontab(hour="*/6"),  # Every 6 hours
+        "schedule": crontab(minute="0", hour="*/6"),  # Every 6 hours
         "options": {"queue": "analytics"},
     },
     "cleanup-old-feed-cache": {
@@ -61,12 +61,12 @@ CELERYBEAT_SCHEDULE = {
     },
     "update-media-analytics": {
         "task": "app.media.tasks.update_media_analytics",
-        "schedule": crontab(hour="*/4"),  # Every 4 hours
+        "schedule": crontab(minute="0", hour="*/4"),  # Every 4 hours
         "options": {"queue": "analytics"},
     },
     "expire-unpaid-orders": {
         "task": "app.orders.tasks.expire_unpaid_orders",
-        "schedule": crontab(hour="*/1"),  # Hourly
+        "schedule": crontab(minute="0", hour="*/1"),  # Hourly
         "options": {"queue": "default"},
     },
     "expire-stale-inventory-reservations": {
@@ -81,12 +81,13 @@ CELERYBEAT_SCHEDULE = {
     },
     "recompute-inventory-confidence-scores": {
         "task": "app.inventory.tasks.recompute_confidence_scores",
-        "schedule": crontab(hour="*/6"),  # Every 6 hours -- recency decays over days
+        # Every 6 hours -- recency decays over days
+        "schedule": crontab(minute="0", hour="*/6"),
         "options": {"queue": "default"},
     },
     "settle-eligible-order-items": {
         "task": "app.wallet.tasks.settle_eligible_order_items",
-        "schedule": crontab(hour="*/1"),  # Hourly -- settlement hold is 12h
+        "schedule": crontab(minute="0", hour="*/1"),  # Hourly -- settlement hold is 12h
         "options": {"queue": "default"},
     },
     "expire-stale-fulfilment-allocations": {
@@ -101,7 +102,8 @@ CELERYBEAT_SCHEDULE = {
     },
     "recompute-seller-reliability-scores": {
         "task": "app.fulfilment.tasks.recompute_seller_reliability_scores",
-        "schedule": crontab(hour="*/6"),  # Every 6 hours, same cadence as confidence
+        # Every 6 hours, same cadence as confidence
+        "schedule": crontab(minute="0", hour="*/6"),
         "options": {"queue": "default"},
     },
     "recover-stuck-fulfilment-allocations": {
