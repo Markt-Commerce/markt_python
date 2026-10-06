@@ -204,9 +204,11 @@ def create_flask_app():
     )
     from app.categories.management.commands.list_categories import list_categories
     from app.categories.management.commands.clear_categories import clear_categories
+    from app.admin.management.commands.create_admin import create_admin
 
     app.cli.add_command(populate_categories)
     app.cli.add_command(list_categories)
     app.cli.add_command(clear_categories)
+    app.cli.add_command(create_admin)
 
     return app
