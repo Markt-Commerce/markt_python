@@ -74,7 +74,7 @@ else
 fi
 
 # Check Application
-if curl -f http://localhost:8000/health > /dev/null 2>&1; then
+if curl -f http://localhost:8000/api/v1/health > /dev/null 2>&1; then
     print_status "✅ Application is healthy"
 else
     print_error "❌ Application is not healthy"
@@ -93,7 +93,7 @@ docker-compose -f docker-compose.production.yml ps
 echo ""
 echo "🌐 Access your application:"
 echo "   - API: http://localhost/api/v1"
-echo "   - Health: http://localhost/health"
+echo "   - Health: http://localhost/api/v1/health"
 echo "   - Redis Insight: http://localhost:8001 (if monitoring profile is enabled)"
 
 echo ""

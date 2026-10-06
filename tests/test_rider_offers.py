@@ -136,3 +136,20 @@ class TestTheSweepIsScheduled:
         entry = CELERYBEAT_SCHEDULE["sweep-delivery-offers"]
         assert entry["task"] == "app.deliveries.tasks.sweep_delivery_offers"
         assert entry["schedule"].minute == set(range(60))
+
+
+class TestNoScheduleRunsEveryMinuteByAccident:
+    def test_an_hour_step_also_pins_the_minute(self):
+        # crontab(hour="*/6") leaves minute at its default "*", which is
+        # every minute of every sixth hour -- sixty runs, not one. Every
+        # "hourly" task ran that way. A task that genuinely wants every
+        # minute says so by leaving the hour open too, like the offer sweep.
+        from main.schedules import CELERYBEAT_SCHEDULE
+
+        every_minute_in_some_hours = [
+            name
+            for name, entry in CELERYBEAT_SCHEDULE.items()
+            if entry["schedule"].minute == set(range(60))
+            and entry["schedule"].hour != set(range(24))
+        ]
+        assert every_minute_in_some_hours == []

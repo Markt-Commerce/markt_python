@@ -72,10 +72,19 @@ jobs:
           sudo systemctl is-active --quiet markt
           sudo systemctl is-active --quiet markt-celery
 
+          # Beat imports the same code (main.schedules) and was never restarted
+          # here, so it kept running whatever schedule it booted with. Only
+          # where it is its own unit; a host that embeds beat in the worker
+          # (celery worker -B) restarted it above.
+          if systemctl cat markt-celerybeat >/dev/null 2>&1; then
+            sudo systemctl restart markt-celerybeat
+            sudo systemctl is-active --quiet markt-celerybeat
+          fi
+
           # Prefer explicit health URL when provided, otherwise default to localhost.
           HEALTHCHECK_URL=${{ secrets.HEALTHCHECK_URL }}
           if [ -z "$HEALTHCHECK_URL" ]; then
-            HEALTHCHECK_URL="http://127.0.0.1/health/"
+            HEALTHCHECK_URL="http://127.0.0.1:8000/api/v1/health"
           fi
 
           # Retry health check to tolerate normal app warm-up. The app needs
