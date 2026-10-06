@@ -87,6 +87,18 @@ ESCALATE_AFTER = timedelta(minutes=10)
 # worse off for it.
 ESCALATION_RADII_KM = (5.0, 10.0, 20.0)
 
+# The sweep runs every minute, but a rider must hear about a given order once
+# per widening, not once per sweep: each step alerts once. Past the widest
+# radius there is nobody new to reach, so it only re-alerts at this pace.
+ESCALATION_REPEAT = timedelta(hours=1)
+
+# After this long unclaimed, pushing riders again is not going to move it; it
+# is stuck for a reason a notification cannot fix, and ops' stuck-order
+# sweep is what should pick it up.
+ESCALATION_GIVE_UP = timedelta(hours=24)
+
+ESCALATION_SENT_KEY = "delivery:escalation:{order_id}:{slot}"
+
 
 def now() -> datetime:
     """One clock, so the request path and the sweep agree on 'expired'."""
@@ -159,11 +171,51 @@ def escalation_radius_km(unclaimed_for: timedelta) -> Optional[float]:
     return ESCALATION_RADII_KM[max(index, 0)]
 
 
+def escalation_slot(unclaimed_for: timedelta) -> Optional[str]:
+    """Which escalation alert an order is due, or None if none is.
+
+    Each slot is sent at most once (see ``_claim_escalation``), so this is
+    what turns a once-a-minute sweep into one push per widening rather than
+    one push per minute.
+    """
+    if unclaimed_for < ESCALATE_AFTER or unclaimed_for >= ESCALATION_GIVE_UP:
+        return None
+    step = int(unclaimed_for / ESCALATE_AFTER)
+    if step <= len(ESCALATION_RADII_KM):
+        return f"step{step}"
+    return f"repeat{int(unclaimed_for / ESCALATION_REPEAT)}"
+
+
+def _claim_escalation(order_id: str, slot: str) -> bool:
+    """True exactly once per (order, slot), across sweeps and workers.
+
+    Fails closed: if Redis cannot answer, the order is not re-alerted this
+    minute. Missing one chase is recoverable on the next slot; failing open
+    is how riders got a push for every order every minute.
+    """
+    from external.redis import redis_client
+
+    try:
+        return bool(
+            redis_client.set(
+                ESCALATION_SENT_KEY.format(order_id=order_id, slot=slot),
+                1,
+                ex=int(ESCALATION_GIVE_UP.total_seconds()),
+                nx=True,
+            )
+        )
+    except Exception:
+        logger.warning("Could not record escalation for %s; skipping", order_id)
+        return False
+
+
 def sweep() -> dict:
     """Release lapsed holds and chase unclaimed orders.
 
     Called from the beat schedule. Everything here is idempotent and safe to
-    run twice: it works off timestamps, not off having-been-run.
+    run twice: releasing holds works off timestamps, and each escalation
+    alert is claimed once per slot, so a second run in the same slot sends
+    nothing.
     """
     from app.deliveries.rider_alerts import alert_nearby_riders
     from app.libs.session import session_scope
@@ -231,11 +283,14 @@ def sweep() -> dict:
             since = order.updated_at or order.created_at
             if since is None:
                 continue
-            radius = escalation_radius_km(at - since)
-            if radius is not None:
-                chase.append((order.id, radius))
+            unclaimed_for = at - since
+            slot = escalation_slot(unclaimed_for)
+            if slot is not None:
+                chase.append((order.id, escalation_radius_km(unclaimed_for), slot))
 
-    for order_id, radius in chase:
+    for order_id, radius, slot in chase:
+        if not _claim_escalation(order_id, slot):
+            continue
         if alert_nearby_riders(order_id, radius_km=radius):
             escalated += 1
 
