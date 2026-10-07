@@ -39,6 +39,9 @@ class Permission:
     USER_VERIFY_EMAIL = "user.verify_email"
     USER_FORCE_LOGOUT = "user.force_logout"
     USER_MANAGE_ROLES = "user.manage_roles"
+    # Grant, change or remove staff roles. Held by super_admin only: no role
+    # below lists it, so a scoped staff member can never raise anyone's access.
+    USER_MANAGE_STAFF = "user.manage_staff"
 
     # Sellers (§2)
     SELLER_VIEW = "seller.view"

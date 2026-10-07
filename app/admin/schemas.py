@@ -2,6 +2,8 @@ from marshmallow import Schema, fields, validate
 
 from app.users.schemas import NormalisedEmail
 
+from .permissions import AdminRole
+
 
 class AdminMeSchema(Schema):
     """The signed-in staff member's own admin standing -- a sanity/bootstrap
@@ -112,6 +114,19 @@ class AdminUserEditSchema(Schema):
 class AdminUserRolesSchema(Schema):
     is_buyer = fields.Bool(required=False, allow_none=True)
     is_seller = fields.Bool(required=False, allow_none=True)
+
+
+class AdminUserStaffRoleSchema(Schema):
+    """Body for setting a staff role. ``null`` removes staff standing."""
+
+    admin_role = fields.Str(
+        required=True,
+        allow_none=True,
+        validate=validate.OneOf([role.value for role in AdminRole]),
+    )
+    reason = fields.Str(
+        required=False, allow_none=True, validate=validate.Length(max=255)
+    )
 
 
 class AdminResendVerificationResponseSchema(Schema):

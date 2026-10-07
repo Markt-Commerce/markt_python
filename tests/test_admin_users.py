@@ -177,6 +177,89 @@ def test_manage_roles_wont_enable_a_missing_seller_account(mock_scope):
         AdminUserService.manage_roles(actor, "USR_9", is_seller=True)
 
 
+@patch("app.admin.services.session_scope")
+def test_super_admin_grants_a_staff_role_and_audits(mock_scope):
+    actor = _user(id="ADM_0", admin_role="super_admin")
+    target = _user(id="USR_9")
+    session = _mock_session(user=target)
+    _patch_session(mock_scope, session)
+
+    result = AdminUserService.set_staff_role(actor, "USR_9", "support", "new hire")
+
+    assert target.admin_role == "support"
+    assert result["admin_role"] == "support"
+    audit = session.add.call_args.args[0]
+    assert audit.action == "user.role_change"
+    assert audit.before == {"admin_role": None}
+    assert audit.after == {"admin_role": "support"}
+    assert audit.reason == "new hire"
+
+
+@patch("app.admin.services.session_scope")
+def test_super_admin_removes_a_staff_role(mock_scope):
+    actor = _user(id="ADM_0", admin_role="super_admin")
+    target = _user(id="USR_9", admin_role="super_admin")
+    _patch_session(mock_scope, _mock_session(user=target))
+    result = AdminUserService.set_staff_role(actor, "USR_9", None)
+    assert target.admin_role is None and result["admin_role"] is None
+
+
+@patch("app.admin.services.session_scope")
+def test_unchanged_staff_role_writes_no_audit(mock_scope):
+    actor = _user(id="ADM_0", admin_role="super_admin")
+    target = _user(id="USR_9", admin_role="finance")
+    session = _mock_session(user=target)
+    _patch_session(mock_scope, session)
+    AdminUserService.set_staff_role(actor, "USR_9", "finance")
+    session.add.assert_not_called()
+
+
+@patch("app.admin.services.session_scope")
+def test_cannot_change_your_own_staff_role(mock_scope):
+    actor = _user(id="ADM_0", admin_role="super_admin")
+    _patch_session(mock_scope, _mock_session(user=actor))
+    with pytest.raises(ForbiddenError):
+        AdminUserService.set_staff_role(actor, "ADM_0", "support")
+
+
+@patch("app.admin.services.session_scope")
+def test_scoped_staff_cannot_change_staff_roles(mock_scope):
+    actor = _user(id="ADM_1", admin_role="support")
+    _patch_session(mock_scope, _mock_session(user=_user(id="USR_9")))
+    with pytest.raises(ForbiddenError):
+        AdminUserService.set_staff_role(actor, "USR_9", "support")
+
+
+@patch("app.admin.services.session_scope")
+def test_legacy_admin_flag_staff_role_is_not_changed(mock_scope):
+    actor = _user(id="ADM_0", admin_role="super_admin")
+    target = _user(id="ADM_2", is_admin=True)
+    _patch_session(mock_scope, _mock_session(user=target))
+    with pytest.raises(ValidationError):
+        AdminUserService.set_staff_role(actor, "ADM_2", "support")
+
+
+@patch("app.admin.services.session_scope")
+def test_banned_account_gets_no_staff_role_but_can_lose_one(mock_scope):
+    actor = _user(id="ADM_0", admin_role="super_admin")
+    target = _user(id="USR_9", admin_role="catalog")
+    target.ban("fraud")
+    _patch_session(mock_scope, _mock_session(user=target))
+    with pytest.raises(ValidationError):
+        AdminUserService.set_staff_role(actor, "USR_9", "support")
+    AdminUserService.set_staff_role(actor, "USR_9", None)
+    assert target.admin_role is None
+
+
+@patch("app.admin.services.session_scope")
+def test_deleted_account_gets_no_staff_role(mock_scope):
+    actor = _user(id="ADM_0", admin_role="super_admin")
+    target = _user(id="USR_9", deleted_at=datetime.utcnow())
+    _patch_session(mock_scope, _mock_session(user=target))
+    with pytest.raises(ValidationError):
+        AdminUserService.set_staff_role(actor, "USR_9", "support")
+
+
 @patch("app.admin.services.read_scope")
 def test_resend_verification_rejects_already_verified(mock_read):
     actor = _user(id="ADM_1", is_admin=True)
@@ -236,3 +319,34 @@ def test_support_can_list_users(mock_get_user, mock_list, client):
     resp = client.get("/api/v1/admin/users")
     assert resp.status_code == 200
     mock_list.assert_called_once()
+
+
+@patch("flask_login.utils._get_user")
+def test_only_super_admin_reaches_staff_role_endpoint(mock_get_user, client):
+    mock_get_user.return_value = _authed(is_admin=False, admin_role="support")
+    resp = client.post(
+        "/api/v1/admin/users/USR_9/staff-role", json={"admin_role": "support"}
+    )
+    assert resp.status_code == 403
+
+
+@patch("flask_login.utils._get_user")
+def test_staff_role_endpoint_rejects_unknown_role(mock_get_user, client):
+    mock_get_user.return_value = _authed(is_admin=False, admin_role="super_admin")
+    resp = client.post(
+        "/api/v1/admin/users/USR_9/staff-role", json={"admin_role": "owner"}
+    )
+    assert resp.status_code == 422
+
+
+@patch("app.admin.services.AdminUserService.set_staff_role")
+@patch("flask_login.utils._get_user")
+def test_super_admin_sets_staff_role_over_http(mock_get_user, mock_set, client):
+    mock_get_user.return_value = _authed(is_admin=False, admin_role="super_admin")
+    mock_set.return_value = {"id": "USR_9", "email": "a@b.co", "admin_role": None}
+    resp = client.post(
+        "/api/v1/admin/users/USR_9/staff-role",
+        json={"admin_role": None, "reason": "left the team"},
+    )
+    assert resp.status_code == 200
+    assert mock_set.call_args.args[1:] == ("USR_9", None, "left the team")

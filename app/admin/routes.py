@@ -42,6 +42,7 @@ from .schemas import (
     AdminUserListQuerySchema,
     AdminUserListResponseSchema,
     AdminUserRolesSchema,
+    AdminUserStaffRoleSchema,
 )
 from .seller_services import AdminSellerService
 from .services import AdminUserService
@@ -289,6 +290,22 @@ class AdminUserRoles(MethodView):
                 user_id,
                 is_buyer=data.get("is_buyer"),
                 is_seller=data.get("is_seller"),
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/users/<user_id>/staff-role")
+class AdminUserStaffRole(MethodView):
+    @login_required
+    @require_permission(Permission.USER_MANAGE_STAFF)
+    @bp.arguments(AdminUserStaffRoleSchema)
+    @bp.response(200, AdminUserDetailSchema)
+    def post(self, data, user_id):
+        """Grant, change or remove a user's staff role (super admins only)."""
+        try:
+            return AdminUserService.set_staff_role(
+                current_user, user_id, data["admin_role"], data.get("reason")
             )
         except APIError as e:
             abort(e.status_code, message=e.message)
