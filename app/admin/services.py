@@ -2,7 +2,7 @@
 
 - AdminAuditService: the audit recorder every admin action writes through.
 - AdminUserService: §1 user management (view, suspend/ban, verification,
-  force-logout, profile correction, role toggling).
+  force-logout, profile correction, role toggling, staff roles).
 - AdminSellerService: §2 seller verification & shop (queue, verify/reject,
   suspend, market-verification review, payout edit, feature toggle).
 """
@@ -581,4 +581,50 @@ class AdminUserService:
                 redis_client.delete(CURRENT_ROLE_CACHE_KEY.format(user_id=user.id))
             except Exception:
                 pass
+            return AdminUserService._detail(user)
+
+    @staticmethod
+    def set_staff_role(actor, user_id, admin_role=None, reason=None) -> dict:
+        """Grant, change or remove a user's staff role (``None`` removes it).
+
+        - Super admins only. The route's permission gate already says so;
+          this repeats it so the service is safe to call on its own.
+        - Never your own role. Because the actor is a super admin who is not
+          the target, at least one super admin always remains.
+        - Not a deleted account, and no role for a banned one (removing a
+          banned account's role is fine).
+        - Not a legacy ``is_admin`` account: that flag grants everything
+          whatever the role, so changing the role there would mislead.
+        """
+        with session_scope() as session:
+            user = AdminUserService._load(session, user_id)
+            AdminUserService._require_not_deleted(user)
+            if not is_super_admin(actor):
+                raise ForbiddenError("Only a super admin may change staff roles")
+            if getattr(actor, "id", None) == user.id:
+                raise ForbiddenError("You cannot change your own staff role")
+            if user.is_admin:
+                raise ValidationError(
+                    "This account has the legacy full-access admin flag, so its "
+                    "staff role can't be changed here"
+                )
+            if admin_role and user.banned_at:
+                raise ValidationError(
+                    "Unban this account before giving it a staff role"
+                )
+            if user.admin_role == admin_role:
+                return AdminUserService._detail(user)
+
+            before = {"admin_role": user.admin_role}
+            user.admin_role = admin_role
+            AdminAuditService.record(
+                session,
+                actor,
+                "user.role_change",
+                target_type="user",
+                target_id=user_id,
+                reason=reason,
+                before=before,
+                after={"admin_role": admin_role},
+            )
             return AdminUserService._detail(user)
