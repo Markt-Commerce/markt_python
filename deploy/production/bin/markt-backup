@@ -1,0 +1,33 @@
+#!/bin/bash
+# Nightly Postgres dump. Kept 14 days on the box; copied to S3 when
+# BACKUP_S3_BUCKET is set in settings.ini (a private bucket, never the media
+# one: CloudFront in front of that would serve the dump to anyone).
+set -euo pipefail
+APP=/srv/markt/app
+DEST=/srv/markt/backups
+ini() { sed -nE "s/^$1=(.*)$/\1/p" $APP/settings.ini | tail -1; }
+
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+FILE=$DEST/markt_db-$STAMP.dump
+PGPASSWORD="$(ini DB_PASSWORD)" pg_dump -h 127.0.0.1 -U "$(ini DB_USER)" -d "$(ini DB_NAME)" -Fc -Z 6 -f "$FILE.part"
+mv "$FILE.part" "$FILE"
+pg_restore -l "$FILE" > /dev/null   # fails loudly on a corrupt dump
+echo "dump ok: $FILE ($(du -h "$FILE" | cut -f1))"
+
+find $DEST -name 'markt_db-*.dump' -mtime +14 -delete
+
+BUCKET="$(ini BACKUP_S3_BUCKET)"
+if [ -n "$BUCKET" ]; then
+  AWS_ACCESS_KEY_ID="$(ini AWS_ACCESS_KEY)" AWS_SECRET_ACCESS_KEY="$(ini AWS_SECRET_KEY)" \
+  /srv/markt/venv/bin/python - "$FILE" "$BUCKET" "$(ini AWS_REGION)" <<'PY'
+import os, sys, boto3
+path, bucket, region = sys.argv[1:4]
+key = f"postgres/{os.path.basename(path)}"
+boto3.client("s3", region_name=region).upload_file(
+    path, bucket, key, ExtraArgs={"ServerSideEncryption": "AES256"}
+)
+print(f"uploaded s3://{bucket}/{key}")
+PY
+else
+  echo "BACKUP_S3_BUCKET not set; local copy only"
+fi
