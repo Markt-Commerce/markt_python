@@ -135,6 +135,42 @@ class RedisClient:
         """Wrapper for Redis setex command"""
         return self.client.setex(name, time, value)
 
+    # --- lists -------------------------------------------------------------
+    # These were missing entirely, and four call sites used them: the offline
+    # message queue in main/sockets.py (both the push and the replay) and the
+    # pending-data buffer in app/realtime/throttler.py. Every one of them
+    # raised AttributeError, which the callers caught and logged -- so every
+    # socket event addressed to a user who was not currently connected was
+    # dropped rather than queued, and nothing was ever replayed on reconnect.
+
+    def lpush(self, name, *values):
+        """Wrapper for Redis lpush command"""
+        return self.client.lpush(name, *values)
+
+    def rpush(self, name, *values):
+        """Wrapper for Redis rpush command"""
+        return self.client.rpush(name, *values)
+
+    def lrange(self, name, start, end):
+        """Wrapper for Redis lrange command"""
+        return self.client.lrange(name, start, end)
+
+    def lpop(self, name, count=None):
+        """Wrapper for Redis lpop command"""
+        return self.client.lpop(name, count)
+
+    def rpop(self, name, count=None):
+        """Wrapper for Redis rpop command"""
+        return self.client.rpop(name, count)
+
+    def llen(self, name):
+        """Wrapper for Redis llen command"""
+        return self.client.llen(name)
+
+    def ltrim(self, name, start, end):
+        """Wrapper for Redis ltrim command"""
+        return self.client.ltrim(name, start, end)
+
     def delete(self, *names):
         """Wrapper for Redis delete command"""
         return self.client.delete(*names)

@@ -1,10 +1,12 @@
 # package imports
-from flask_smorest import Blueprint
+from flask import request
+from flask_smorest import Blueprint, abort
 from flask.views import MethodView
 from flask_login import login_required, login_user, current_user
 from marshmallow import fields
 
 # project imports
+from app.libs.decorators import admin_required
 from app.libs.schemas import PaginationQueryArgs
 
 # app imports
@@ -23,13 +25,38 @@ from .schemas import (
     DeliveryAvailableOrdersResponseSchema,
     DeliveryOrderAcceptRequestSchema,
     DeliveryOrderAcceptResponseSchema,
+    DeliveryOrderOfferResponseSchema,
+    DeliveryPartnerPhotoResponseSchema,
+    DeliveryPartnerUpdateSchema,
     DeliveryActiveAssignmentsResponseSchema,
+    DeliveryJobHistoryQuerySchema,
+    DeliveryJobHistoryResponseSchema,
     LogisticStatusUpdateSchema,
     DeliveryOrderQRResponseSchema,
     DeliveryOrderQRConfirmRequestSchema,
     DeliveryOrderQRConfirmResponseSchema,
+    DeliveryAvailableRunsQuerySchema,
+    DeliveryAvailableRunsResponseSchema,
+    DeliveryRunDetailResponseSchema,
+    DeliveryRunAcceptResponseSchema,
+    DeliveryRunFailRequestSchema,
+    DeliveryRunFailResponseSchema,
+    DeliveryRunStopActionResponseSchema,
+    DeliveryRunPickupConfirmResponseSchema,
+    DeliveryRunOrderPodQRResponseSchema,
+    DeliveryRunOrderPodConfirmRequestSchema,
+    DeliveryRunOrderPodConfirmResponseSchema,
+    DeliveryFailureReportRequestSchema,
+    DeliveryFailureSchema,
+    DeliveryFailureResolveRequestSchema,
+    DeliveryFailureCompleteRequestSchema,
 )
+from app.libs.auth_tokens import generate_auth_token
 from .services import DeliveryService
+from .run_assignment import DeliveryRunAssignmentService
+from .pickup import DeliveryRunPickupService, DeliveryRunPodService
+from .failure import DeliveryFailureService
+from .models import DeliveryCostBearer, DeliveryFailureReason, DeliveryRecoveryAction
 
 bp = Blueprint(
     "deliveries",
@@ -54,7 +81,8 @@ class DeliveryLogin(MethodView):
                 "id": delivery_user.id,
                 "name": delivery_user.name,
                 "status": delivery_user.status.value,
-            }
+            },
+            "access_token": generate_auth_token(delivery_user.id),
         }  # return dict, let flask-smorest build response (same flow as users/login → session cookie set)
 
 
@@ -85,6 +113,41 @@ class DeliveryPartnerMe(MethodView):
         return DeliveryService.get_current_delivery_partner(
             current_user.id
         )  # TODO: This will require session management to link delivery partner to user session.
+
+    @login_required
+    @bp.arguments(DeliveryPartnerUpdateSchema, location="json")
+    @bp.response(200, DeliveryDataResponseSchema)
+    def patch(self, data):
+        """Update the rider's own details.
+
+        Name, email and vehicle type only. The phone number is the login
+        credential and changing it belongs to the OTP flow; status belongs
+        to the online/offline toggle.
+        """
+        return DeliveryService.update_partner(current_user.id, data)
+
+
+@bp.route("/partners/me/photo")
+class DeliveryPartnerPhoto(MethodView):
+    @login_required
+    @bp.response(200, DeliveryPartnerPhotoResponseSchema)
+    def post(self):
+        """Upload the rider's profile picture (multipart, field `file`)."""
+        from io import BytesIO
+
+        from werkzeug.utils import secure_filename
+
+        file = request.files.get("file")
+        if not file:
+            abort(400, message="No file provided")
+
+        filename = secure_filename(file.filename or "")
+        if not filename:
+            abort(400, message="Invalid filename")
+
+        stream = BytesIO(file.read())
+        stream.seek(0)
+        return DeliveryService.upload_profile_picture(current_user.id, stream, filename)
 
 
 @bp.route("/partners/me/status")
@@ -117,10 +180,24 @@ class DeliveryAvailableOrders(MethodView):
         """Get available orders for the delivery partner (paginated)."""
         return DeliveryService.get_available_orders(
             current_user.id,
-            search_radius=args.get("search_radius", 3000),
+            search_radius=args.get("search_radius", 5000),
             page=args.get("page", 1),
             per_page=args.get("per_page", 20),
         )
+
+
+@bp.route("/orders/<string:order_id>/offer")
+class DeliveryOfferOrder(MethodView):
+    @login_required
+    @bp.response(200, DeliveryOrderOfferResponseSchema)
+    def post(self, order_id):
+        """Hold this order for this rider while they decide.
+
+        Returns the expiry the app counts down to. The app counts down to
+        the server's clock rather than its own, which can be minutes out and
+        is the rider's to set.
+        """
+        return DeliveryService.offer_order(current_user.id, order_id)
 
 
 @bp.route("/orders/<string:order_id>/accept")
@@ -148,6 +225,26 @@ class DeliveryActiveAssignments(MethodView):
     def get(self):
         """Get active assignments for the delivery partner"""
         return DeliveryService.get_active_assignments(current_user.id)
+
+
+@bp.route("/assignments/history")
+class DeliveryJobHistory(MethodView):
+    @login_required
+    @bp.arguments(DeliveryJobHistoryQuerySchema, location="query")
+    @bp.response(200, DeliveryJobHistoryResponseSchema)
+    def get(self, query):
+        """Every delivery this rider has taken, newest first.
+
+        /assignments/active only ever showed what they are carrying now,
+        so there was nowhere to answer "what did I deliver on Tuesday"
+        or to tie a wallet credit back to the job that earned it.
+        """
+        return DeliveryService.get_job_history(
+            current_user.id,
+            status=query.get("status"),
+            page=query.get("page", 1),
+            per_page=query.get("per_page", 20),
+        )
 
 
 @bp.route("/assignments/<string:assignment_id>/status")
@@ -180,4 +277,194 @@ class DeliveryOrderQRConfirm(MethodView):
         """Confirm QR code for order escrow release"""
         return DeliveryService.confirm_order_qr_code(
             current_user.id, order_id, data["qr_code"]
+        )
+
+
+@bp.route("/runs/available")
+class DeliveryAvailableRuns(MethodView):
+    @login_required
+    @bp.arguments(DeliveryAvailableRunsQuerySchema, location="query")
+    @bp.response(200, DeliveryAvailableRunsResponseSchema)
+    def get(self, args):
+        """10.6: get available delivery runs for the rider (paginated)."""
+        return DeliveryRunAssignmentService.get_available_runs(
+            current_user.id,
+            search_radius=args.get("search_radius", 5000),
+            page=args.get("page", 1),
+            per_page=args.get("per_page", 20),
+        )
+
+
+@bp.route("/runs/active")
+class DeliveryActiveRun(MethodView):
+    @login_required
+    @bp.response(200, DeliveryRunDetailResponseSchema)
+    def get(self):
+        """10.6: the rider's own run currently in progress (RIDER_ACCEPTED
+        through DELIVERY_IN_PROGRESS), if any -- mirrors GET
+        /assignments/active for the existing single-order flow. Returns
+        {"run_id": null} rather than 404 when there's none."""
+        return DeliveryRunAssignmentService.get_active_run(current_user.id)
+
+
+@bp.route("/runs/<string:run_id>")
+class DeliveryRunDetail(MethodView):
+    @login_required
+    @bp.response(200, DeliveryRunDetailResponseSchema)
+    def get(self, run_id):
+        """10.6: full detail for a run the rider has accepted -- per-
+        seller pickup stops and per-order POD status. Used to refresh
+        state after the thin accept_run response, or to recover on app
+        restart."""
+        return DeliveryRunAssignmentService.get_run_detail(current_user.id, run_id)
+
+
+@bp.route("/runs/<string:run_id>/accept")
+class DeliveryRunAccept(MethodView):
+    @login_required
+    @bp.response(200, DeliveryRunAcceptResponseSchema)
+    def post(self, run_id):
+        """10.6: accept an available delivery run."""
+        return DeliveryRunAssignmentService.accept_run(current_user.id, run_id)
+
+
+@bp.route("/runs/<string:run_id>/reject")
+class DeliveryRunReject(MethodView):
+    @login_required
+    @bp.response(200, DeliveryRunAcceptResponseSchema)
+    def post(self, run_id):
+        """10.6: decline an available delivery run."""
+        return DeliveryRunAssignmentService.reject_run(current_user.id, run_id)
+
+
+@bp.route("/runs/<string:run_id>/fail")
+class DeliveryRunFail(MethodView):
+    @login_required
+    @bp.arguments(DeliveryRunFailRequestSchema, location="json")
+    @bp.response(200, DeliveryRunFailResponseSchema)
+    def post(self, data, run_id):
+        """10.7: rider reports they can no longer continue an accepted
+        run.
+
+        Reopens it for someone else only if nothing has been collected
+        yet. Once the rider is carrying parcels the run is held for
+        recovery instead -- see fail_run.
+        """
+        return DeliveryRunAssignmentService.fail_run(
+            current_user.id, run_id, reason=data.get("reason")
+        )
+
+
+@bp.route("/runs/<string:run_id>/stops/<int:seller_id>/arrive")
+class DeliveryRunStopArrive(MethodView):
+    @login_required
+    @bp.response(200, DeliveryRunStopActionResponseSchema)
+    def post(self, run_id, seller_id):
+        """10.6: rider marks arrival at a seller pickup stop."""
+        return DeliveryRunPickupService.arrive_at_stop(
+            current_user.id, run_id, seller_id
+        )
+
+
+@bp.route("/runs/<string:run_id>/stops/<int:seller_id>/pickup")
+class DeliveryRunStopPickup(MethodView):
+    @login_required
+    @bp.response(200, DeliveryRunPickupConfirmResponseSchema)
+    def post(self, run_id, seller_id):
+        """10.6: rider confirms pickup at a seller stop. Once every stop
+        in the run is picked up, issues a POD QR per order and advances
+        the run to DELIVERY_IN_PROGRESS."""
+        return DeliveryRunPickupService.confirm_pickup_at_stop(
+            current_user.id, run_id, seller_id
+        )
+
+
+@bp.route("/runs/<string:run_id>/orders/<string:order_id>/pod-qr")
+class DeliveryRunOrderPodQR(MethodView):
+    @login_required
+    @bp.response(200, DeliveryRunOrderPodQRResponseSchema)
+    def get(self, run_id, order_id):
+        """10.6: get the POD QR code for one order within an accepted run."""
+        return DeliveryRunPodService.get_order_pod_qr(current_user.id, run_id, order_id)
+
+
+@bp.route("/runs/<string:run_id>/orders/<string:order_id>/pod-confirm")
+class DeliveryRunOrderPodConfirm(MethodView):
+    @login_required
+    @bp.arguments(DeliveryRunOrderPodConfirmRequestSchema, location="json")
+    @bp.response(200, DeliveryRunOrderPodConfirmResponseSchema)
+    def post(self, data, run_id, order_id):
+        """10.6: confirm proof-of-delivery for one order within a run --
+        marks its items DELIVERED (starting the settlement hold, Phase 0)
+        and completes the run once every attached order has confirmed."""
+        return DeliveryRunPodService.confirm_order_pod(
+            current_user.id, run_id, order_id, data["qr_code"]
+        )
+
+
+@bp.route("/assignments/<string:assignment_id>/report-failure")
+class DeliveryAssignmentReportFailure(MethodView):
+    @login_required
+    @bp.arguments(DeliveryFailureReportRequestSchema, location="json")
+    @bp.response(200, DeliveryFailureSchema)
+    def post(self, data, assignment_id):
+        """A rider reports that a single-order delivery could not be
+        made.
+
+        The run flow has had this since 10.7. A rider on a single order
+        could only mark it delivered or walk away, so "nobody was
+        home" had nowhere to go and the buyer heard nothing.
+        """
+        return DeliveryFailureService.report_single_order_failure(
+            current_user.id,
+            assignment_id,
+            DeliveryFailureReason(data["reason"]),
+            notes=data.get("notes"),
+        )
+
+
+@bp.route("/runs/<string:run_id>/orders/<string:order_id>/report-failure")
+class DeliveryRunOrderReportFailure(MethodView):
+    @login_required
+    @bp.arguments(DeliveryFailureReportRequestSchema, location="json")
+    @bp.response(200, DeliveryFailureSchema)
+    def post(self, data, run_id, order_id):
+        """10.7: rider reports a failed delivery attempt with a typed
+        reason."""
+        return DeliveryFailureService.report_failure(
+            current_user.id,
+            run_id,
+            order_id,
+            DeliveryFailureReason(data["reason"]),
+            notes=data.get("notes"),
+        )
+
+
+@bp.route("/failures/<string:failure_id>/resolve")
+class DeliveryFailureResolve(MethodView):
+    @admin_required
+    @bp.arguments(DeliveryFailureResolveRequestSchema, location="json")
+    @bp.response(200, DeliveryFailureSchema)
+    def post(self, data, failure_id):
+        """10.7: record the chosen recovery action and who bears the
+        cost -- a support/business decision, not made by the reporting
+        rider (admin-only)."""
+        return DeliveryFailureService.resolve_failure(
+            failure_id,
+            DeliveryRecoveryAction(data["recovery_action"]),
+            DeliveryCostBearer(data["cost_bearer"]),
+            notes=data.get("notes"),
+        )
+
+
+@bp.route("/failures/<string:failure_id>/complete")
+class DeliveryFailureComplete(MethodView):
+    @admin_required
+    @bp.arguments(DeliveryFailureCompleteRequestSchema, location="json")
+    @bp.response(200, DeliveryFailureSchema)
+    def post(self, data, failure_id):
+        """10.7: mark the already-decided recovery action as actually
+        carried out (admin-only)."""
+        return DeliveryFailureService.complete_recovery(
+            failure_id, notes=data.get("notes")
         )

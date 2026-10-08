@@ -1,0 +1,623 @@
+"""Rider discovery/acceptance/failure for a DeliveryRun (10.6-10.7,
+Phase 10). A genuinely parallel structure to DeliveryService's existing
+single-order get_available_orders/accept_order/reject_order -- same
+shape (a rider browses, atomically accepts one at a time, first-come-
+first-served, no ranking/offer step), just keyed by DeliveryRun instead
+of Order. Kept in its own module rather than folded into runs.py (which
+owns batching/pricing, not rider assignment) or services.py (which owns
+the existing single-order machinery this deliberately doesn't touch).
+
+Scope note: this only covers run-level discovery/accept/decline/failure
+-- getting a run from RIDER_ASSIGNMENT to RIDER_ACCEPTED, and recovering
+from RIDER_FAILED. Per-seller pickup confirmation and per-order POD
+*within* an accepted run are a separate, larger increment (flagged in the
+Implementation Checklist), not built here.
+"""
+
+import logging
+
+from app.deliveries.rider_pay import earning_for_drop
+from typing import Dict
+
+from sqlalchemy.orm import joinedload
+
+from app.libs.errors import (
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    ValidationError,
+)
+from app.libs.session import session_scope
+
+from .models import (
+    AssignmentStatus,
+    DeliveryRun,
+    DeliveryRunAssignment,
+    DeliveryRunOrder,
+    DeliveryRunStatus,
+    DeliveryStatus,
+    DeliveryUser,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _run_total(run, stops: int):
+    """What the whole run pays the rider, or None when it is not priced yet."""
+    per_drop = earning_for_drop(run.base_price, stops=stops)
+    return per_drop * stops if per_drop is not None and stops else None
+
+
+class DeliveryRunAssignmentService:
+    @staticmethod
+    def get_available_runs(
+        user_id: str,
+        search_radius: int = 5000,
+        page: int = 1,
+        per_page: int = 20,
+    ) -> Dict:
+        """Runs at RIDER_ASSIGNMENT within range of the rider's last known
+        location, ranked by nothing in particular (paginated in id order)
+        -- same first-come-first-served simplicity as the existing
+        single-order get_available_orders. Distance is measured against
+        the run's Area reference location (10.1: a run serves one
+        market -> one area), not any individual order's own address --
+        good enough at MVP's zone-based granularity."""
+        from app.deliveries.services import DeliveryService
+
+        per_page = min(max(1, per_page), 50)
+        page = max(1, page)
+
+        with session_scope() as session:
+            delivery_user = session.query(DeliveryUser).filter_by(id=user_id).first()
+            if not delivery_user:
+                raise NotFoundError("Delivery partner not found")
+            if delivery_user.status == DeliveryStatus.SUSPENDED:
+                raise ForbiddenError("Your account has been suspended")
+            if (
+                not delivery_user.last_location
+                or delivery_user.last_location.latitude is None
+                or delivery_user.last_location.longitude is None
+            ):
+                raise ValidationError(
+                    "Location not set. Please update your location before "
+                    "browsing available runs."
+                )
+
+            rider_lat = delivery_user.last_location.latitude
+            rider_lng = delivery_user.last_location.longitude
+
+            runs = (
+                session.query(DeliveryRun)
+                .filter(DeliveryRun.status == DeliveryRunStatus.RIDER_ASSIGNMENT)
+                .options(joinedload(DeliveryRun.area), joinedload(DeliveryRun.market))
+                .order_by(DeliveryRun.id.asc())
+                .all()
+            )
+
+            available = []
+            for run in runs:
+                area = run.area
+                if area is None or area.latitude is None or area.longitude is None:
+                    continue
+                distance = DeliveryService.haversine_distance(
+                    rider_lat, rider_lng, area.latitude, area.longitude
+                )
+                if distance > search_radius:
+                    continue
+
+                order_count = (
+                    session.query(DeliveryRunOrder)
+                    .filter_by(delivery_run_id=run.id)
+                    .count()
+                )
+                available.append(
+                    {
+                        "run_id": run.id,
+                        "market": run.market.name if run.market else None,
+                        "area": area.name,
+                        "order_count": order_count,
+                        # What each *buyer* pays. Kept because the app has
+                        # always had it, but it is not the rider's number and
+                        # was being shown to riders as though it were.
+                        "price_per_order": run.price_per_order,
+                        # What the rider is credited: per drop, and for
+                        # taking the whole run. The second is the one that
+                        # makes a run worth more than a single order.
+                        "rider_earning_per_drop": earning_for_drop(
+                            run.base_price, stops=order_count
+                        ),
+                        "rider_earning_total": _run_total(run, order_count),
+                        "distance_meters": round(distance, 2),
+                        "lat": area.latitude,
+                        "lng": area.longitude,
+                    }
+                )
+
+            total = len(available)
+            start = (page - 1) * per_page
+            end = start + per_page
+            page_runs = available[start:end]
+
+            return {
+                "range_meters": search_radius,
+                "runs": page_runs,
+                "page": page,
+                "per_page": per_page,
+                "total": total,
+                "total_pages": (total + per_page - 1) // per_page if total else 0,
+            }
+
+    @staticmethod
+    def accept_run(user_id: str, run_id: str) -> Dict:
+        """Atomically accept a run -- row-locks the run so two riders
+        racing for the same one can't both succeed (the existing
+        single-order accept_order relies only on a status re-check
+        without a row lock; this is a real gap worth closing here, given
+        one run carries several orders' worth of consequence if double-
+        assigned)."""
+        with session_scope() as session:
+            run = (
+                session.query(DeliveryRun)
+                .filter_by(id=run_id)
+                .with_for_update()
+                .first()
+            )
+            if not run:
+                raise NotFoundError("Delivery run not found")
+
+            delivery_user = session.query(DeliveryUser).filter_by(id=user_id).first()
+            if not delivery_user:
+                raise NotFoundError("Delivery partner not found")
+            if delivery_user.status == DeliveryStatus.SUSPENDED:
+                raise ForbiddenError("Your account has been suspended")
+
+            # One run at a time.
+            #
+            # Single orders have been capped at MAX_CONCURRENT_ORDERS
+            # since offers existed; runs had no cap at all. Worse,
+            # get_active_run returns only the most recent accepted
+            # assignment -- so a rider who took a second run did not
+            # get two, they got the new one and lost the route to the
+            # first, with its buyers still waiting and no way back to
+            # them in the app.
+            #
+            # A run is already several orders. Two at once is not a
+            # rider working harder, it is a rider who cannot see half
+            # of what they are carrying.
+            live = (
+                session.query(DeliveryRunAssignment)
+                .join(
+                    DeliveryRun,
+                    DeliveryRun.id == DeliveryRunAssignment.delivery_run_id,
+                )
+                .filter(
+                    DeliveryRunAssignment.delivery_user_id == user_id,
+                    DeliveryRunAssignment.delivery_run_id != run_id,
+                    DeliveryRunAssignment.status == AssignmentStatus.ACCEPTED,
+                    DeliveryRun.status.in_(
+                        (
+                            DeliveryRunStatus.RIDER_ACCEPTED,
+                            DeliveryRunStatus.PICKUP_IN_PROGRESS,
+                            DeliveryRunStatus.DELIVERY_IN_PROGRESS,
+                        )
+                    ),
+                )
+                .first()
+            )
+            if live:
+                raise ConflictError("Finish the run you are on before taking another.")
+
+            already_rejected = (
+                session.query(DeliveryRunAssignment)
+                .filter_by(
+                    delivery_run_id=run_id,
+                    delivery_user_id=user_id,
+                    status=AssignmentStatus.REJECTED,
+                )
+                .first()
+            )
+            if already_rejected:
+                raise ConflictError("You have already declined this run")
+
+            try:
+                run.transition_to(DeliveryRunStatus.RIDER_ACCEPTED)
+            except ValueError:
+                raise ConflictError("Run already accepted or no longer available")
+
+            assignment = DeliveryRunAssignment(
+                delivery_run_id=run_id,
+                delivery_user_id=user_id,
+                status=AssignmentStatus.ACCEPTED,
+            )
+            session.add(assignment)
+            session.flush()
+
+            # 10.6: one DeliveryRunStop per distinct seller across the
+            # run's orders, ready for the rider to work through.
+            from .pickup import create_stops_for_run
+
+            create_stops_for_run(session, run_id)
+
+            # Every buyer on this run now has a rider. Their trackers said
+            # "Waiting for someone to take it" until the parcel arrived.
+            from app.delivery_pricing.order_delivery import (
+                DeliveryState,
+                advance_buyer_delivery,
+            )
+
+            # Queried rather than walked off `run`, and tolerant of
+            # finding nothing: accepting the run has already succeeded by
+            # this point, and updating the buyers' trackers must not be
+            # able to undo it.
+            from .models import DeliveryRunOrder
+
+            try:
+                attached = (
+                    session.query(DeliveryRunOrder)
+                    .filter_by(delivery_run_id=run_id)
+                    .all()
+                )
+            except Exception:
+                attached = []
+
+            for run_order in attached:
+                advance_buyer_delivery(
+                    session, run_order.order_id, DeliveryState.ASSIGNED
+                )
+
+            # The run flow sent no notifications at all. A buyer whose
+            # order was batched heard nothing from the moment they paid
+            # until the parcel turned up -- while a buyer on a single
+            # order got told at every step. Same delivery, same rider,
+            # entirely different experience depending on something the
+            # buyer never chose.
+            from app.deliveries.services import DeliveryService
+
+            notices = DeliveryService.notify_run_progress(
+                session,
+                [ro.order_id for ro in attached],
+                getattr(delivery_user, "name", None),
+                buyer_text="{rider} is collecting order {order} for you.",
+                seller_text="{rider} is on the way to collect order {order} from your shop.",
+            )
+
+            result = {
+                "run_id": run_id,
+                "status": run.status.value,
+                "assignment_id": assignment.id,
+            }
+
+        DeliveryService.send_run_notices(notices)
+        return result
+
+    @staticmethod
+    def get_active_run(user_id: str) -> Dict:
+        """Rider-facing "do I have a run in progress" lookup, mirroring
+        the existing single-order get_active_assignment. Previously
+        nothing let the app find its own current run without already
+        knowing the run_id (e.g. after a restart) -- accept_run's own
+        response is the only place a run_id was ever returned."""
+        with session_scope() as session:
+            assignment = (
+                session.query(DeliveryRunAssignment)
+                .join(
+                    DeliveryRun, DeliveryRun.id == DeliveryRunAssignment.delivery_run_id
+                )
+                .filter(
+                    DeliveryRunAssignment.delivery_user_id == user_id,
+                    DeliveryRunAssignment.status == AssignmentStatus.ACCEPTED,
+                    DeliveryRun.status.in_(
+                        (
+                            DeliveryRunStatus.RIDER_ACCEPTED,
+                            DeliveryRunStatus.PICKUP_IN_PROGRESS,
+                            DeliveryRunStatus.DELIVERY_IN_PROGRESS,
+                        )
+                    ),
+                )
+                .order_by(DeliveryRunAssignment.id.desc())
+                .first()
+            )
+            if not assignment:
+                return {"run_id": None}
+            run_id = assignment.delivery_run_id
+
+        return DeliveryRunAssignmentService.get_run_detail(user_id, run_id)
+
+    @staticmethod
+    def get_run_detail(user_id: str, run_id: str) -> Dict:
+        """Rider-facing full detail for a run they've accepted -- per-
+        seller pickup progress (stops) and per-order POD progress
+        (orders). Previously nothing let a rider re-fetch this after the
+        initial accept_run response, which only returns a thin
+        {run_id, status, assignment_id} -- no way to recover the stop/
+        order list on app restart or after navigating away."""
+        from app.deliveries.services import DeliveryService
+        from app.orders.models import Order, OrderItem
+        from app.users.models import Buyer
+
+        from .pickup import _accepted_assignment
+        from .models import DeliveryRunOrder, DeliveryRunStop
+
+        with session_scope() as session:
+            if not _accepted_assignment(session, run_id, user_id):
+                raise NotFoundError("No accepted assignment found for this run")
+
+            run = (
+                session.query(DeliveryRun)
+                .options(joinedload(DeliveryRun.area), joinedload(DeliveryRun.market))
+                .filter_by(id=run_id)
+                .first()
+            )
+            if not run:
+                raise NotFoundError("Delivery run not found")
+
+            stops = (
+                session.query(DeliveryRunStop)
+                .options(joinedload(DeliveryRunStop.seller))
+                .filter_by(delivery_run_id=run_id)
+                .all()
+            )
+            run_orders = (
+                session.query(DeliveryRunOrder).filter_by(delivery_run_id=run_id).all()
+            )
+
+            # Every order on the run in one query. This was a `.get()`
+            # per run_order inside the loop below, so opening a run of
+            # ten drops cost ten round trips before anything was drawn.
+            orders_by_id = {}
+            if run_orders:
+                for order in (
+                    session.query(Order)
+                    .options(
+                        joinedload(Order.buyer).joinedload(Buyer.user),
+                        joinedload(Order.shipping_address),
+                        joinedload(Order.items).joinedload(OrderItem.product),
+                        joinedload(Order.items).joinedload(OrderItem.variant),
+                    )
+                    .filter(Order.id.in_([ro.order_id for ro in run_orders]))
+                    .all()
+                ):
+                    orders_by_id[order.id] = order
+
+            orders_detail = []
+            for run_order in run_orders:
+                order = orders_by_id.get(run_order.order_id)
+                shipping = order.shipping_address if order else None
+                orders_detail.append(
+                    {
+                        "order_id": run_order.order_id,
+                        "order_number": order.order_number if order else None,
+                        "buyer_name": (
+                            order.buyer.buyername if order and order.buyer else None
+                        ),
+                        # A run's drops had no phone number, so a rider at
+                        # the wrong gate on a batched delivery could not
+                        # call anyone -- while the same rider on a single
+                        # order could. Nothing about the two jobs makes
+                        # that difference reasonable.
+                        "buyer_phone": (
+                            getattr(
+                                getattr(getattr(order, "buyer", None), "user", None),
+                                "phone_number",
+                                None,
+                            )
+                            if order
+                            else None
+                        ),
+                        # Which parcel is whose. A rider carrying four
+                        # bags from the same shop had a buyer's name and
+                        # an address and nothing tying either to the bag
+                        # in their hand.
+                        "parcel": (
+                            DeliveryService._parcel_manifest(order) if order else []
+                        ),
+                        "delivery_address": (
+                            {
+                                "street_address": shipping.street_address,
+                                "city": shipping.city,
+                                "state": shipping.state,
+                                "lat": shipping.latitude,
+                                "lng": shipping.longitude,
+                            }
+                            if shipping
+                            else None
+                        ),
+                        "pod_status": run_order.pod_status.value,
+                        "delivered_at": (
+                            run_order.delivered_at.isoformat()
+                            if run_order.delivered_at
+                            else None
+                        ),
+                    }
+                )
+
+            return {
+                "run_id": run.id,
+                "status": run.status.value,
+                "market": run.market.name if run.market else None,
+                "area": run.area.name if run.area else None,
+                "price_per_order": run.price_per_order,
+                "rider_earning_per_drop": earning_for_drop(
+                    run.base_price, stops=len(run.run_orders)
+                ),
+                "rider_earning_total": _run_total(run, len(run.run_orders)),
+                "stops": [
+                    {
+                        "seller_id": stop.seller_id,
+                        "seller_name": stop.seller.shop_name if stop.seller else None,
+                        # Flattened, not the raw column. Seller.shop_address
+                        # is a JSON blob and the schema field is a String,
+                        # so marshmallow ran str() over the dict and the
+                        # rider's route printed
+                        # "{'street': '12 Adeola Odeku Street', 'city': ...}"
+                        # where an address should be. The single-order path
+                        # has always used this helper.
+                        "shop_address": DeliveryService._shop_address_line(stop.seller),
+                        "lat": stop.seller.shop_latitude if stop.seller else None,
+                        "lng": stop.seller.shop_longitude if stop.seller else None,
+                        "status": stop.status.value,
+                        "arrived_at": (
+                            stop.arrived_at.isoformat() if stop.arrived_at else None
+                        ),
+                        "picked_up_at": (
+                            stop.picked_up_at.isoformat() if stop.picked_up_at else None
+                        ),
+                    }
+                    for stop in stops
+                ],
+                "orders": orders_detail,
+            }
+
+    @staticmethod
+    def reject_run(user_id: str, run_id: str) -> Dict:
+        """Records a decline -- doesn't change the run's own status
+        (nothing was committed), matching reject_order's behaviour. A
+        rider who declines can't be offered the same run again (the
+        already_rejected check in accept_run)."""
+        with session_scope() as session:
+            run = session.query(DeliveryRun).filter_by(id=run_id).first()
+            if not run:
+                raise NotFoundError("Delivery run not found")
+
+            assignment = DeliveryRunAssignment(
+                delivery_run_id=run_id,
+                delivery_user_id=user_id,
+                status=AssignmentStatus.REJECTED,
+            )
+            session.add(assignment)
+            session.flush()
+
+            return {"run_id": run_id, "status": AssignmentStatus.REJECTED.value}
+
+    @staticmethod
+    def fail_run(user_id: str, run_id: str, reason: str = None) -> Dict:
+        """10.7: the accepted rider can't continue (breakdown, emergency,
+        etc.) after already committing -- distinct from reject_run
+        (pre-commitment decline). Marks their DeliveryRunAssignment
+        FAILED, transitions the run to RIDER_FAILED, and immediately
+        attempts reassignment (10.7: "a failed run triggers reassignment
+        where possible") by reopening it at RIDER_ASSIGNMENT for another
+        rider to pick up -- the failed rider's own assignment row stays
+        FAILED, distinguishing them from someone who never got the
+        chance."""
+        with session_scope() as session:
+            assignment = (
+                session.query(DeliveryRunAssignment)
+                .filter_by(
+                    delivery_run_id=run_id,
+                    delivery_user_id=user_id,
+                    status=AssignmentStatus.ACCEPTED,
+                )
+                .first()
+            )
+            if not assignment:
+                raise NotFoundError("No accepted assignment found for this run")
+
+            run = (
+                session.query(DeliveryRun)
+                .filter_by(id=run_id)
+                .with_for_update()
+                .first()
+            )
+            if not run:
+                raise NotFoundError("Delivery run not found")
+
+            assignment.status = AssignmentStatus.FAILED
+
+            try:
+                run.transition_to(DeliveryRunStatus.RIDER_FAILED)
+            except ValueError:
+                raise ConflictError(f"Cannot fail a run at status {run.status.value}")
+
+            from .models import DeliveryRunStop, DeliveryRunStopStatus
+
+            stops = (
+                session.query(DeliveryRunStop).filter_by(delivery_run_id=run_id).all()
+            )
+            # Has anything actually left a shop?
+            #
+            # This is the whole question. Before the first pickup,
+            # nothing has moved: the run can be handed to someone else
+            # as if it were new. After it, parcels are in this rider's
+            # bag, and reopening the run tells the next rider to
+            # collect goods the shopkeeper has already handed over.
+            carrying = any(
+                stop.status == DeliveryRunStopStatus.PICKED_UP for stop in stops
+            )
+
+            if carrying:
+                # Left at RIDER_FAILED deliberately, not reopened. The
+                # run cannot be worked by anybody until the parcels
+                # this rider is holding are recovered, and there is no
+                # flow for that -- so the honest thing is to stop here
+                # and let a person pick it up, rather than put a run on
+                # the board whose goods are in a stranger's bag.
+                #
+                # RIDER_FAILED -> RIDER_ASSIGNMENT stays a legal
+                # transition, so resuming it later is a decision
+                # someone makes, not one this makes for them.
+                logger.error(
+                    "Run %s failed by rider %s after collecting from %s shop(s) "
+                    "-- held at RIDER_FAILED, parcels need recovering",
+                    run_id,
+                    user_id,
+                    sum(
+                        1
+                        for stop in stops
+                        if stop.status == DeliveryRunStopStatus.PICKED_UP
+                    ),
+                )
+                # Open a recovery record for each parcel the rider is
+                # holding, so they enter the pipeline resolve_failure
+                # and complete_recovery already provide. Holding the
+                # run stopped the harm; this is what makes the goods
+                # somebody's job rather than nobody's.
+                from .failure import record_abandoned_run
+
+                try:
+                    stranded = record_abandoned_run(session, run_id, user_id)
+                except Exception:
+                    # The rider has stopped either way. Failing to open
+                    # the paperwork must not also fail the release.
+                    logger.exception(
+                        "Could not open recovery records for run %s", run_id
+                    )
+                    stranded = []
+
+                return {
+                    "run_id": run_id,
+                    "status": run.status.value,
+                    "recovery_needed": True,
+                    "orders_to_recover": stranded,
+                }
+
+            # Nothing collected, so the progress that exists is just
+            # "I arrived" -- which belonged to the rider who left, not
+            # to the run. Clearing it stops the next rider being told
+            # they have already visited a shop they have never seen.
+            for stop in stops:
+                stop.status = DeliveryRunStopStatus.PENDING
+                stop.arrived_at = None
+                stop.picked_up_at = None
+
+            # 10.7: reassignment where possible -- reopen immediately
+            # rather than leaving it stranded at RIDER_FAILED for a
+            # separate worker to notice (no periodic sweep exists for
+            # this yet; the transition itself is what makes the run
+            # visible to get_available_runs again).
+            run.transition_to(DeliveryRunStatus.RIDER_ASSIGNMENT)
+
+            logger.warning(
+                "Rider %s failed run %s (%s) -- reopened for reassignment",
+                user_id,
+                run_id,
+                reason or "no reason given",
+            )
+
+            return {
+                "run_id": run_id,
+                "status": run.status.value,
+                "recovery_needed": False,
+                "orders_to_recover": [],
+            }

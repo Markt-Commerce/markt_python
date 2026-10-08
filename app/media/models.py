@@ -41,7 +41,27 @@ class Media(BaseModel):
     alt_text = db.Column(db.String(255))
     caption = db.Column(db.Text)
     is_public = db.Column(db.Boolean, default=True)
-    user_id = db.Column(db.String(12), db.ForeignKey("users.id"))
+    user_id = db.Column(db.String(12), db.ForeignKey("users.id"), nullable=True)
+    # Riders are not Users: they live in delivery_users with a DEL_ id, so
+    # their uploads cannot hang off user_id without breaking the FK. Same
+    # second-column-plus-XOR shape as notifications, push tokens and
+    # wallets, which is the pattern this codebase already uses wherever
+    # something belongs to "whoever this is" rather than to a User.
+    delivery_user_id = db.Column(
+        db.String(12), db.ForeignKey("delivery_users.id"), nullable=True, index=True
+    )
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "(user_id IS NULL) <> (delivery_user_id IS NULL)",
+            name="ck_media_single_owner",
+        ),
+    )
+
+    @property
+    def owner_id(self):
+        """Whoever this belongs to, whichever table they are in."""
+        return self.user_id or self.delivery_user_id
 
     # Soft delete field
     deleted_at = db.Column(db.DateTime, nullable=True)

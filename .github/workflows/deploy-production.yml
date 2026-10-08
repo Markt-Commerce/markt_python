@@ -1,0 +1,57 @@
+name: Deploy to Production
+# Runs after CI passes on main (or by hand), then waits for approval on the
+# `production` environment before touching the server.
+#
+# The deploy key can do exactly one thing on the box: run
+# /usr/local/bin/markt-deploy <sha>, which refuses any commit not on
+# origin/main, takes a database backup, installs, migrates, restarts and
+# health-checks. It is not a shell.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  # Never cancel a deploy that is mid-migration; queue the next one instead.
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy main to production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: https://api.marktcommerce.com/api/v1/health
+    if: >
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.event == 'push'
+      )
+
+    steps:
+      - name: Deploy
+        env:
+          SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+          HOST_KEY: ${{ secrets.PROD_HOST_KEY }}
+          HOST: ${{ secrets.PROD_HOST }}
+        run: |
+          set -euo pipefail
+          # A pinned host key, never ssh-keyscan: scanning trusts whoever
+          # answers on that IP at deploy time.
+          [ -n "$HOST_KEY" ] || { echo "PROD_HOST_KEY secret is not set"; exit 1; }
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
+          echo "Deploying $SHA"
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            "deploy@$HOST" "$SHA"

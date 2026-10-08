@@ -4,7 +4,7 @@ from typing import Dict, List
 
 from main.workers import celery_app
 from external.redis import redis_client
-from app.libs.session import session_scope
+from app.libs.session import session_scope, read_scope
 
 from .models import Notification, NotificationType
 
@@ -67,20 +67,135 @@ def deliver_notification(self, notification_data: Dict, channels: List[str]):
 
 @celery_app.task(bind=True, queue="notifications")
 def send_push_notification(self, notification_data: Dict):
-    """Send push notification to mobile devices"""
+    """Send push notification to the user's registered devices via Expo Push."""
     try:
-        # Placeholder for push notification service integration
-        # Example: FCM, APNs, etc.
+        from .services import PushService
+        from app.users.models import User
+
+        user_id = notification_data.get("user_id")
+        if not user_id:
+            return
+        with session_scope() as session:
+            user = session.query(User).get(user_id)
+            if user and user.settings and not user.settings.push_notifications:
+                logger.info("Push notifications disabled for user %s", user_id)
+                return
+        title = notification_data.get("title") or "Markt"
+        body = notification_data.get("message") or notification_data.get("body") or ""
+        PushService.send_to_user(
+            user_id,
+            title,
+            body,
+            {
+                "type": notification_data.get("type"),
+                "reference_type": notification_data.get("reference_type"),
+                "reference_id": notification_data.get("reference_id"),
+                # An order notification without its status lands everyone on
+                # the order summary. "A rider has picked it up" should open
+                # tracking; "delivered" should not.
+                "status": (notification_data.get("metadata_") or {}).get("status"),
+            },
+        )
         logger.info(
-            f"Push notification sent for notification {notification_data['id']}"
+            f"Push notification dispatched for notification {notification_data.get('id')}"
         )
     except Exception as e:
         logger.error(f"Push notification failed: {str(e)}")
 
 
+def _product_thumbnail(product) -> str:
+    """A picture of the thing, for the order emails.
+
+    An order email that lists "Fresh Bush Pear x1" and an iPad by name
+    alone asks the reader to remember what they bought; the photo they
+    chose it from is the thing they actually recognise.
+
+    Best-effort in every direction: no images, an unprocessed upload, a
+    storage backend that cannot mint a URL -- all of them return empty
+    and the row simply renders without a picture. An email is not worth
+    failing over a thumbnail.
+    """
+    try:
+        images = getattr(product, "images", None) or []
+        if not images:
+            return ""
+        # The one the seller marked, else the first by sort_order --
+        # which is the order the relationship already loads them in.
+        chosen = next(
+            (i for i in images if getattr(i, "is_featured", False)), images[0]
+        )
+        media = getattr(chosen, "media", None)
+        return (media.get_url() if media else "") or ""
+    except Exception:  # pragma: no cover - defensive
+        return ""
+
+
+def _order_email_data(notification_data: Dict, meta: Dict) -> Dict:
+    """Fill in what the order emails read, from the DB where needed.
+
+    The previous version passed `reference_id` as `order_number`. That is an
+    order *id* (ORD_xxxx), so every order email showed the buyer an internal
+    identifier they cannot quote at anyone, and `items` was only ever present
+    if the caller happened to include it -- which no caller did, so the
+    confirmation email listed nothing bought.
+    """
+    data = {
+        "order_number": meta.get("order_number", ""),
+        "status": meta.get("status", ""),
+        "amount": meta.get("amount", 0),
+        "total": meta.get("total", meta.get("amount", 0)),
+        "items": meta.get("items", []),
+        "buyer_name": meta.get("buyer_name", ""),
+        "delivery_address": meta.get("delivery_address", ""),
+        "rider_name": meta.get("rider_name", ""),
+        "eta": meta.get("eta", ""),
+        "reference": meta.get("reference", ""),
+        "method": meta.get("method", ""),
+        "reason": meta.get("reason", ""),
+    }
+
+    order_id = meta.get("order_id") or notification_data.get("reference_id")
+    if not order_id or not str(order_id).startswith("ORD_"):
+        return data
+
+    # Hydrate anything the emitter did not carry. Best-effort: an email with
+    # the order number missing is worse than one without a line-item table,
+    # but neither is worth failing the send over.
+    try:
+        from app.orders.models import Order
+
+        with read_scope() as session:
+            order = session.query(Order).get(order_id)
+            if not order:
+                return data
+            data["order_number"] = data["order_number"] or order.order_number
+            data["total"] = data["total"] or order.total
+            data["status"] = data["status"] or (
+                order.status.value if order.status else ""
+            )
+            if not data["items"]:
+                data["items"] = [
+                    {
+                        "product_name": (item.product.name if item.product else "Item"),
+                        "quantity": item.quantity,
+                        "price": item.price,
+                        "image_url": _product_thumbnail(item.product),
+                    }
+                    for item in order.items
+                ]
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("Could not hydrate order %s for email: %s", order_id, e)
+
+    return data
+
+
 @celery_app.task(bind=True, queue="notifications")
 def send_email_notification(self, notification_data: Dict):
-    """Send email notification for important alerts"""
+    """Deliver every configured email event through the common branded template.
+
+    Transactional mail is not suppressed by the optional marketing/email
+    preference. Promotional mail requires the explicit marketing opt-in.
+    """
     try:
         from app.libs.email_service import email_service
         from app.users.models import User
@@ -88,48 +203,147 @@ def send_email_notification(self, notification_data: Dict):
         user_id = notification_data["user_id"]
         notification_type = notification_data["type"]
 
-        # Get user email
+        # Get the recipient's email.
+        #
+        # A rider is not a User: they live in delivery_users with a DEL_ id,
+        # have no UserSettings row, and their address is verified by the OTP
+        # they signed in with rather than a separate confirmation step.
+        # Read the address *inside* the scope and keep the string, not the
+        # instance. session_scope commits on exit and SQLAlchemy expires every
+        # object it loaded, so `user.email` afterwards is either a second
+        # SELECT or a DetachedInstanceError -- and the surrounding
+        # `except Exception` would log that as "email notification failed"
+        # rather than as the bug it is.
+        # Read everything needed out of the session, as strings and bools.
+        # session_scope commits on exit and SQLAlchemy expires every object it
+        # loaded, so `user.email` afterwards is either a second SELECT or a
+        # DetachedInstanceError -- which the surrounding `except Exception`
+        # would log as "email notification failed" rather than as the bug it
+        # is. A rider also never binds `user` at all, so touching it below
+        # would raise NameError for them.
+        recipient_email = None
+        is_rider = str(user_id).startswith("DEL_")
+        email_ok = True
+        marketing_ok = False
+
         with session_scope() as session:
-            user = session.query(User).get(user_id)
-            if not user or not user.email_verified:
-                logger.warning(f"User {user_id} not found or email not verified")
-                return
+            if is_rider:
+                from app.deliveries.models import DeliveryUser
 
-            # Check user email notification settings
-            if user.settings and not user.settings.email_notifications:
-                logger.info(f"Email notifications disabled for user {user_id}")
-                return
-
-        # Map notification types to email methods
-        email_methods = {
-            NotificationType.ORDER_PLACED.value: email_service.send_order_confirmation_email,
-            NotificationType.ORDER_UPDATE.value: email_service.send_order_status_update_email,
-            NotificationType.PAYMENT_SUCCESS.value: email_service.send_payment_success_email,
-            NotificationType.PAYMENT_FAILED.value: email_service.send_payment_failed_email,
-        }
-
-        email_method = email_methods.get(notification_type)
-        if email_method:
-            # Prepare data for email
-            email_data = {
-                "order_number": notification_data.get("reference_id", ""),
-                "status": notification_data.get("metadata_", {}).get("status", ""),
-                "amount": notification_data.get("metadata_", {}).get("amount", 0),
-                "items": notification_data.get("metadata_", {}).get("items", []),
-            }
-
-            success = email_method(user.email, email_data)
-            if success:
-                logger.info(
-                    f"Email notification sent for notification {notification_data['id']}"
-                )
+                rider = session.query(DeliveryUser).get(user_id)
+                if not rider or not rider.email:
+                    logger.warning("Rider %s has no email address", user_id)
+                    return
+                # Riders have no UserSettings row. Everything they are sent is
+                # operational -- a delivery, an assignment, money credited --
+                # so there is no marketing to opt out of.
+                recipient_email = rider.email
             else:
-                logger.error(
-                    f"Failed to send email notification for notification {notification_data['id']}"
+                user = session.query(User).get(user_id)
+                if not user or not user.email_verified:
+                    logger.warning(f"User {user_id} not found or email not verified")
+                    return
+                recipient_email = user.email
+                if user.settings:
+                    email_ok = bool(user.settings.email_notifications)
+                    marketing_ok = bool(user.settings.marketing_notifications)
+
+        notification_enum = next(
+            (item for item in NotificationType if item.value == notification_type),
+            None,
+        )
+        if not notification_enum:
+            logger.warning(
+                "Unknown notification type %s; email skipped", notification_type
+            )
+            return
+
+        from app.notifications.services import NotificationService
+
+        transactional = NotificationService.is_transactional_email(notification_enum)
+
+        # Preference gates. Transactional mail (a receipt, an order moving) is
+        # not suppressed by the optional-email preference; promotional mail
+        # needs the explicit marketing opt-in.
+        if not is_rider:
+            if notification_enum == NotificationType.PROMOTIONAL:
+                if not marketing_ok:
+                    logger.info("Promotional email disabled for user %s", user_id)
+                    return
+            elif not email_ok and not transactional:
+                logger.info(
+                    "Optional email notifications disabled for user %s", user_id
                 )
+                return
+
+        metadata = notification_data.get("metadata_") or {}
+
+        # The four events with a written-for-the-purpose template. Everything
+        # else goes through the generic branded one.
+        email_methods = {
+            NotificationType.ORDER_PLACED.value: (
+                email_service.send_order_confirmation_email
+            ),
+            NotificationType.ORDER_UPDATE.value: (
+                email_service.send_order_status_update_email
+            ),
+            NotificationType.PAYMENT_SUCCESS.value: (
+                email_service.send_payment_success_email
+            ),
+            NotificationType.PAYMENT_FAILED.value: (
+                email_service.send_payment_failed_email
+            ),
+        }
+        email_method = email_methods.get(notification_type)
+
+        if email_method:
+            # A seller's "you sold something" email is not the buyer's "we
+            # have your order" email, and both hang off ORDER_PLACED.
+            if (
+                notification_type == NotificationType.ORDER_PLACED.value
+                and metadata.get("role") == "seller"
+            ):
+                email_method = email_service.send_seller_order_notification_email
+
+            success = email_method(
+                recipient_email, _order_email_data(notification_data, metadata)
+            )
+        elif notification_enum == NotificationType.PROMOTIONAL:
+            success = email_service.send_promotional_campaign_email(
+                recipient_email,
+                {
+                    **metadata,
+                    "subject": notification_data.get("title"),
+                    "headline": notification_data.get("title"),
+                    "subheadline": notification_data.get("message"),
+                },
+            )
         else:
+            success = email_service.send_notification_email(
+                email=recipient_email,
+                title=notification_data.get("title", "Markt notification"),
+                message=notification_data.get("message", ""),
+                notification_type=notification_type,
+                metadata=metadata,
+                transactional=transactional,
+                sender_profile=(
+                    "marketing"
+                    if notification_enum == NotificationType.PROMOTIONAL
+                    else "transactional"
+                    if transactional
+                    else "notification"
+                ),
+            )
+
+        if success:
             logger.info(
-                f"No email method configured for notification type {notification_type}"
+                "Email notification sent for notification %s",
+                notification_data.get("id"),
+            )
+        else:
+            logger.error(
+                "Failed to send email notification for notification %s",
+                notification_data.get("id"),
             )
 
     except Exception as e:
@@ -274,8 +488,32 @@ def send_seller_analytics_reports():
                     )
 
                     # Prepare report data
+                    # The same window, one period earlier. A figure with
+                    # nothing to compare it against is not information -- the
+                    # template prints "12 more than the month before" only
+                    # when this is here, and nothing at all when it is not.
+                    previous_start = start_date - (now - start_date)
+                    previous_orders = (
+                        session.query(Order)
+                        .join(OrderItem, OrderItem.order_id == Order.id)
+                        .filter(
+                            OrderItem.seller_id == seller.id,
+                            Order.created_at >= previous_start,
+                            Order.created_at < start_date,
+                            Order.status != OrderStatus.CANCELLED,
+                        )
+                        .all()
+                    )
+
                     report_data = {
                         "period": period,
+                        "shop_name": seller.shop_name,
+                        "previous": {
+                            "total_sales": float(
+                                sum(o.total or 0 for o in previous_orders)
+                            ),
+                            "total_orders": len(previous_orders),
+                        },
                         "total_sales": total_sales,
                         "total_orders": total_orders,
                         "total_products": total_products,

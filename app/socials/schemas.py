@@ -1,9 +1,9 @@
 from marshmallow import Schema, fields, validate
 
-from app.libs.schemas import PaginationSchema
+from app.libs.schemas import PaginationSchema, PaginationQueryArgs
 from app.libs.errors import ValidationError
 
-from app.products.schemas import ProductSchema
+from app.products.schemas import ProductSchema, ProductSimpleSchema
 from app.users.schemas import UserSimpleSchema, SellerSimpleSchema
 from app.categories.schemas import CategorySchema
 
@@ -25,6 +25,31 @@ class NicheSchema(Schema):
     name = fields.Str(required=True, validate=validate.Length(min=1, max=100))
     description = fields.Str(required=True, validate=validate.Length(min=10, max=2000))
     slug = fields.Str(dump_only=True)
+    # A community needs a face. Without these every niche rendered as an
+    # initial on a coloured square.
+    image_url = fields.Method("get_image_url", dump_only=True)
+    banner_url = fields.Method("get_banner_url", dump_only=True)
+    # Set by the service for the requesting user, so a list can show Join vs
+    # Joined without a call per row.
+    is_member = fields.Bool(dump_only=True)
+
+    @staticmethod
+    def _media_url(media):
+        """Never raise for a picture. A community with a broken image should
+        still list, so a failed URL is simply no URL."""
+        if media is None:
+            return None
+        try:
+            return media.get_url()
+        except Exception:
+            return None
+
+    def get_image_url(self, obj):
+        return NicheSchema._media_url(getattr(obj, "image", None))
+
+    def get_banner_url(self, obj):
+        return NicheSchema._media_url(getattr(obj, "banner", None))
+
     status = fields.Enum(NicheStatus, by_value=True, dump_only=True)
     visibility = fields.Enum(NicheVisibility, by_value=True, dump_only=True)
 
@@ -83,6 +108,11 @@ class NicheCreateSchema(Schema):
     allow_seller_posts = fields.Bool(missing=True)
     require_approval = fields.Bool(missing=False)
     max_members = fields.Int(validate=validate.Range(min=1, max=100000), missing=10000)
+    # Media already uploaded via POST /media/upload. Same pattern products use
+    # with media_ids: the client uploads first, then attaches the id. Without
+    # these the columns existed and nothing could ever set them.
+    image_id = fields.Int(allow_none=True)
+    banner_id = fields.Int(allow_none=True)
     category_ids = fields.List(fields.Int(), missing=[])
     tags = fields.List(fields.Str(), missing=[])
     rules = fields.List(fields.Str(), missing=[])
@@ -99,6 +129,11 @@ class NicheUpdateSchema(Schema):
     allow_seller_posts = fields.Bool()
     require_approval = fields.Bool()
     max_members = fields.Int(validate=validate.Range(min=1, max=100000))
+    # Media already uploaded via POST /media/upload. Same pattern products use
+    # with media_ids: the client uploads first, then attaches the id. Without
+    # these the columns existed and nothing could ever set them.
+    image_id = fields.Int(allow_none=True)
+    banner_id = fields.Int(allow_none=True)
     category_ids = fields.List(fields.Int())
     tags = fields.List(fields.Str())
     rules = fields.List(fields.Str())
@@ -128,9 +163,19 @@ class NichePostSchema(Schema):
 
 
 class NichePostCreateSchema(Schema):
-    """Schema for creating posts in niches"""
+    """Schema for creating posts in niches.
+
+    Mirrors PostCreateSchema's input fields: category_ids, media_ids and tags
+    must be declared or webargs silently strips them, so niche posts would lose
+    their images and categories.
+    """
 
     caption = fields.Str(required=False)
+    category_ids = fields.List(fields.Int(), required=False)
+    tags = fields.List(fields.Str(), required=False)
+    media_ids = fields.List(
+        fields.Int(), required=False, description="List of media IDs to link to post"
+    )
     social_media = fields.List(fields.Nested("SocialMediaPostSchema"), required=False)
     products = fields.List(fields.Nested("PostProductSchema"), required=False)
     status = fields.Str(
@@ -167,6 +212,19 @@ class NicheSearchSchema(Schema):
     search = fields.Str(allow_none=True)
     category_ids = fields.List(fields.Int(), allow_none=True)
     visibility = fields.Enum(NicheVisibility, by_value=True, allow_none=True)
+    # Ordering was hardcoded to member_count desc, so the biggest communities
+    # were the only ones anyone ever saw and a new one could never surface.
+    sort = fields.Str(
+        allow_none=True,
+        validate=validate.OneOf(["trending", "newest", "members", "name"]),
+        load_default="trending",
+    )
+    # "joined" / "not_joined" so one endpoint can serve both the Home tab (the
+    # communities you are in) and Explore (the ones you aren't).
+    membership = fields.Str(
+        allow_none=True,
+        validate=validate.OneOf(["joined", "not_joined"]),
+    )
     page = fields.Int(validate=validate.Range(min=1), missing=1)
     per_page = fields.Int(validate=validate.Range(min=1, max=100), missing=20)
 
@@ -304,8 +362,37 @@ class CollectionSchema(Schema):
 # Use SocialMediaPostSchema from app.media.schemas for media operations
 
 
+class TaggedProductSchema(ProductSimpleSchema):
+    """What a post needs to show a tagged product without a second request.
+
+    `product_id` alone made the app fetch /products/{id} for every tag on
+    every post it opened. This is the card: name, price, first image (with
+    ProductSimpleSchema's never-raises thumbnail), the shop it belongs to, and
+    whether it can be bought right now -- a tag can outlive its stock, and the
+    card should not offer "Add to cart" for something that is gone.
+    """
+
+    price = fields.Float(dump_only=True)
+    is_available = fields.Method("get_is_available", dump_only=True)
+    shop_name = fields.Method("get_shop_name", dump_only=True)
+
+    def get_is_available(self, obj):
+        try:
+            return bool(obj.is_available())
+        except Exception:
+            return False
+
+    def get_shop_name(self, obj):
+        seller = getattr(obj, "seller", None)
+        return getattr(seller, "shop_name", None) if seller else None
+
+
 class PostProductSchema(Schema):
     product_id = fields.Str(required=True)
+    # Output only, so the create and update payloads -- which share this
+    # schema -- are unchanged: clients still send just `product_id`. Null when
+    # the tagged product no longer exists.
+    product = fields.Nested(TaggedProductSchema, dump_only=True, allow_none=True)
 
 
 class PostCreateSchema(Schema):
@@ -393,9 +480,37 @@ class CommentUpdateSchema(Schema):
 
 class PostDetailSchema(PostSchema):
     social_media = fields.List(fields.Nested("SocialMediaPostSchema"))
-    products = fields.List(fields.Nested(PostProductSchema))
+    # The model's relationship is `tagged_products`, not `products`, so this
+    # field used to look up an attribute that does not exist and marshmallow
+    # dropped it from every response. Tags were saved on create and update but
+    # never came back, and the app's post screen -- which reads
+    # `products[].product_id` to show the tagged product -- always had nothing
+    # to show. Same key and shape as the create payload, so no client changes.
+    products = fields.List(
+        fields.Nested(PostProductSchema),
+        attribute="tagged_products",
+        dump_only=True,
+    )
     user = fields.Nested("UserSimpleSchema")
     status = fields.Enum(PostStatus, by_value=True, dump_only=True)
+    # Matches the feed's field of the same name. False for anonymous callers.
+    liked_by_me = fields.Bool(dump_only=True, dump_default=False)
+    #: Whether the caller has saved this post. Same contract as liked_by_me,
+    #: and the same name the feed uses, so a client does not need to know
+    #: which endpoint answered.
+    is_saved = fields.Bool(dump_only=True, dump_default=False)
+
+    # The feed serializes these counts as likes_count/comments_count while this
+    # schema has always called them like_count/comment_count. Clients then have
+    # to know which endpoint they're talking to for the same two numbers --
+    # which is exactly how the missing liked_by_me went unnoticed.
+    #
+    # Emitted under both names rather than renamed: renaming would break every
+    # existing consumer of this endpoint for no functional gain. New code should
+    # read the plural (feed) spelling; the singular pair stays for compatibility
+    # and can be dropped once nothing reads it.
+    likes_count = fields.Int(attribute="like_count", dump_only=True)
+    comments_count = fields.Int(attribute="comment_count", dump_only=True)
 
 
 class PostDetailSearchResultSchema(Schema):
@@ -436,6 +551,14 @@ class HybridFeedSchema(Schema):
     pagination = fields.Nested(PaginationSchema)
 
 
+class FeedQueryArgs(PaginationQueryArgs):
+    """Query args for the main feed. Declares force_refresh so webargs doesn't
+    strip it — undeclared query params are silently excluded and the client's
+    pull-to-refresh (force_refresh=true) would never reach the service."""
+
+    force_refresh = fields.Bool(load_default=False)
+
+
 class ProductReviewSchema(Schema):
     id = fields.Int(dump_only=True)
     user_id = fields.Str(dump_only=True)
@@ -449,6 +572,24 @@ class ProductReviewSchema(Schema):
     created_at = fields.DateTime(dump_only=True)
 
     user = fields.Nested(lambda: UserSimpleSchema(), dump_only=True)
+
+
+class ProductReviewUpdateSchema(Schema):
+    """Editable fields on your own review.
+
+    Deliberately narrower than ProductReviewSchema: order_id and is_verified
+    are decided by the server at creation and must not move afterwards, or a
+    buyer could edit their way to a "verified purchase" badge.
+    """
+
+    rating = fields.Int(validate=validate.Range(min=1, max=5))
+    title = fields.Str(validate=validate.Length(max=100))
+    content = fields.Str()
+
+
+class ReviewDeleteSchema(Schema):
+    deleted = fields.Bool()
+    review_id = fields.Int()
 
 
 class ProductReviewsSchema(Schema):
@@ -490,6 +631,8 @@ class FeedPostSchema(Schema):
     created_at = fields.Str(dump_only=True)
     score = fields.Float(dump_only=True)
     niche = fields.Nested(NicheFeedInfoSchema, dump_only=True, allow_none=True)
+    # Same entries as PostDetailSchema.products: {product_id, product: card}.
+    products = fields.List(fields.Nested(PostProductSchema), dump_only=True)
 
 
 class FeedProductSchema(Schema):
@@ -556,3 +699,36 @@ class PostCommentReactionSchema(ReactionSchema):
     """Schema for comment reactions"""
 
     comment_id = fields.Int(dump_only=True)
+
+
+class SavedItemCreateSchema(Schema):
+    content_type = fields.Str(
+        required=True, validate=validate.OneOf(["post", "product"])
+    )
+    content_id = fields.Str(required=True, validate=validate.Length(min=1, max=12))
+
+
+class SavedToggleResponseSchema(Schema):
+    saved = fields.Bool()
+    content_type = fields.Str()
+    content_id = fields.Str()
+
+
+class SavedItemSchema(Schema):
+    content_type = fields.Str()
+    content_id = fields.Str()
+    saved_at = fields.Str(allow_none=True)
+    title = fields.Str(allow_none=True)
+    image_url = fields.Str(allow_none=True)
+    price = fields.Float(allow_none=True)
+
+
+class SavedItemsQuerySchema(PaginationQueryArgs):
+    content_type = fields.Str(
+        required=False, validate=validate.OneOf(["post", "product"])
+    )
+
+
+class SavedItemsListSchema(Schema):
+    items = fields.List(fields.Nested(SavedItemSchema))
+    pagination = fields.Dict()

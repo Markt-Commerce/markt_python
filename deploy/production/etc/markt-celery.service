@@ -1,0 +1,26 @@
+[Unit]
+Description=Markt Celery worker (with embedded beat)
+After=network.target postgresql.service redis-server.service
+Wants=postgresql.service redis-server.service
+
+[Service]
+User=markt
+Group=markt
+WorkingDirectory=/srv/markt/app
+Environment=PATH=/srv/markt/venv/bin:/usr/bin:/bin
+# -B embeds beat (one fewer ~150 MB process); safe with exactly one worker.
+# Two children cap memory; recycling them bounds Pillow's growth.
+ExecStart=/srv/markt/venv/bin/celery -A main.workers worker -B \
+  -s /srv/markt/run/celerybeat-schedule \
+  --concurrency 2 --max-tasks-per-child 200 -l INFO \
+  -Q default,media,notifications,social,realtime,analytics,maintenance,celery
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+# Under memory pressure the kernel kills this before the API or Postgres.
+OOMScoreAdjust=300
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

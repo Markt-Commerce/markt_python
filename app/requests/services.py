@@ -3,7 +3,6 @@ import logging
 import json
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, List
-from enum import Enum
 
 # package imports
 from sqlalchemy.orm import joinedload
@@ -22,23 +21,22 @@ from app.libs.errors import (
 )
 
 # app imports
-from .models import BuyerRequest, SellerOffer, RequestStatus
-from app.users.models import User, Seller
+from .models import BuyerRequest, SellerOffer, RequestStatus, RequestSource, OfferStatus
+from app.users.models import MarketVerificationStatus, User, Seller
 from app.products.models import Product
 from app.notifications.services import NotificationService
 from app.notifications.models import NotificationType
 from app.media.services import media_service
 from app.media.models import Media, RequestImage
-from app.categories.models import Category, RequestCategory
+from app.categories.models import Category, ProductCategory, RequestCategory
+from app.orders.models import OrderItem
 
 logger = logging.getLogger(__name__)
 
-
-class OfferStatus(Enum):
-    PENDING = "pending"
-    ACCEPTED = "accepted"
-    REJECTED = "rejected"
-    WITHDRAWN = "withdrawn"
+# OfferStatus now lives in .models (see SellerOffer.status's own comment for
+# why) -- re-exported here so `from app.requests.services import OfferStatus`
+# (existing callers, incl. tests) keeps working unchanged.
+__all__ = ["BuyerRequestService", "OfferStatus"]
 
 
 class BuyerRequestService:
@@ -91,15 +89,15 @@ class BuyerRequestService:
                 "status": request.status.value if request.status else None,
                 "views": request.views,
                 "upvotes": request.upvotes,
-                "created_at": request.created_at.isoformat()
-                if request.created_at
-                else None,
-                "updated_at": request.updated_at.isoformat()
-                if request.updated_at
-                else None,
-                "expires_at": request.expires_at.isoformat()
-                if request.expires_at
-                else None,
+                "created_at": (
+                    request.created_at.isoformat() if request.created_at else None
+                ),
+                "updated_at": (
+                    request.updated_at.isoformat() if request.updated_at else None
+                ),
+                "expires_at": (
+                    request.expires_at.isoformat() if request.expires_at else None
+                ),
                 "images": [
                     {
                         "id": img.id,
@@ -134,12 +132,12 @@ class BuyerRequestService:
                         "status": item.status.value if item.status else None,
                         "views": item.views,
                         "upvotes": item.upvotes,
-                        "created_at": item.created_at.isoformat()
-                        if item.created_at
-                        else None,
-                        "expires_at": item.expires_at.isoformat()
-                        if item.expires_at
-                        else None,
+                        "created_at": (
+                            item.created_at.isoformat() if item.created_at else None
+                        ),
+                        "expires_at": (
+                            item.expires_at.isoformat() if item.expires_at else None
+                        ),
                         "images_count": len(item.images or []),
                         "offers_count": len(item.offers or []),
                     }
@@ -247,6 +245,84 @@ class BuyerRequestService:
             # Create notification for relevant sellers
             BuyerRequestService._notify_relevant_sellers(request)
 
+            return request
+
+    # 7.4: how long an auto-generated reroute request stays open before
+    # sellers stop being able to respond. Not on the same clock as 9's
+    # fulfilment deadline (10 min) -- SellerOffer responses are
+    # asynchronous by nature, so this is a genuine complement to the
+    # direct-candidate reroute engine (app.fulfilment.rerouting), not
+    # bound by its timing. No spec figure given for this fallback path;
+    # a few hours is a judgment call, flagged for review.
+    REROUTE_REQUEST_EXPIRY_HOURS = 6
+
+    @staticmethod
+    def create_reroute_request(
+        buyer_user_id: str,
+        order_item_id: int,
+        market_id: Optional[int],
+        category_id: Optional[int],
+        product_name: str,
+        quantity: int,
+        price: float,
+    ) -> BuyerRequest:
+        """7.4: auto-generate a BuyerRequest for an order item the direct
+        reroute engine has genuinely exhausted (see
+        app.fulfilment.rerouting's `_escalate_unfulfilled_item`) -- reuses
+        this existing rail as a wider, asynchronous net for sellers the
+        keyword+category direct match didn't find, rather than building a
+        parallel matching path.
+
+        System-generated: unlike create_request, there's no buyer-
+        authentication check here -- the caller is trusted internal code
+        (the rerouting engine), not an HTTP request on the buyer's behalf.
+        `budget` includes the same headroom the direct-match path itself
+        allows (PRICE_HEADROOM_RATE), so an offer within that band is
+        consistent with what AUTO/ASK rerouting would already have
+        accepted silently.
+        """
+        from app.fulfilment.rerouting import PRICE_HEADROOM_RATE
+
+        with session_scope() as session:
+            request = BuyerRequest(
+                user_id=buyer_user_id,
+                title=f"Need: {product_name} (x{quantity})",
+                description=(
+                    f"Your original seller couldn't fulfil {quantity} unit(s) "
+                    f"of {product_name}. Markt is looking for a replacement "
+                    f"seller in the same market."
+                ),
+                budget=round(price * (1 + PRICE_HEADROOM_RATE), 2),
+                status=RequestStatus.OPEN,
+                request_metadata={"auto_generated": True},
+                expires_at=datetime.utcnow()
+                + timedelta(hours=BuyerRequestService.REROUTE_REQUEST_EXPIRY_HOURS),
+                source=RequestSource.REROUTE_ENGINE,
+                order_item_id=order_item_id,
+                market_id=market_id,
+            )
+            session.add(request)
+            session.flush()
+
+            if category_id:
+                session.add(
+                    RequestCategory(
+                        request_id=request.id,
+                        category_id=category_id,
+                        is_primary=True,
+                    )
+                )
+                session.flush()
+
+            request_id = request.id
+
+        with session_scope() as session:
+            request = (
+                session.query(BuyerRequest)
+                .options(joinedload(BuyerRequest.categories))
+                .get(request_id)
+            )
+            BuyerRequestService._notify_relevant_sellers(request)
             return request
 
     @staticmethod
@@ -397,7 +473,7 @@ class BuyerRequestService:
                 product_id=data.get("product_id"),
                 price=data.get("price"),
                 message=data.get("message"),
-                status="pending",
+                status=OfferStatus.PENDING,
             )
 
             session.add(offer)
@@ -421,7 +497,26 @@ class BuyerRequestService:
 
     @staticmethod
     def accept_offer(offer_id: int, user_id: str) -> SellerOffer:
-        """Accept seller offer with conflict resolution"""
+        """Accept seller offer with conflict resolution.
+
+        7.4: for a REROUTE_ENGINE-sourced request (see
+        create_reroute_request), accepting an offer must actually reopen
+        fulfilment for the order item the request exists for -- reserve
+        stock against the offer's product BEFORE touching any
+        offer/request state (InventoryService.reserve_stock is its own
+        atomic row-lock transaction that commits independently the moment
+        it succeeds -- see app.libs.session.session_scope's nested-call
+        semantics -- so doing it first means a ConflictError here leaves
+        nothing else mutated). The ordinary buyer-posted-request path
+        below is unchanged from before this existed.
+        """
+        is_reroute = False
+        order_item_id = None
+        reroute_seller_id = None
+        reroute_product_id = None
+        reroute_quantity = None
+        reservation = None
+
         with session_scope() as session:
             offer = (
                 session.query(SellerOffer)
@@ -443,6 +538,28 @@ class BuyerRequestService:
             # Validate request status
             if offer.request.status != RequestStatus.OPEN:
                 raise ValidationError("Request is no longer accepting offers")
+
+            is_reroute = offer.request.source == RequestSource.REROUTE_ENGINE
+            if is_reroute:
+                if not offer.product_id:
+                    raise ValidationError(
+                        "This offer has no linked product -- cannot reserve stock"
+                    )
+                order_item_id = offer.request.order_item_id
+                order_item = session.query(OrderItem).get(order_item_id)
+                if not order_item:
+                    raise NotFoundError("Order item for this request no longer exists")
+
+                reroute_seller_id = offer.seller_id
+                reroute_product_id = offer.product_id
+                reroute_quantity = order_item.quantity
+                buyer_id = order_item.order.buyer_id
+
+                from app.inventory.services import InventoryService
+
+                reservation = InventoryService.reserve_stock(
+                    reroute_product_id, buyer_id, reroute_quantity
+                )
 
             # Reject all other offers for this request
             other_offers = (
@@ -486,7 +603,18 @@ class BuyerRequestService:
             # Cache invalidation
             BuyerRequestService._invalidate_request_cache(offer.request_id)
 
-            return offer
+        if is_reroute:
+            from app.fulfilment.services import FulfilmentService
+
+            FulfilmentService.create_allocation(
+                order_item_id,
+                reroute_seller_id,
+                reroute_quantity,
+                product_id=reroute_product_id,
+                reservation_id=reservation.id,
+            )
+
+        return offer
 
     @staticmethod
     def list_user_requests(user_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1037,13 +1165,133 @@ class BuyerRequestService:
             )
 
     @staticmethod
+    def _sellers_in_buyers_city(session, request, sellers):
+        """Keep the sellers who could actually deliver to this buyer.
+
+        Returns the list unchanged when the buyer's location is unknown, or
+        when no seller resolves into a serviceable city -- a request that
+        reaches the wrong sellers is a poor notification, but one that reaches
+        nobody is a dead feature.
+        """
+        from app.delivery_pricing.services import city_id_for_point
+        from app.users.addresses import SavedAddress
+
+        # A request with no author has no location to scope by.
+        user_id = getattr(request, "user_id", None)
+        if not user_id:
+            return sellers
+
+        address = (
+            session.query(SavedAddress)
+            .filter(SavedAddress.user_id == user_id)
+            .order_by(
+                SavedAddress.is_default.desc(),
+                SavedAddress.last_used_at.desc().nullslast(),
+            )
+            .first()
+        )
+        if not address:
+            return sellers
+
+        buyer_city = city_id_for_point(session, address.latitude, address.longitude)
+        if buyer_city is None:
+            return sellers
+
+        near = [
+            s
+            for s in sellers
+            if s.shop_latitude is not None
+            and s.shop_longitude is not None
+            and city_id_for_point(session, s.shop_latitude, s.shop_longitude)
+            == buyer_city
+        ]
+        return near or sellers
+
+    @staticmethod
     def _notify_relevant_sellers(request: BuyerRequest):
-        """Notify sellers who might be interested in the request"""
-        # TODO: Implement smart seller matching based on:
-        # - Category preferences
-        # - Past successful offers
-        # - Geographic proximity
-        # - Price range preferences
+        """Notify sellers who might respond to this request -- sellers with
+        an active product in the request's primary category. This was a
+        no-op TODO stub before (found while wiring 7.4's reroute
+        escalation, which depends on it); real geographic/rating-based
+        ranking of *which* matching sellers to prioritise is future work,
+        this is the MVP "does anyone even get told" fix.
+
+        Scoped to `request.market_id` + VERIFIED market membership when
+        set -- only true for a REROUTE_ENGINE request (18.2: rerouting is
+        within-market only).
+
+        A buyer-posted request has no market_id, and used to reach every
+        matching seller in the country, capped at 50. Markt does not deliver
+        between cities -- a lane across two returns no_lane by design -- so a
+        seller in Lagos was being told about a buyer in Ibadan they could
+        never sell to, and the buyer's request was spent on sellers who could
+        not answer it. Those are now filtered to the buyer's own city, the
+        same unit delivery itself works in.
+
+        A buyer with no usable address falls back to the old behaviour rather
+        than being told nobody can help: unscoped is wrong, but silence is
+        worse.
+        """
+        with session_scope() as session:
+            primary_rc = next((rc for rc in request.categories if rc.is_primary), None)
+            if not primary_rc:
+                return
+
+            # DISTINCT on seller *ids*, then load the sellers.
+            #
+            # This selected DISTINCT over the whole Seller row, and
+            # Seller.policies is a plain `json` column. Postgres has no
+            # equality operator for `json` (only for `jsonb`), so it cannot
+            # dedupe a row containing one and the query dies with
+            # "could not identify an equality operator for type json" --
+            # a 500 on every buyer request that named a category with a
+            # matching seller in it. A request with no categories, or with
+            # categories nobody sells in, never reached this line, which is
+            # why it looked intermittent.
+            #
+            # The join is one-to-many by nature (a seller with three matching
+            # products appears three times), so the dedupe is necessary. It
+            # just has to happen on something Postgres can compare.
+            id_query = (
+                session.query(Seller.id)
+                .join(Product, Product.seller_id == Seller.id)
+                .join(ProductCategory, ProductCategory.product_id == Product.id)
+                .filter(
+                    ProductCategory.category_id == primary_rc.category_id,
+                    Product.status == Product.Status.ACTIVE,
+                    Seller.is_active.is_(True),
+                )
+                .distinct()
+            )
+            if request.market_id:
+                id_query = id_query.filter(
+                    Seller.market_id == request.market_id,
+                    Seller.market_verification_status
+                    == MarketVerificationStatus.VERIFIED,
+                )
+
+            # Cap so one broad-category request can't fan out unboundedly.
+            # Read before the city filter, which narrows rather than widens.
+            seller_ids = [row[0] for row in id_query.limit(50).all()]
+            sellers = (
+                session.query(Seller).filter(Seller.id.in_(seller_ids)).all()
+                if seller_ids
+                else []
+            )
+            sellers = BuyerRequestService._sellers_in_buyers_city(
+                session, request, sellers
+            )
+            seller_user_ids = [s.user_id for s in sellers if s.user_id]
+            request_title = request.title
+
+        for seller_user_id in seller_user_ids:
+            NotificationService.create_notification(
+                user_id=seller_user_id,
+                notification_type=NotificationType.NEW_REQUEST_MATCH,
+                reference_type="request",
+                reference_id=request.id,
+                metadata_={"message": f'New request: "{request_title}"'},
+            )
 
     @staticmethod
     def _handle_request_closure(request: BuyerRequest, session):
@@ -1067,9 +1315,44 @@ class BuyerRequestService:
 
     @staticmethod
     def _handle_request_expiration(request: BuyerRequest, session):
-        """Handle request expiration logic"""
-        # Similar to closure but with different notification
-        BuyerRequestService._handle_request_closure(request, session)
+        """Expire a request: close out its offers, and tell the buyer.
+
+        Two things were missing here. The background sweep
+        (handle_request_expiration) calls straight into this, bypassing
+        update_request_status -- which is the only place that assigned
+        RequestStatus.EXPIRED. So a request past its expires_at had its
+        pending offers rejected and then stayed OPEN forever: still listed,
+        still offerable, and swept again on every run.
+
+        And the buyer, whose request it is, was told nothing at all.
+        REQUEST_EXPIRED existed as a type, a template and a channel config,
+        and no line in the codebase created one.
+        """
+        # Status first. create_notification re-raises on failure, and
+        # _handle_request_closure notifies every seller who offered, so a
+        # single bad notification used to abort the sweep before the request
+        # was ever marked expired -- leaving it open again.
+        request.status = RequestStatus.EXPIRED
+
+        try:
+            BuyerRequestService._handle_request_closure(request, session)
+        except Exception as e:
+            logger.warning(
+                "Could not close out offers on expired request %s: %s", request.id, e
+            )
+
+        try:
+            NotificationService.create_notification(
+                user_id=request.buyer.user_id,
+                notification_type=NotificationType.REQUEST_EXPIRED,
+                reference_type="request",
+                reference_id=request.id,
+                metadata_={"request_title": request.title},
+            )
+        except Exception as e:  # a notification must not strand the sweep
+            logger.warning(
+                "Could not notify buyer that request %s expired: %s", request.id, e
+            )
 
     @staticmethod
     def _notify_status_change(

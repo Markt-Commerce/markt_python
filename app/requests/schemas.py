@@ -7,7 +7,7 @@ from app.categories.schemas import CategorySchema
 from app.libs.schemas import PaginationSchema
 
 # app imports
-from .models import RequestStatus
+from .models import RequestStatus, OfferStatus
 
 
 class SellerOfferSchema(Schema):
@@ -19,7 +19,7 @@ class SellerOfferSchema(Schema):
     product_id = fields.Str(allow_none=True)
     price = fields.Float(validate=validate.Range(min=0))
     message = fields.Str(validate=validate.Length(max=1000))
-    status = fields.Str(dump_only=True)
+    status = fields.Enum(OfferStatus, dump_only=True)
     created_at = fields.DateTime(dump_only=True)
 
     # Nested relationships

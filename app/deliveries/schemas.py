@@ -11,6 +11,11 @@ class DeliveryLoginRequestSchema(Schema):
 
 class DeliveryLoginResponseSchema(Schema):
     partner = fields.Nested("PartnerSchema")
+    # Stateless bearer token (same mechanism as users/routes.py's
+    # UserSchema.access_token) -- React Native doesn't persist Flask
+    # session cookies reliably, especially across Expo Go restarts, so the
+    # rider app stores this and sends it back as `Authorization: Bearer`.
+    access_token = fields.Str(dump_only=True)
 
 
 class DeliveryRegisterRequestSchema(Schema):
@@ -51,9 +56,12 @@ class DeliveryOTPResponseSchema(Schema):
 class DeliveryDataResponseSchema(Schema):
     id = fields.String()
     name = fields.String()
+    email = fields.String(allow_none=True)
+    phone_number = fields.String(allow_none=True)
     status = fields.String(validate=validate.OneOf(["ACTIVE", "INACTIVE", "SUSPENDED"]))
-    vehicle_type = fields.String()
-    rating = fields.Float()
+    vehicle_type = fields.String(allow_none=True)
+    rating = fields.Float(allow_none=True)
+    profile_picture = fields.String(allow_none=True)
 
 
 class DeliveryStatusUpdateSchema(Schema):
@@ -76,7 +84,7 @@ class DeliveryAvailableOrdersQuerySchema(Schema):
     page = fields.Int(validate=validate.Range(min=1), missing=1)
     per_page = fields.Int(validate=validate.Range(min=1, max=50), missing=20)
     search_radius = fields.Int(
-        validate=validate.Range(min=100, max=50000), missing=3000
+        validate=validate.Range(min=100, max=50000), missing=5000
     )
 
 
@@ -91,10 +99,22 @@ class DeliveryAvailableOrdersResponseSchema(Schema):
 
 class AvailableOrderSchema(Schema):
     order_id = fields.String()
+    order_number = fields.String(allow_none=True)
     pickup = fields.List(fields.Nested("LocationSchema"))
     dropoff = fields.Nested("LocationSchema")
     distance_meters = fields.Float()
     estimated_earnings = fields.Float()
+
+    # What the offer is, not just what it pays. A rider deciding in the
+    # seconds an offer hold lasts was given an order id and a distance;
+    # these are the same details the assignment hands over once they have
+    # already committed.
+    seller_name = fields.String(allow_none=True)
+    seller_image = fields.String(allow_none=True)
+    pickup_address = fields.String(allow_none=True)
+    pickup_count = fields.Integer()
+    item_count = fields.Integer()
+    dropoff_area = fields.String(allow_none=True)
 
 
 class LocationSchema(Schema):
@@ -104,6 +124,34 @@ class LocationSchema(Schema):
 
 class DeliveryOrderAcceptRequestSchema(Schema):
     order_id = fields.String(required=True)
+
+
+class DeliveryPartnerUpdateSchema(Schema):
+    """What a rider may change about themselves.
+
+    Not phone_number -- that is the login credential and belongs to the OTP
+    flow -- and not status, which the online/offline toggle owns.
+    """
+
+    name = fields.String(required=False, validate=validate.Length(min=1, max=100))
+    email = fields.Email(required=False)
+    vehicle_type = fields.String(required=False)
+
+
+class DeliveryPartnerPhotoResponseSchema(Schema):
+    profile_picture = fields.String(allow_none=True)
+
+
+class DeliveryOrderOfferResponseSchema(Schema):
+    """The hold put on an order while a rider decides."""
+
+    assignment_id = fields.String()
+    status = fields.String()
+    # ISO-8601, UTC. The app counts down to this rather than to a duration
+    # it starts locally, so a slow response does not hand out extra seconds
+    # and a phone with a wrong clock still expires when the server does.
+    expires_at = fields.String()
+    seconds = fields.Integer()
 
 
 class DeliveryOrderAcceptResponseSchema(Schema):
@@ -118,12 +166,98 @@ class DeliveryActiveAssignmentsResponseSchema(Schema):
 class ActiveAssignmentSchema(Schema):
     assignment_id = fields.String()
     order_id = fields.String()
+    order_number = fields.String(allow_none=True)
     pickup = fields.List(fields.Nested("LocationSchema"))
     dropoff = fields.Nested("LocationSchema")
     status = fields.String(
-        validate=validate.OneOf(["ASSIGNED", "ACCEPTED", "REJECTED"])
+        validate=validate.OneOf(
+            ["ASSIGNED", "ACCEPTED", "REJECTED", "OFFERED", "EXPIRED"]
+        )
+    )
+    # Which step of the delivery they are on. `status` above is ACCEPTED
+    # for the whole job and says nothing about progress, so without this
+    # the app cannot tell "on the way to the shop" from "parcel in hand"
+    # and re-offers the step the rider just finished.
+    logistical_status = fields.String(
+        validate=validate.OneOf(
+            [
+                "ARRIVED_PICKUP",
+                "PICKED_UP",
+                "EN_ROUTE_TO_DROPOFF",
+                "DELIVERED_PENDING_QR",
+                "COMPLETED",
+            ]
+        ),
+        allow_none=True,
     )
     assignedAt = fields.DateTime()
+
+    # Who and where, not just two coordinates. A run's stops have carried
+    # these since runs existed; a single order is the same job with one
+    # stop, and the rider was shown "Pickup from seller" with no name, no
+    # address and nobody to call.
+    seller_name = fields.String(allow_none=True)
+    seller_image = fields.String(allow_none=True)
+    pickup_address = fields.String(allow_none=True)
+    seller_phone = fields.String(allow_none=True)
+    # What is actually in the parcel. A rider was given a count and sent
+    # to a stall, with nothing to check against what they were handed.
+    #
+    # Sourced from `parcel`, not `items`, while staying `items` on the
+    # wire. Marshmallow resolves a missing key by falling back to
+    # getattr, and every dict has an `.items` method -- so a partial dump
+    # that happened not to carry this key handed the serialiser a bound
+    # method to iterate and raised TypeError instead of omitting a field.
+    items = fields.List(fields.Nested("ParcelLineSchema"), attribute="parcel")
+    buyer_name = fields.String(allow_none=True)
+    dropoff_address = fields.String(allow_none=True)
+    buyer_phone = fields.String(allow_none=True)
+
+
+class DeliveryJobHistoryQuerySchema(Schema):
+    page = fields.Int(validate=validate.Range(min=1), missing=1)
+    per_page = fields.Int(validate=validate.Range(min=1, max=50), missing=20)
+    # Absent means everything. The two named values are the only
+    # distinction a rider actually draws over their own history.
+    status = fields.String(
+        validate=validate.OneOf(["active", "completed"]), required=False
+    )
+
+
+class DeliveryJobSchema(Schema):
+    assignment_id = fields.String()
+    order_id = fields.String()
+    order_number = fields.String(allow_none=True)
+    assigned_at = fields.DateTime(allow_none=True)
+    logistical_status = fields.String(allow_none=True)
+    seller_name = fields.String(allow_none=True)
+    seller_image = fields.String(allow_none=True)
+    dropoff_address = fields.String(allow_none=True)
+    earnings = fields.Float(allow_none=True)
+
+
+class DeliveryJobPaginationSchema(Schema):
+    # Its own class rather than reusing the name PaginationSchema, which
+    # more than one blueprint already defines -- marshmallow resolves
+    # nested schemas by name through a global registry and refuses an
+    # ambiguous one.
+    page = fields.Int()
+    per_page = fields.Int()
+    total_items = fields.Int()
+    total_pages = fields.Int()
+
+
+class DeliveryJobHistoryResponseSchema(Schema):
+    jobs = fields.List(fields.Nested(DeliveryJobSchema))
+    pagination = fields.Nested(DeliveryJobPaginationSchema)
+
+
+class ParcelLineSchema(Schema):
+    """One line of what the rider is collecting."""
+
+    name = fields.String()
+    quantity = fields.Integer()
+    variant = fields.String(allow_none=True)
 
 
 # Request and response schema for updating logistical status of an active assignment
@@ -154,3 +288,195 @@ class DeliveryOrderQRConfirmRequestSchema(Schema):
 class DeliveryOrderQRConfirmResponseSchema(Schema):
     status = fields.String()
     message = fields.String()
+
+
+# --- DeliveryRun rider assignment (10.6-10.7, Phase 10) ---------------------
+
+
+class DeliveryAvailableRunsQuerySchema(Schema):
+    page = fields.Int(validate=validate.Range(min=1), missing=1)
+    per_page = fields.Int(validate=validate.Range(min=1, max=50), missing=20)
+    search_radius = fields.Int(
+        validate=validate.Range(min=100, max=50000), missing=5000
+    )
+
+
+class AvailableRunSchema(Schema):
+    run_id = fields.String()
+    market = fields.String(allow_none=True)
+    area = fields.String()
+    order_count = fields.Integer()
+    # What each buyer pays towards the run -- not the rider's number.
+    price_per_order = fields.Float(allow_none=True)
+    # What the rider is credited, per drop and for the whole run. Without
+    # these the app shows price_per_order as earnings, which over-promises.
+    rider_earning_per_drop = fields.Float(allow_none=True)
+    rider_earning_total = fields.Float(allow_none=True)
+    distance_meters = fields.Float()
+    # Area centroid (Area.latitude/longitude), not per-seller/per-buyer
+    # coordinates -- a rider hasn't committed to this run yet, so real
+    # pickup/dropoff addresses stay post-acceptance-only (get_run_detail).
+    # One representative pin per run is enough for the always-on dashboard
+    # map (REFACTOR_NOTES.md, "Always-on map dashboard", 2026-09-16).
+    lat = fields.Float(allow_none=True)
+    lng = fields.Float(allow_none=True)
+
+
+class DeliveryAvailableRunsResponseSchema(Schema):
+    range_meters = fields.Integer()
+    runs = fields.List(fields.Nested(AvailableRunSchema))
+    page = fields.Integer()
+    per_page = fields.Integer()
+    total = fields.Integer()
+    total_pages = fields.Integer()
+
+
+class DeliveryRunAcceptResponseSchema(Schema):
+    run_id = fields.String()
+    status = fields.String()
+    assignment_id = fields.Integer(allow_none=True)
+
+
+class DeliveryRunFailRequestSchema(Schema):
+    reason = fields.String(allow_none=True)
+
+
+class DeliveryRunFailResponseSchema(Schema):
+    run_id = fields.String()
+    status = fields.String()
+    # True when the rider was already carrying parcels, which is the
+    # case the run cannot simply be handed to somebody else. It is held
+    # at RIDER_FAILED for recovery rather than reopened, and the app
+    # tells the rider somebody will be in touch about what they have.
+    recovery_needed = fields.Boolean()
+    # The orders whose goods are still with the rider. Each has a
+    # DeliveryFailure open against it, waiting on the same
+    # resolve/complete pipeline every other failure uses.
+    orders_to_recover = fields.List(fields.String())
+
+
+class DeliveryRunStopDetailSchema(Schema):
+    seller_id = fields.Integer()
+    seller_name = fields.String(allow_none=True)
+    shop_address = fields.String(allow_none=True)
+    # Seller.shop_latitude/shop_longitude already exist for market-claim
+    # sanity-checking (see users/models.py) -- exposed here so the rider
+    # app can plot a real pickup pin instead of nothing.
+    lat = fields.Float(allow_none=True)
+    lng = fields.Float(allow_none=True)
+    status = fields.String(validate=validate.OneOf(["pending", "arrived", "picked_up"]))
+    arrived_at = fields.String(allow_none=True)
+    picked_up_at = fields.String(allow_none=True)
+
+
+class DeliveryRunOrderAddressSchema(Schema):
+    street_address = fields.String(allow_none=True)
+    city = fields.String(allow_none=True)
+    state = fields.String(allow_none=True)
+    # Address.latitude/longitude already exist (orders/models.py) --
+    # exposed here for the same reason as the stop's lat/lng above.
+    lat = fields.Float(allow_none=True)
+    lng = fields.Float(allow_none=True)
+
+
+class DeliveryRunOrderDetailSchema(Schema):
+    order_id = fields.String()
+    order_number = fields.String(allow_none=True)
+    buyer_name = fields.String(allow_none=True)
+    # Sourced from `parcel`, not `items` -- see ActiveAssignmentSchema
+    # for why a field called `items` on a dict source is a trap.
+    items = fields.List(fields.Nested("ParcelLineSchema"), attribute="parcel")
+    buyer_phone = fields.String(allow_none=True)
+    delivery_address = fields.Nested(DeliveryRunOrderAddressSchema, allow_none=True)
+    pod_status = fields.String(
+        validate=validate.OneOf(["pending", "qr_issued", "delivered"])
+    )
+    delivered_at = fields.String(allow_none=True)
+
+
+class DeliveryRunDetailResponseSchema(Schema):
+    """Full rider-facing run state -- GET /runs/active and
+    GET /runs/<run_id>. `run_id` is the only field guaranteed present:
+    GET /runs/active returns just `{"run_id": null}` when the rider has
+    no run in progress, rather than a 404 (there's genuinely nothing
+    wrong, just nothing active)."""
+
+    run_id = fields.String(allow_none=True)
+    status = fields.String(allow_none=True)
+    market = fields.String(allow_none=True)
+    area = fields.String(allow_none=True)
+    price_per_order = fields.Float(allow_none=True)
+    rider_earning_per_drop = fields.Float(allow_none=True)
+    rider_earning_total = fields.Float(allow_none=True)
+    stops = fields.List(fields.Nested(DeliveryRunStopDetailSchema), missing=list)
+    orders = fields.List(fields.Nested(DeliveryRunOrderDetailSchema), missing=list)
+
+
+# --- DeliveryRun pickup-per-stop / POD (10.6, Phase 10) ---------------------
+
+
+class DeliveryRunStopActionResponseSchema(Schema):
+    delivery_run_id = fields.String()
+    seller_id = fields.Integer()
+    status = fields.String(validate=validate.OneOf(["pending", "arrived", "picked_up"]))
+
+
+class DeliveryRunPickupConfirmResponseSchema(DeliveryRunStopActionResponseSchema):
+    run_status = fields.String()
+    pod_issued_for_orders = fields.List(fields.String())
+
+
+class DeliveryRunOrderPodQRResponseSchema(Schema):
+    order_id = fields.String()
+    qr_code = fields.String()
+
+
+class DeliveryRunOrderPodConfirmRequestSchema(Schema):
+    qr_code = fields.String(required=True)
+
+
+class DeliveryRunOrderPodConfirmResponseSchema(Schema):
+    status = fields.String()
+    message = fields.String()
+    run_completed = fields.Boolean()
+
+
+# --- Delivery failure & recovery (10.7, Phase 10) ---------------------------
+
+
+class DeliveryFailureReportRequestSchema(Schema):
+    reason = fields.String(
+        required=True,
+        validate=validate.OneOf(["buyer_unavailable", "bad_address", "buyer_refused"]),
+    )
+    notes = fields.String(allow_none=True)
+
+
+class DeliveryFailureSchema(Schema):
+    id = fields.String()
+    delivery_run_id = fields.String(allow_none=True)
+    order_id = fields.String()
+    reason = fields.String()
+    is_perishable = fields.Boolean()
+    outcome = fields.String()
+    recovery_action = fields.String(allow_none=True)
+    cost_bearer = fields.String(allow_none=True)
+    resolution_notes = fields.String(allow_none=True)
+    reported_at = fields.DateTime(allow_none=True)
+    resolved_at = fields.DateTime(allow_none=True)
+    completed_at = fields.DateTime(allow_none=True)
+
+
+class DeliveryFailureResolveRequestSchema(Schema):
+    recovery_action = fields.String(
+        required=True,
+        validate=validate.OneOf(["redelivery", "return_to_seller", "dispose"]),
+    )
+    cost_bearer = fields.String(
+        required=True, validate=validate.OneOf(["buyer", "seller", "markt"])
+    )
+    notes = fields.String(allow_none=True)
+
+
+class DeliveryFailureCompleteRequestSchema(Schema):
+    notes = fields.String(allow_none=True)

@@ -154,14 +154,14 @@ class ChatNamespace(Namespace):
 
             room_id = data.get("room_id")
             message_content = data.get("message")
-            message_type =  data.get("message_type")
+            message_type = data.get("message_type")
             product_id = data.get("product_id")
 
             # Validate room access
             if not ChatService.user_has_access_to_room(user_id, room_id):
                 return emit("error", {"message": "Access denied to this room"})
-            
-            #TODO: message type needs to be check to make sure it falls within the acceptable types
+
+            # TODO: message type needs to be check to make sure it falls within the acceptable types
 
             # Process message through service (includes persistence and validation)
             try:
