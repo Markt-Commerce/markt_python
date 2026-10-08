@@ -74,8 +74,16 @@ AWS_S3_BUCKET=markt-media-prod
 CDN_DOMAIN=
 
 RESEND_API_KEY=
-RESEND_FROM_EMAIL=noreply@marktcommerce.com
+# Sending is on the mail. subdomain (verified in Resend) so the root domain's
+# reputation is never at stake. Each category falls back to RESEND_FROM_EMAIL.
+RESEND_FROM_EMAIL=noreply@mail.marktcommerce.com
 RESEND_FROM_NAME=Markt
+RESEND_TRANSACTIONAL_FROM_EMAIL=orders@mail.marktcommerce.com
+RESEND_TRANSACTIONAL_FROM_NAME=Markt Orders
+RESEND_NOTIFICATION_FROM_EMAIL=notifications@mail.marktcommerce.com
+RESEND_NOTIFICATION_FROM_NAME=Markt
+RESEND_MARKETING_FROM_EMAIL=hello@mail.marktcommerce.com
+RESEND_MARKETING_FROM_NAME=Markt
 EMAIL_REPLY_TO=support@marktcommerce.com
 EMAIL_UNSUBSCRIBE_URL=https://marktcommerce.com/settings/notifications
 
