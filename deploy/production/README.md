@@ -27,7 +27,7 @@ sudo bash 01-base.sh            # packages, swap, ufw, fail2ban, python3.11(+gdb
 sudo bash 02-data.sh            # postgres (random pw in /root/markt-secrets) + redis
 sudo bash 03-app.sh main        # markt user, clone, venv, settings.ini, migrations
 sudo bash 04-services.sh deploy_key.pub   # units, nginx, logrotate, backups, deploy user
-sudo certbot --nginx -d api.marktcommerce.com   # once DNS points here
+sudo certbot --nginx -d api.marktcommerce.com --redirect --hsts --register-unsafely-without-email --agree-tos   # once DNS points here
 ```
 
 Then fill in the empty secrets in `settings.ini` and
