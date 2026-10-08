@@ -1,0 +1,9 @@
+[Unit]
+Description=Markt nightly Postgres backup
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=markt
+Group=markt
+ExecStart=/usr/local/bin/markt-backup

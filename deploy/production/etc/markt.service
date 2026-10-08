@@ -1,0 +1,20 @@
+[Unit]
+Description=Markt API (gunicorn + Flask-SocketIO)
+After=network.target postgresql.service redis-server.service
+Wants=postgresql.service redis-server.service
+
+[Service]
+User=markt
+Group=markt
+WorkingDirectory=/srv/markt/app
+Environment=PATH=/srv/markt/venv/bin:/usr/bin:/bin
+ExecStart=/srv/markt/venv/bin/gunicorn -c /etc/markt/gunicorn.conf.py main.run:app
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=35
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

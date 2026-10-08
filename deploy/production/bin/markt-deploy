@@ -1,0 +1,40 @@
+#!/bin/bash
+# Deploy one commit of main to this box. Run as root (via the deploy user's
+# forced SSH command + sudoers). Refuses anything not on origin/main.
+set -euo pipefail
+SHA="${1:-${SSH_ORIGINAL_COMMAND:-}}"
+[[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "usage: markt-deploy <40-char commit sha>"; exit 2; }
+
+ROOT=/srv/markt
+APP=$ROOT/app
+as_markt() { sudo -u markt -H bash -c "cd $APP && $1"; }
+
+exec 9>/srv/markt/run/deploy.lock
+flock -n 9 || { echo "another deploy is running"; exit 1; }
+
+as_markt "git fetch -q origin main"
+as_markt "git merge-base --is-ancestor $SHA origin/main" \
+  || { echo "refusing: $SHA is not on origin/main"; exit 1; }
+
+PREV=$(as_markt "git rev-parse HEAD")
+echo "deploying $SHA (was $PREV)"
+
+# A dump right before migrations: the cheapest rollback there is.
+/usr/local/bin/markt-backup >/dev/null && echo "pre-deploy backup taken" || { echo "backup failed; aborting"; exit 1; }
+
+as_markt "git checkout -q --detach $SHA"
+as_markt "$ROOT/venv/bin/pip install -q -r requirements/requirements.txt"
+as_markt "FLASK_APP=main.setup:create_flask_app $ROOT/venv/bin/flask db upgrade 2>&1 | grep -E 'Running upgrade|ERROR' || true"
+
+systemctl restart markt markt-celery
+for i in $(seq 1 24); do
+  if curl -fsS -m 5 -o /dev/null http://127.0.0.1:8000/api/v1/health; then
+    echo "$SHA" > $ROOT/run/deployed_sha
+    echo "healthy after $((i*5))s; deployed $SHA"
+    exit 0
+  fi
+  sleep 5
+done
+echo "UNHEALTHY after 120s. Previous commit was $PREV."
+journalctl -u markt -n 60 --no-pager || true
+exit 1

@@ -1,0 +1,10 @@
+[Unit]
+Description=Markt nightly Postgres backup (02:30 UTC)
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+Persistent=true
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target
