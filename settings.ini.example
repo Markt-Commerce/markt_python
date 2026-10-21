@@ -46,6 +46,18 @@ PAYSTACK_PUBLIC_KEY=pk_test_your_public_key_here
 PAYMENT_CURRENCY=NGN
 PAYMENT_GATEWAY=paystack
 
+# Store-review demo rider: this phone number always gets this six-digit code
+# and nothing is sent. Leave both empty to have no demo account.
+DELIVERY_DEMO_PHONE=
+DELIVERY_DEMO_OTP=
+
+# Rider sign-in codes: channels tried in order (sms, email). SMS is Sendchamp
+# and needs an API key and an approved sender ID; route dnd is transactional.
+OTP_CHANNELS=email
+SENDCHAMP_API_KEY=
+SENDCHAMP_SENDER_NAME=
+SENDCHAMP_ROUTE=dnd
+
 # API & Frontend URLs (for payment callbacks and redirects)
 # Development: http://localhost:8000
 # Production: https://api.yourdomain.com

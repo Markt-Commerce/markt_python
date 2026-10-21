@@ -71,6 +71,24 @@ class Config:
         self.PAYMENT_CURRENCY = config("PAYMENT_CURRENCY", default="NGN")
         self.PAYMENT_GATEWAY = config("PAYMENT_GATEWAY", default="paystack")
 
+        # The rider account App Store and Play reviewers sign in with. They
+        # cannot receive a code, so this phone number always gets the fixed
+        # code below and nothing is sent. Both empty means there is no demo
+        # account, which is the default everywhere but the box the store
+        # builds point at.
+        self.DELIVERY_DEMO_PHONE = config("DELIVERY_DEMO_PHONE", default="")
+        self.DELIVERY_DEMO_OTP = config("DELIVERY_DEMO_OTP", default="")
+
+        # How rider sign-in codes are sent: channel names in the order to
+        # try them (see app/libs/otp_delivery.py). Email only by default, so
+        # SMS is never attempted before a sender ID is approved and a key
+        # is in place; production wants "sms,email".
+        self.OTP_CHANNELS = config("OTP_CHANNELS", default="email")
+        self.SENDCHAMP_API_KEY = config("SENDCHAMP_API_KEY", default="")
+        # Must be a sender ID approved on the Sendchamp dashboard.
+        self.SENDCHAMP_SENDER_NAME = config("SENDCHAMP_SENDER_NAME", default="")
+        self.SENDCHAMP_ROUTE = config("SENDCHAMP_ROUTE", default="dnd")
+
         # API Base URL for callbacks and redirects
         # For production: https://api.yourdomain.com
         # For development: http://localhost:8000

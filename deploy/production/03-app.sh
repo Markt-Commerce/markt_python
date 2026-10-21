@@ -66,6 +66,19 @@ PAYSTACK_PUBLIC_KEY=
 PAYMENT_CURRENCY=NGN
 PAYMENT_GATEWAY=paystack
 
+# Store-review demo rider (the account given to Apple and Google in the
+# review notes). This number always gets this six-digit code; nothing is
+# sent. Empty = no demo account.
+DELIVERY_DEMO_PHONE=
+DELIVERY_DEMO_OTP=
+
+# Rider sign-in codes. Switch to sms,email once the Sendchamp sender ID is
+# approved and the key below is filled in; email alone until then.
+OTP_CHANNELS=email
+SENDCHAMP_API_KEY=
+SENDCHAMP_SENDER_NAME=
+SENDCHAMP_ROUTE=dnd
+
 # IAM user markt-prod-s3, scoped to the bucket below
 AWS_ACCESS_KEY=
 AWS_SECRET_KEY=
