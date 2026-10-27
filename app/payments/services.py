@@ -890,8 +890,13 @@ class PaymentService:
                     resolved_amount,
                     currency=currency,
                 )
-                payment.transition_to(PaymentStatus.COMPLETED)
-                payment.paid_at = datetime.utcnow()
+                # Left PENDING on purpose: complete_payment() below does the
+                # transition. Marking it COMPLETED here made complete_payment
+                # read it as a duplicate ("already_completed") and skip
+                # everything a first completion does -- reducing stock, the
+                # Transaction row, clearing the paid items from the cart,
+                # spending the chat discount, notifications and the seller
+                # acceptance windows -- for every wallet payment.
                 wallet_payment_id = payment.id
             elif method == PaymentMethod.CARD:
                 PaymentService._initialize_paystack_transaction(payment, metadata)
