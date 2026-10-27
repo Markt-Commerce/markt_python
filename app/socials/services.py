@@ -2499,6 +2499,21 @@ class FollowService:
             )
 
 
+def _category_keys_to_int(scores):
+    """Undo JSON's stringifying of category-id keys after a cache round trip.
+
+    Interests and category preferences are {category_id: score} with integer
+    ids. JSON object keys are always strings, so a cached copy came back as
+    {"12": 3} -- and every `cid in interests` check against an integer id
+    quietly failed. The feed was then ranked one way when the caches were
+    cold and another once they were warm, reshuffling under the user.
+    """
+    return {
+        (int(k) if isinstance(k, str) and k.lstrip("-").isdigit() else k): v
+        for k, v in scores.items()
+    }
+
+
 class FeedService:
     """Enhanced feed service with personalization and real-time updates"""
 
@@ -3244,7 +3259,7 @@ class FeedService:
             if cached:
                 import json
 
-                return json.loads(cached)
+                return _category_keys_to_int(json.loads(cached))
         except RedisError:
             pass
         except Exception:
@@ -3340,7 +3355,12 @@ class FeedService:
             if cached:
                 import json
 
-                return json.loads(cached)
+                preferences = json.loads(cached)
+                if isinstance(preferences.get("category_preferences"), dict):
+                    preferences["category_preferences"] = _category_keys_to_int(
+                        preferences["category_preferences"]
+                    )
+                return preferences
         except RedisError:
             pass
         except Exception:
