@@ -26,7 +26,8 @@ from app.libs.errors import (
     NotFoundError,
     ValidationError,
 )
-from app.libs.email_service import email_service
+from app.libs.otp_delivery import deliver_otp
+from main.config import settings
 
 # app imports
 from .models import (
@@ -78,6 +79,24 @@ def _mask_email(email: str) -> str:
     name, _, domain = email.partition("@")
     head = name[0] if name else ""
     return f"{head}{'*' * max(len(name) - 1, 1)}@{domain}"
+
+
+def _demo_otp_for(phone: str) -> Optional[str]:
+    """The fixed code for the store-review demo rider, or None.
+
+    None unless both settings are present, the code is six digits like a
+    real one, and `phone` (already normalized) is the demo number. A
+    misconfigured code turns the demo account off rather than leaving a
+    guessable one live.
+    """
+    demo_phone = _normalize_phone(settings.DELIVERY_DEMO_PHONE)
+    demo_otp = (settings.DELIVERY_DEMO_OTP or "").strip()
+    if not demo_phone or not demo_otp or phone != demo_phone:
+        return None
+    if len(demo_otp) != 6 or not demo_otp.isdigit():
+        logger.error("DELIVERY_DEMO_OTP must be six digits; demo sign-in is off")
+        return None
+    return demo_otp
 
 
 class DeliveryService:
@@ -260,7 +279,7 @@ class DeliveryService:
 
     @staticmethod
     def send_otp(phone_number: str) -> bool:
-        """Generate and send OTP to delivery partner's email (phone number would be used later when we integrate SMS service)"""
+        """Generate a sign-in code and send it by SMS or email (see OTP_CHANNELS)."""
         try:
             phone = _normalize_phone(phone_number)
             if (
@@ -270,6 +289,18 @@ class DeliveryService:
                 or len(phone) > DeliveryService.PHONE_MAX_LEN
             ):
                 raise ValidationError("Invalid phone number format")
+
+            # Store reviewers have no inbox to read a code from. The fixed
+            # code goes through the same cache and is spent on use like any
+            # other, so login needs no special case; nothing is emailed.
+            demo_otp = _demo_otp_for(phone)
+            if demo_otp:
+                cache_key = f"{DeliveryService.CACHE_KEY_PREFIX}{phone}"
+                redis_client.setex(
+                    cache_key, DeliveryService.CACHE_EXPIRE_SECONDS, demo_otp
+                )
+                logger.info("Issued the demo rider sign-in code")
+                return {"status": "success", "message": "OTP sent"}
 
             otp = f"{randint(100000, 999999)}"
 
@@ -283,33 +314,33 @@ class DeliveryService:
                     )
                     raise NotFoundError("Delivery partner not found")
 
+                # May be empty: with SMS configured, a rider needs no email.
                 email = delivery_user.email
-                if not email:
-                    logger.warning(
-                        f"No email found for delivery partner with phone number {phone_number}"
-                    )
-                    raise NotFoundError("Email not found")
+                rider_id = delivery_user.id
 
             # The code itself is deliberately not logged. It used to be,
             # which put a working credential into every log sink, aggregator
             # and support screenshot that touches this line.
-            logger.info("Sending OTP to %s", email)
-            if email_service.send_otp_email(email, otp):
-                cache_key = f"{DeliveryService.CACHE_KEY_PREFIX}{phone}"
-                redis_client.setex(cache_key, DeliveryService.CACHE_EXPIRE_SECONDS, otp)
-                return {
-                    "status": "success",
-                    "message": f"OTP sent to {_mask_email(email)}",
-                }
-            else:
-                logger.error(f"Failed to send OTP email to {email}")
+            channel = deliver_otp(phone, email, otp)
+            if channel is None:
+                logger.error("No OTP channel could reach rider %s", rider_id)
                 return {
                     "status": "error",
                     "message": (
-                        "We could not deliver a code to the email on this "
-                        "account. Contact support."
+                        "We could not send a code to this account. Contact support."
                     ),
                 }
+
+            cache_key = f"{DeliveryService.CACHE_KEY_PREFIX}{phone}"
+            redis_client.setex(cache_key, DeliveryService.CACHE_EXPIRE_SECONDS, otp)
+            # Say where it went, so a rider whose SMS failed over to email
+            # knows to look in their inbox rather than wait on their phone.
+            where = (
+                f"by SMS to the number ending {phone[-4:]}"
+                if channel == "sms"
+                else f"to {_mask_email(email)}"
+            )
+            return {"status": "success", "message": f"OTP sent {where}"}
         except Exception as e:
             logger.error(f"Error sending OTP: {str(e)}")
             return {"status": "error", "message": "Failed to send OTP", "error": str(e)}

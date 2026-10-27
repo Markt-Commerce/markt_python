@@ -71,6 +71,28 @@ class Config:
         self.PAYMENT_CURRENCY = config("PAYMENT_CURRENCY", default="NGN")
         self.PAYMENT_GATEWAY = config("PAYMENT_GATEWAY", default="paystack")
 
+        # The rider account App Store and Play reviewers sign in with. They
+        # cannot receive a code, so this phone number always gets the fixed
+        # code below and nothing is sent. Both empty means there is no demo
+        # account, which is the default everywhere but the box the store
+        # builds point at.
+        self.DELIVERY_DEMO_PHONE = config("DELIVERY_DEMO_PHONE", default="")
+        self.DELIVERY_DEMO_OTP = config("DELIVERY_DEMO_OTP", default="")
+
+        # How rider sign-in codes are sent: channel names in the order to
+        # try them (see app/libs/otp_delivery.py). Email only by default, so
+        # SMS is never attempted before a sender ID is approved and a key
+        # is in place; production wants "sms,email".
+        self.OTP_CHANNELS = config("OTP_CHANNELS", default="email")
+        self.TERMII_API_KEY = config("TERMII_API_KEY", default="")
+        # Must be a sender ID approved on the Termii dashboard.
+        self.TERMII_SENDER_ID = config("TERMII_SENDER_ID", default="")
+        self.TERMII_CHANNEL = config("TERMII_CHANNEL", default="dnd")
+        # Per account: the Termii dashboard shows which one to use.
+        self.TERMII_BASE_URL = config(
+            "TERMII_BASE_URL", default="https://v3.api.termii.com"
+        )
+
         # API Base URL for callbacks and redirects
         # For production: https://api.yourdomain.com
         # For development: http://localhost:8000
