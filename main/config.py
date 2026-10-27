@@ -155,6 +155,10 @@ class Config:
         self.AWS_REGION = config("AWS_REGION", default="us-east-1")
         self.AWS_S3_BUCKET = config("AWS_S3_BUCKET", default="markt-media")
         self.CDN_DOMAIN = config("CDN_DOMAIN", default="")
+        # Local/demo only: serve media keys from a plain HTTP origin (e.g. the
+        # nginx container in docker-compose.demo.yml) instead of S3/CDN. Takes
+        # precedence over CDN_DOMAIN when set; leave empty everywhere else.
+        self.MEDIA_BASE_URL = config("MEDIA_BASE_URL", default="").rstrip("/")
 
         # Email Configuration (Resend)
         self.RESEND_API_KEY = config("RESEND_API_KEY", default="")
