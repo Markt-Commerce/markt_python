@@ -1823,7 +1823,10 @@ class PaymentService:
                         "amount": payment.amount,
                         "currency": payment.currency,
                         "reference": payment.transaction_id or "",
-                        "method": payment.method,
+                        # The enum's value: metadata is stored as JSON, and the
+                        # bare member made this notification -- and the seller's
+                        # ORDER_PLACED after it -- fail for every payment.
+                        "method": getattr(payment.method, "value", payment.method),
                         "items": items,
                     },
                 )
