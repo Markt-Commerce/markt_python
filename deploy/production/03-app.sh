@@ -72,12 +72,14 @@ PAYMENT_GATEWAY=paystack
 DELIVERY_DEMO_PHONE=
 DELIVERY_DEMO_OTP=
 
-# Rider sign-in codes. Switch to sms,email once the Sendchamp sender ID is
-# approved and the key below is filled in; email alone until then.
+# Rider sign-in codes. Switch to sms,email once the Termii sender ID is
+# approved and the key below is filled in; email alone until then. The base
+# URL is per account (Termii dashboard).
 OTP_CHANNELS=email
-SENDCHAMP_API_KEY=
-SENDCHAMP_SENDER_NAME=
-SENDCHAMP_ROUTE=dnd
+TERMII_API_KEY=
+TERMII_SENDER_ID=
+TERMII_CHANNEL=dnd
+TERMII_BASE_URL=https://v3.api.termii.com
 
 # IAM user markt-prod-s3, scoped to the bucket below
 AWS_ACCESS_KEY=

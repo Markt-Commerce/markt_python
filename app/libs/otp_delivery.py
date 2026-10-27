@@ -3,16 +3,16 @@
 Channels are tried in the order OTP_CHANNELS lists them, and the first that
 accepts the code wins. SMS first with email behind it is the intended
 production order: SMS reaches the phone the rider is holding, and email
-catches what SMS drops -- an unregistered sender ID, an empty Sendchamp
+catches what SMS drops -- an unregistered sender ID, an empty Termii
 wallet, a provider outage.
 
 "Accepted" means the provider took the message, not that it arrived.
-Sendchamp answers "processing" and delivers later, so a code that was
+Termii answers with a message_id and delivers later, so a code that was
 accepted and then lost on the network does not fall through to email. The
 rider asks for another code, which is what they would do anyway.
 
 Generating, storing and spending the code stays in DeliveryService; this
-module only carries it. That is why Sendchamp's Verification API is not used:
+module only carries it. That is why Termii's Token API is not used:
 it generates and checks codes itself, which would bypass the single-use rule
 in login_delivery_partner.
 """
@@ -28,17 +28,21 @@ from main.config import settings
 logger = logging.getLogger(__name__)
 
 
-class SendchampSMS:
+class TermiiSMS:
     name = "sms"
-    URL = "https://api.sendchamp.com/api/v1/sms/send"
+
+    @staticmethod
+    def url() -> str:
+        # Termii gives each account its own base URL (shown on the dashboard).
+        return settings.TERMII_BASE_URL.rstrip("/") + "/api/sms/send"
 
     @staticmethod
     def configured() -> bool:
-        return bool(settings.SENDCHAMP_API_KEY and settings.SENDCHAMP_SENDER_NAME)
+        return bool(settings.TERMII_API_KEY and settings.TERMII_SENDER_ID)
 
     @staticmethod
     def send(phone: str, email: Optional[str], code: str) -> bool:
-        if not SendchampSMS.configured():
+        if not TermiiSMS.configured():
             return False
         # Nothing but the code and its expiry. An OTP with a promo line on
         # it is no longer transactional traffic to the networks, and stops
@@ -49,20 +53,21 @@ class SendchampSMS:
         )
         try:
             response = requests.post(
-                SendchampSMS.URL,
+                TermiiSMS.url(),
                 json={
                     # International format without the +, which is what
                     # _normalize_phone already stores.
-                    "to": [phone],
-                    "message": message,
-                    "sender_name": settings.SENDCHAMP_SENDER_NAME,
-                    # dnd: the transactional route. non_dnd silently never
+                    "to": phone,
+                    "from": settings.TERMII_SENDER_ID,
+                    "sms": message,
+                    "type": "plain",
+                    # dnd: the transactional route. generic silently never
                     # reaches the tens of millions of numbers on the DND
                     # register.
-                    "route": settings.SENDCHAMP_ROUTE,
+                    "channel": settings.TERMII_CHANNEL,
+                    "api_key": settings.TERMII_API_KEY,
                 },
                 headers={
-                    "Authorization": f"Bearer {settings.SENDCHAMP_API_KEY}",
                     "Content-Type": "application/json",
                     "Accept": "application/json",
                 },
@@ -70,16 +75,18 @@ class SendchampSMS:
             )
             body = response.json() if response.content else {}
         except Exception as e:
-            # The exception, never the request: the request body holds the code.
-            logger.error("Sendchamp SMS send failed: %s", type(e).__name__)
+            # The exception, never the request: the request body holds the
+            # code and the API key.
+            logger.error("Termii SMS send failed: %s", type(e).__name__)
             return False
 
-        if response.status_code == 200 and body.get("status") == "success":
+        # A message_id is Termii's receipt; without one nothing was queued.
+        if response.status_code == 200 and body.get("message_id"):
             return True
-        # Sendchamp puts the reason in "message" or "error" ("insufficient
-        # funds", an unapproved sender name). Neither carries the code.
+        # Termii puts the reason in "message" ("Insufficient balance", an
+        # unapproved sender ID). It does not carry the code.
         logger.error(
-            "Sendchamp refused the SMS (%s): %s",
+            "Termii refused the SMS (%s): %s",
             response.status_code,
             body.get("message") or body.get("error") or "no reason given",
         )
@@ -100,7 +107,7 @@ class EmailOTP:
         return bool(email_service.send_otp_email(email, code))
 
 
-CHANNELS = {c.name: c for c in (SendchampSMS, EmailOTP)}
+CHANNELS = {c.name: c for c in (TermiiSMS, EmailOTP)}
 
 
 def channel_order() -> List:

@@ -25,16 +25,23 @@ class FakeResponse:
 
 ACCEPTED = FakeResponse(
     200,
-    {"code": 200, "status": "success", "message": "processing", "data": {}},
+    {
+        "code": "ok",
+        "message_id": "9122821270554876574",
+        "message": "Successfully Sent",
+        "balance": 9,
+        "user": "Markt",
+    },
 )
 
 
 @pytest.fixture
 def setup(monkeypatch):
     monkeypatch.setattr(settings, "OTP_CHANNELS", "sms,email")
-    monkeypatch.setattr(settings, "SENDCHAMP_API_KEY", "sk_test")
-    monkeypatch.setattr(settings, "SENDCHAMP_SENDER_NAME", "Markt")
-    monkeypatch.setattr(settings, "SENDCHAMP_ROUTE", "dnd")
+    monkeypatch.setattr(settings, "TERMII_API_KEY", "tk_test")
+    monkeypatch.setattr(settings, "TERMII_SENDER_ID", "Markt")
+    monkeypatch.setattr(settings, "TERMII_CHANNEL", "dnd")
+    monkeypatch.setattr(settings, "TERMII_BASE_URL", "https://v3.api.termii.com/")
 
     calls = {"sms": [], "email": []}
 
@@ -56,15 +63,16 @@ class TestSmsFirst:
         assert deliver_otp(PHONE, EMAIL, CODE) == "sms"
         assert setup["email"] == []
 
-    def test_the_request_matches_sendchamps_send_sms_api(self, setup):
+    def test_the_request_matches_termiis_send_sms_api(self, setup):
         deliver_otp(PHONE, EMAIL, CODE)
         sent = setup["sms"][0]
-        assert sent["url"] == "https://api.sendchamp.com/api/v1/sms/send"
-        assert sent["headers"]["Authorization"] == "Bearer sk_test"
-        assert sent["json"]["to"] == [PHONE]
-        assert sent["json"]["sender_name"] == "Markt"
-        assert sent["json"]["route"] == "dnd"
-        assert CODE in sent["json"]["message"]
+        assert sent["url"] == "https://v3.api.termii.com/api/sms/send"
+        assert sent["json"]["api_key"] == "tk_test"
+        assert sent["json"]["to"] == PHONE
+        assert sent["json"]["from"] == "Markt"
+        assert sent["json"]["channel"] == "dnd"
+        assert sent["json"]["type"] == "plain"
+        assert CODE in sent["json"]["sms"]
 
     def test_a_rider_without_email_can_still_get_a_code(self, setup):
         assert deliver_otp(PHONE, None, CODE) == "sms"
@@ -74,9 +82,9 @@ class TestEmailFallback:
     @pytest.mark.parametrize(
         "response",
         [
-            FakeResponse(403, {"code": 403, "error": " insufficient funds", "status": "error"}),
-            FakeResponse(400, {"code": 400, "message": "Message required", "status": "failed"}),
-            FakeResponse(200, {"code": 200, "status": "failed"}),
+            FakeResponse(401, {"message": "Invalid API key"}),
+            FakeResponse(400, {"message": "Insufficient balance"}),
+            FakeResponse(200, {"message": "ApplicationSenderId not found"}),
         ],
     )
     def test_a_refused_sms_falls_back_to_email(self, setup, response):
@@ -91,8 +99,8 @@ class TestEmailFallback:
         monkeypatch.setattr(otp_delivery.requests, "post", boom)
         assert deliver_otp(PHONE, EMAIL, CODE) == "email"
 
-    def test_sms_is_skipped_until_sendchamp_is_configured(self, setup, monkeypatch):
-        monkeypatch.setattr(settings, "SENDCHAMP_SENDER_NAME", "")
+    def test_sms_is_skipped_until_termii_is_configured(self, setup, monkeypatch):
+        monkeypatch.setattr(settings, "TERMII_SENDER_ID", "")
         assert deliver_otp(PHONE, EMAIL, CODE) == "email"
         assert setup["sms"] == []
 

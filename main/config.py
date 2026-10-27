@@ -84,10 +84,14 @@ class Config:
         # SMS is never attempted before a sender ID is approved and a key
         # is in place; production wants "sms,email".
         self.OTP_CHANNELS = config("OTP_CHANNELS", default="email")
-        self.SENDCHAMP_API_KEY = config("SENDCHAMP_API_KEY", default="")
-        # Must be a sender ID approved on the Sendchamp dashboard.
-        self.SENDCHAMP_SENDER_NAME = config("SENDCHAMP_SENDER_NAME", default="")
-        self.SENDCHAMP_ROUTE = config("SENDCHAMP_ROUTE", default="dnd")
+        self.TERMII_API_KEY = config("TERMII_API_KEY", default="")
+        # Must be a sender ID approved on the Termii dashboard.
+        self.TERMII_SENDER_ID = config("TERMII_SENDER_ID", default="")
+        self.TERMII_CHANNEL = config("TERMII_CHANNEL", default="dnd")
+        # Per account: the Termii dashboard shows which one to use.
+        self.TERMII_BASE_URL = config(
+            "TERMII_BASE_URL", default="https://v3.api.termii.com"
+        )
 
         # API Base URL for callbacks and redirects
         # For production: https://api.yourdomain.com

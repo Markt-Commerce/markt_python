@@ -51,12 +51,14 @@ PAYMENT_GATEWAY=paystack
 DELIVERY_DEMO_PHONE=
 DELIVERY_DEMO_OTP=
 
-# Rider sign-in codes: channels tried in order (sms, email). SMS is Sendchamp
-# and needs an API key and an approved sender ID; route dnd is transactional.
+# Rider sign-in codes: channels tried in order (sms, email). SMS is Termii
+# and needs an API key and an approved sender ID; channel dnd is
+# transactional. The base URL is per account (Termii dashboard).
 OTP_CHANNELS=email
-SENDCHAMP_API_KEY=
-SENDCHAMP_SENDER_NAME=
-SENDCHAMP_ROUTE=dnd
+TERMII_API_KEY=
+TERMII_SENDER_ID=
+TERMII_CHANNEL=dnd
+TERMII_BASE_URL=https://v3.api.termii.com
 
 # API & Frontend URLs (for payment callbacks and redirects)
 # Development: http://localhost:8000
