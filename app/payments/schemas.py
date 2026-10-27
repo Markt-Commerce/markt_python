@@ -12,8 +12,11 @@ class PaymentSchema(Schema):
     order_id = fields.Str(required=True)
     amount = fields.Float(required=True, validate=validate.Range(min=0))
     currency = fields.Str(validate=validate.Length(equal=3))
-    method = fields.Str(required=True)  # Will be PaymentMethod enum value
-    status = fields.Str(dump_only=True)  # Will be PaymentStatus enum value
+    # Enum, not Str: fields.Str dumps str(member) -- "PaymentStatus.COMPLETED"
+    # -- so the app's `status === "completed"` check failed on a wallet
+    # payment that had in fact gone through.
+    method = fields.Enum(PaymentMethod, by_value=True, required=True)
+    status = fields.Enum(PaymentStatus, by_value=True, dump_only=True)
     transaction_id = fields.Str(dump_only=True)
     gateway_response = fields.Dict(dump_only=True)
     paid_at = fields.DateTime(dump_only=True)
