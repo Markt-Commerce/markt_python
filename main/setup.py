@@ -55,7 +55,7 @@ def configure_app(app):
         app,
         logger=settings.DEBUG,
         engineio_logger=settings.DEBUG,
-        cors_allowed_origins=settings.ALLOWED_ORIGINS,
+        cors_allowed_origins=settings.SOCKET_ALLOWED_ORIGINS,
     )
 
     # Register error handler

@@ -1,5 +1,6 @@
 from decouple import AutoConfig
 from pathlib import Path
+from urllib.parse import urlsplit
 
 config = AutoConfig()
 
@@ -114,6 +115,23 @@ class Config:
             not self.API_BASE_URL
             or "localhost" in self.API_BASE_URL
             or "127.0.0.1" in self.API_BASE_URL
+        )
+
+        # Socket.IO checks the Origin header against an allowlist. ALLOWED_ORIGINS
+        # lists web frontends, but React Native's iOS WebSocket sends the
+        # server's *own* URL as its Origin -- so the app's chat and notification
+        # sockets were refused ("<api> is not an accepted origin") wherever the
+        # API host was not also listed as a frontend. A client talking to the
+        # server's own origin is same-origin; always allow it.
+        api_origin = ""
+        if self.API_BASE_URL:
+            parsed = urlsplit(self.API_BASE_URL)
+            if parsed.scheme and parsed.netloc:
+                api_origin = f"{parsed.scheme}://{parsed.netloc}"
+        self.SOCKET_ALLOWED_ORIGINS = self.ALLOWED_ORIGINS + (
+            [api_origin]
+            if api_origin and api_origin not in self.ALLOWED_ORIGINS
+            else []
         )
 
         # Web app base URL for payment redirects
