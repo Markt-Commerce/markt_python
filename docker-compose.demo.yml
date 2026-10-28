@@ -1,0 +1,103 @@
+# Local demo stack: the API, its database and queue, plus a static server for
+# seeded media. Used by the product-video pipeline (see markt_mobile's
+# VIDEO_PIPELINE.md) but it is a perfectly ordinary local backend too.
+#
+#   scripts/demo_up.sh        # build, migrate, seed, serve
+#
+# Host ports are deliberately off the defaults (5432/6379 are commonly taken
+# by a native Postgres or another project's Redis). Inside the network every
+# service uses its normal port.
+
+name: markt-demo
+
+x-api-env: &api-env
+  ENV: development
+  DEBUG: "True"
+  # main.run binds settings.BIND, which defaults to 127.0.0.1 -- unreachable
+  # from outside the container.
+  BIND: 0.0.0.0:8000
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_USER: markt
+  DB_PASSWORD: markt123
+  DB_NAME: markt_db
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  SECRET_KEY: demo-secret-key
+  API_BASE_URL: http://localhost:8000
+  # Seeded images are files on disk served by `media` below, not S3 objects.
+  MEDIA_BASE_URL: http://localhost:8090
+  OTP_CHANNELS: email
+  FLASK_APP: main.setup:create_flask_app
+  # Shared delivery runs ("Share this delivery" at checkout). Off by default
+  # in the app; on here so the share-the-ride video can show it.
+  DELIVERY_BATCH_ENABLED: "true"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: markt_db
+      POSTGRES_USER: markt
+      POSTGRES_PASSWORD: markt123
+    ports:
+      - "55432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U markt -d markt_db"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis/redis-stack-server:7.4.0-v1
+    ports:
+      - "56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    environment: *api-env
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - ./demo/media:/app/demo/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python -m main.run
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    environment: *api-env
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A main.workers worker -l INFO -Q analytics,default,maintenance,media,notifications,realtime,social
+
+  media:
+    image: nginx:1.27-alpine
+    ports:
+      - "8090:80"
+    volumes:
+      - ./demo/media:/usr/share/nginx/html:ro
+
+volumes:
+  pg-data:
