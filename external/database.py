@@ -120,6 +120,7 @@ class Database:
             from app.delivery_pricing.order_delivery import OrderDelivery
             from app.users.addresses import SavedAddress  # noqa: F401
             from app.admin.models import AdminAuditLog  # noqa: F401
+            from app.business.models import BusinessProfile  # noqa: F401
 
         # Import other models as needed
 

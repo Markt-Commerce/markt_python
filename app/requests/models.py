@@ -71,6 +71,20 @@ class BuyerRequest(BaseModel, UniqueIdMixin):
     # requests, which aren't market-scoped at all.
     market_id = db.Column(db.Integer, db.ForeignKey("markets.id"), nullable=True)
 
+    # --- Markt Business procurement -------------------------------------
+    # A procurement request is a BuyerRequest posted by a business account.
+    # The flag is stamped at creation from the poster's effective business
+    # status, so a lapsed subscription later does not rewrite history. The
+    # rest are optional on every request; consumer requests leave them null.
+    is_business = db.Column(
+        db.Boolean, default=False, nullable=False, server_default="false"
+    )
+    quantity = db.Column(db.Numeric(14, 3), nullable=True)
+    unit = db.Column(db.String(20), nullable=True)  # app.business.constants.UNITS
+    specifications = db.Column(JSONB, nullable=True)
+    delivery_location = db.Column(db.String(255), nullable=True)
+    required_delivery_date = db.Column(db.Date, nullable=True)
+
     # Social features
     upvotes = db.Column(db.Integer, default=0)
     views = db.Column(db.Integer, default=0)
@@ -126,6 +140,10 @@ class SellerOffer(BaseModel):
     status = db.Column(
         db.Enum(OfferStatus), default=OfferStatus.PENDING, nullable=False
     )
+
+    # Procurement responses: how much of the requested quantity the seller
+    # can supply, in the request's unit. Optional; consumer offers omit it.
+    proposed_quantity = db.Column(db.Numeric(14, 3), nullable=True)
 
     request = db.relationship("BuyerRequest", back_populates="offers")
     seller = db.relationship("Seller", back_populates="offers")
