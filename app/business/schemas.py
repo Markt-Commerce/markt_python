@@ -43,8 +43,8 @@ class BusinessProfileUpsertSchema(Schema):
     contact_email = fields.Email(allow_none=True)
     contact_phone = fields.Str(allow_none=True, validate=validate.Length(max=20))
     website = fields.Url(allow_none=True)
-    logo_url = fields.Url(allow_none=True)
-    cover_image_url = fields.Url(allow_none=True)
+    # logo_url / cover_image_url are deliberately absent: they are set only by
+    # uploading through POST /business/me/logo and /me/cover (app.business.images).
     address = fields.Str(allow_none=True, validate=validate.Length(max=255))
     city = fields.Str(allow_none=True, validate=validate.Length(max=100))
     state = fields.Str(allow_none=True, validate=validate.Length(max=100))
@@ -227,6 +227,28 @@ class SubscriptionPlanSchema(Schema):
     currency = fields.Str()
     billing_interval = fields.Str()
     features = fields.List(fields.Nested(SubscriptionFeatureSchema))
+
+
+class SubscriptionCheckoutSchema(Schema):
+    plan_id = fields.Int(required=True)
+    # Where Paystack's browser redirect should land afterwards.
+    platform = fields.Str(
+        load_default="web", validate=validate.OneOf(["web", "mobile"])
+    )
+
+
+class SubscriptionCheckoutResultSchema(Schema):
+    subscription_id = fields.Int()
+    status = fields.Str()
+    # Null for a free plan, which is active immediately.
+    authorization_url = fields.Str(allow_none=True)
+    reference = fields.Str()
+
+
+class SubscriptionVerifyResultSchema(Schema):
+    subscription_id = fields.Int()
+    status = fields.Str()
+    verified = fields.Bool()
 
 
 class MySubscriptionSchema(Schema):

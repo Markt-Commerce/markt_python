@@ -44,6 +44,7 @@ from app.orders.shipping import (
     shipping_address_to_model_kwargs,
 )
 from app.orders.events import ActorType, OrderEventService, OrderEventType
+from app.business.orders import stamp_business_order
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,7 @@ class OrderService:
                     # TODO: Calculate shipping_fee, tax, discount, total here
                     # For now, these will be null and should be calculated
                 )
+                stamp_business_order(session, order, buyer_id)
                 session.add(order)
                 session.flush()
 
@@ -149,6 +151,7 @@ class OrderService:
             reliability_fee_estimate=snapshot.get("reliability_fee_estimate"),
             total=snapshot["total"],
         )
+        stamp_business_order(session, order, buyer_id)
         session.add(order)
         session.flush()
 
@@ -263,7 +266,7 @@ class OrderService:
             )
 
     @staticmethod
-    def get_user_orders(user_id):
+    def get_user_orders(user_id, is_business=None):
         """For buyers - shows complete orders with all items.
 
         read_scope, not session_scope: session_scope commits on exit, and a
@@ -287,6 +290,13 @@ class OrderService:
                     db.joinedload(Order.shipping_address),
                 )
                 .filter_by(buyer_id=user_id)
+                .filter(
+                    # None: every order, as before. True/False: business only
+                    # or consumer only (Markt Business order lists).
+                    Order.is_business.is_(is_business)
+                    if is_business is not None
+                    else True
+                )
                 .order_by(Order.created_at.desc())
                 .all()
             )
@@ -1259,7 +1269,9 @@ class SellerOrderService:
     )
 
     @staticmethod
-    def get_seller_orders(seller_id, status=None, page=1, per_page=20):
+    def get_seller_orders(
+        seller_id, status=None, page=1, per_page=20, is_business=None
+    ):
         """For sellers - shows only their order items, on paid orders."""
         with session_scope() as session:
             base_query = (
@@ -1278,6 +1290,8 @@ class SellerOrderService:
 
             if status:
                 base_query = base_query.filter_by(status=status)
+            if is_business is not None:
+                base_query = base_query.filter(Order.is_business.is_(is_business))
 
             paginator = Paginator(base_query, page=page, per_page=per_page)
             result = paginator.paginate({})

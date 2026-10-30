@@ -29,6 +29,7 @@ from app.users.models import User, Buyer
 from app.products.models import Product, ProductVariant
 from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
 from app.orders.snapshot import product_snapshot
+from app.business.orders import stamp_business_order
 from app.orders.shipping import (
     normalize_shipping_address,
     shipping_address_to_model_kwargs,
@@ -465,6 +466,7 @@ class CartService:
             order.service_fee = service_fee
             order.discount = discount
             order.total = total
+            stamp_business_order(session, order, order.buyer_id)
 
             order.shipping_address = ShippingAddress(
                 **shipping_address_to_model_kwargs(shipping_normalized)

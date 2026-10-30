@@ -1653,6 +1653,15 @@ class PaymentService:
 
             return WalletService.complete_topup(reference, data)
 
+        # Markt Business plan payments (app.business.subscription_checkout).
+        if (
+            reference.startswith("SUB_")
+            or metadata.get("type") == "business_subscription"
+        ):
+            from app.business.subscription_checkout import complete_subscription
+
+            return complete_subscription(reference, data)
+
         # Which completion path this is was decided purely by metadata Paystack
         # echoes back. When that echo is missing -- a replayed event, a manual
         # retry from the dashboard, a gateway that trims unknown fields -- a

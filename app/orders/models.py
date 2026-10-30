@@ -65,6 +65,12 @@ class Order(BaseModel, UniqueIdMixin):
     reliability_fee_estimate = db.Column(MONEY, nullable=True)
     total = db.Column(MONEY)
     status = db.Column(db.Enum(OrderStatus), default=OrderStatus.PENDING_PAYMENT)
+    # Markt Business: the buyer was a business account when this order was
+    # placed (app.business.orders.stamp_business_order). Stamped, not derived,
+    # so a lapsed subscription later doesn't rewrite order history.
+    is_business = db.Column(
+        db.Boolean, default=False, nullable=False, server_default="false"
+    )
     billing_address = db.Column(JSONB)
     customer_note = db.Column(db.Text)
     idempotency_key = db.Column(

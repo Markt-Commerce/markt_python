@@ -5,7 +5,12 @@ from typing import Any, Dict, Optional
 from sqlalchemy import or_
 from sqlalchemy.orm import joinedload
 
-from app.libs.errors import ForbiddenError, NotFoundError, ValidationError
+from app.libs.errors import (
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    ValidationError,
+)
 from app.libs.session import session_scope
 from app.categories.models import ProductCategory
 from app.products.models import Product, ProductStatus
@@ -19,6 +24,7 @@ from .models import (
     BusinessSubscription,
     BusinessSubscriptionPlan,
     BusinessSubscriptionStatus,
+    BusinessVerificationStatus,
 )
 
 logger = logging.getLogger(__name__)
@@ -98,6 +104,26 @@ class BusinessService:
             if not user:
                 raise NotFoundError("User not found")
             user.is_business = False
+        return BusinessService.my_business(user_id)
+
+    @staticmethod
+    def request_verification(user_id: str) -> Dict[str, Any]:
+        """Ask the Markt team to review this business. Moves it to PENDING;
+        only an admin (app.admin.business_services) can go further. Gated on
+        BUSINESS_VERIFICATION_ENABLED so the review queue only opens when the
+        team is ready to work it."""
+        _require("verification_enabled")
+        with session_scope() as session:
+            user = session.query(User).get(user_id)
+            if not user or not user.business_profile or not user.is_business:
+                raise NotFoundError("Set up your business profile first")
+            profile = user.business_profile
+            if profile.verification_status == BusinessVerificationStatus.VERIFIED:
+                raise ConflictError("Your business is already verified")
+            if profile.verification_status == BusinessVerificationStatus.PENDING:
+                raise ConflictError("Your verification request is already with us")
+            profile.verification_status = BusinessVerificationStatus.PENDING
+            profile.verification_note = None
         return BusinessService.my_business(user_id)
 
     # --- public profiles and discovery -------------------------------------
