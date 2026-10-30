@@ -748,6 +748,39 @@ class ChatService:
             raise APIError("Failed to get room data")
 
     @staticmethod
+    def broadcast_message(message, sender_username: Optional[str] = None) -> None:
+        """Push a message saved over HTTP to everyone in the room, live.
+
+        The socket `message` handler emits to the room itself; the HTTP send
+        path did not, so a message sent over REST was saved but only appeared
+        for the other person after they reloaded the thread. Same event and
+        payload as the socket path. Best effort: the message is already saved.
+        """
+        try:
+            from main.extensions import socketio
+
+            socketio.emit(
+                "message",
+                {
+                    "id": message.id,
+                    "room_id": message.room_id,
+                    "sender_id": message.sender_id,
+                    "sender_username": sender_username,
+                    "content": message.content,
+                    "message_type": message.message_type,
+                    "message_data": message.message_data,
+                    "is_read": message.is_read,
+                    "created_at": message.created_at.isoformat()
+                    if message.created_at
+                    else None,
+                },
+                room=f"room_{message.room_id}",
+                namespace="/chat",
+            )
+        except Exception:
+            logger.exception("Could not broadcast message %s", message.id)
+
+    @staticmethod
     def send_message(
         user_id: str,
         room_id: int,

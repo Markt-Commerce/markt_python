@@ -1,5 +1,6 @@
 from decouple import AutoConfig
 from pathlib import Path
+from urllib.parse import urlsplit
 
 config = AutoConfig()
 
@@ -116,6 +117,23 @@ class Config:
             or "127.0.0.1" in self.API_BASE_URL
         )
 
+        # Socket.IO checks the Origin header against an allowlist. ALLOWED_ORIGINS
+        # lists web frontends, but React Native's iOS WebSocket sends the
+        # server's *own* URL as its Origin -- so the app's chat and notification
+        # sockets were refused ("<api> is not an accepted origin") wherever the
+        # API host was not also listed as a frontend. A client talking to the
+        # server's own origin is same-origin; always allow it.
+        api_origin = ""
+        if self.API_BASE_URL:
+            parsed = urlsplit(self.API_BASE_URL)
+            if parsed.scheme and parsed.netloc:
+                api_origin = f"{parsed.scheme}://{parsed.netloc}"
+        self.SOCKET_ALLOWED_ORIGINS = self.ALLOWED_ORIGINS + (
+            [api_origin]
+            if api_origin and api_origin not in self.ALLOWED_ORIGINS
+            else []
+        )
+
         # Web app base URL for payment redirects
         # For production: https://marktcommerce.com/app
         # For development: http://localhost:3000
@@ -137,6 +155,10 @@ class Config:
         self.AWS_REGION = config("AWS_REGION", default="us-east-1")
         self.AWS_S3_BUCKET = config("AWS_S3_BUCKET", default="markt-media")
         self.CDN_DOMAIN = config("CDN_DOMAIN", default="")
+        # Local/demo only: serve media keys from a plain HTTP origin (e.g. the
+        # nginx container in docker-compose.demo.yml) instead of S3/CDN. Takes
+        # precedence over CDN_DOMAIN when set; leave empty everywhere else.
+        self.MEDIA_BASE_URL = config("MEDIA_BASE_URL", default="").rstrip("/")
 
         # Email Configuration (Resend)
         self.RESEND_API_KEY = config("RESEND_API_KEY", default="")

@@ -31,8 +31,8 @@ def _scope_with(rows):
     chain = session.query.return_value.join.return_value.filter.return_value
     chain.filter.return_value = chain
     chain.limit.return_value.all.return_value = rows
-    # nationwide path
-    session.query.return_value.order_by.return_value.limit.return_value.all.return_value = [
+    # nationwide path (query -> filter(active) -> order_by -> limit)
+    session.query.return_value.filter.return_value.order_by.return_value.limit.return_value.all.return_value = [
         r[0] for r in rows
     ]
     scope = MagicMock()
