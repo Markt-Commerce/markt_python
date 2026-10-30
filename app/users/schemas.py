@@ -51,6 +51,10 @@ class UserSchema(Schema):
     profile_picture_url = fields.Method("get_profile_picture_url", dump_only=True)
     is_buyer = fields.Bool(dump_only=True)
     is_seller = fields.Bool(dump_only=True)
+    # Effective Markt Business status (the tag, plus a subscription while
+    # subscriptions are on), so clients never apply the subscription rule
+    # themselves.
+    is_business = fields.Method("get_is_business", dump_only=True)
     email_verified = fields.Bool(dump_only=True)
     current_role = fields.Str(dump_only=True)
     created_at = fields.DateTime(dump_only=True)
@@ -66,6 +70,13 @@ class UserSchema(Schema):
             # The profile_picture field should already contain the thumbnail URL
             return obj.profile_picture
         return "/static/images/default-avatar.jpg"
+
+    def get_is_business(self, obj):
+        if isinstance(obj, dict):
+            return bool(obj.get("is_business", False))
+        from app.business.entitlements import EntitlementService
+
+        return EntitlementService.is_business(obj)
 
 
 class AddressSchema(Schema):

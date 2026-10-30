@@ -51,6 +51,11 @@ class Permission:
     SELLER_FEATURE = "seller.feature"
     SELLER_MARKET_REVIEW = "seller.market_review"
 
+    # Markt Business verification. Same split as sellers: support can look,
+    # catalog decides.
+    BUSINESS_VIEW = "business.view"
+    BUSINESS_VERIFY = "business.verify"
+
 
 def all_permissions() -> set:
     """Every permission defined on :class:`Permission` (the super_admin set)."""
@@ -71,6 +76,7 @@ ROLE_PERMISSIONS = {
         Permission.USER_VERIFY_EMAIL,
         Permission.USER_FORCE_LOGOUT,
         Permission.SELLER_VIEW,
+        Permission.BUSINESS_VIEW,
     },
     AdminRole.MODERATION: {
         Permission.USER_VIEW,
@@ -91,6 +97,8 @@ ROLE_PERMISSIONS = {
         Permission.SELLER_SUSPEND,
         Permission.SELLER_FEATURE,
         Permission.SELLER_MARKET_REVIEW,
+        Permission.BUSINESS_VIEW,
+        Permission.BUSINESS_VERIFY,
     },
     AdminRole.LOGISTICS: {
         Permission.USER_VIEW,

@@ -239,6 +239,34 @@ class Config:
         self.APPLE_BUNDLE_ID = config("APPLE_BUNDLE_ID", default="")
         self.APPLE_SERVICES_ID = config("APPLE_SERVICES_ID", default="")
 
+        # --- Markt Business --------------------------------------------------
+        # The one place these are read. Clients never decide for themselves:
+        # they fetch GET /api/v1/business/config, which is built from these by
+        # app.business.features.
+        #
+        # BUSINESS_SUBSCRIPTIONS_ENABLED off means the is_business tag is free
+        # to anyone who sets up a business profile, and every subscription
+        # page and badge is hidden. On means the tag only counts while the
+        # account holds an active subscription (app.business.entitlements).
+        self.BUSINESS_MODE_ENABLED = config(
+            "BUSINESS_MODE_ENABLED", default=True, cast=bool
+        )
+        self.BUSINESS_REGISTRATION_ENABLED = config(
+            "BUSINESS_REGISTRATION_ENABLED", default=True, cast=bool
+        )
+        self.BUSINESS_DISCOVERY_ENABLED = config(
+            "BUSINESS_DISCOVERY_ENABLED", default=True, cast=bool
+        )
+        self.BUSINESS_PROCUREMENT_ENABLED = config(
+            "BUSINESS_PROCUREMENT_ENABLED", default=True, cast=bool
+        )
+        self.BUSINESS_SUBSCRIPTIONS_ENABLED = config(
+            "BUSINESS_SUBSCRIPTIONS_ENABLED", default=False, cast=bool
+        )
+        self.BUSINESS_VERIFICATION_ENABLED = config(
+            "BUSINESS_VERIFICATION_ENABLED", default=False, cast=bool
+        )
+
     @property
     def GOOGLE_AUDIENCES(self) -> list:
         """Client ids we accept a Google token for. Empty entries dropped so an

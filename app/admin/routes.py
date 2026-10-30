@@ -25,6 +25,9 @@ from app.users.verification import VerificationThrottled
 from .auth_services import AdminAuthService, admin_me_payload
 from .permissions import Permission
 from .schemas import (
+    AdminBusinessDetailSchema,
+    AdminBusinessListQuerySchema,
+    AdminBusinessListResponseSchema,
     AdminLoginResponseSchema,
     AdminLoginSchema,
     AdminMeSchema,
@@ -44,6 +47,7 @@ from .schemas import (
     AdminUserRolesSchema,
     AdminUserStaffRoleSchema,
 )
+from .business_services import AdminBusinessService
 from .seller_services import AdminSellerService
 from .services import AdminUserService
 
@@ -468,6 +472,87 @@ class AdminSellerUnfeature(MethodView):
         try:
             return AdminSellerService.set_featured(
                 current_user, seller_id, False, data.get("reason")
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+# ==================== Markt Business verification ====================
+# Keyed by the owner's user id: one business profile per user.
+
+
+@bp.route("/businesses")
+class AdminBusinesses(MethodView):
+    @login_required
+    @require_permission(Permission.BUSINESS_VIEW)
+    @bp.arguments(AdminBusinessListQuerySchema, location="query")
+    @bp.response(200, AdminBusinessListResponseSchema)
+    def get(self, args):
+        """Business verification queue, filterable by status."""
+        return AdminBusinessService.list_businesses(
+            q=args.get("q"),
+            verification_status=args.get("verification_status"),
+            page=args.get("page", 1),
+            per_page=args.get("per_page", 20),
+        )
+
+
+@bp.route("/businesses/<user_id>")
+class AdminBusinessDetail(MethodView):
+    @login_required
+    @require_permission(Permission.BUSINESS_VIEW)
+    @bp.response(200, AdminBusinessDetailSchema)
+    def get(self, user_id):
+        """One business, including its registration details."""
+        try:
+            return AdminBusinessService.get_business(user_id)
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/businesses/<user_id>/verify")
+class AdminBusinessVerify(MethodView):
+    @login_required
+    @require_permission(Permission.BUSINESS_VERIFY)
+    @bp.arguments(AdminSellerVerifySchema)
+    @bp.response(200, AdminBusinessDetailSchema)
+    def post(self, data, user_id):
+        """Mark a business verified."""
+        try:
+            return AdminBusinessService.verify_business(
+                current_user, user_id, data.get("note")
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/businesses/<user_id>/reject")
+class AdminBusinessReject(MethodView):
+    @login_required
+    @require_permission(Permission.BUSINESS_VERIFY)
+    @bp.arguments(AdminSellerRejectSchema)
+    @bp.response(200, AdminBusinessDetailSchema)
+    def post(self, data, user_id):
+        """Reject a business's verification (reason required)."""
+        try:
+            return AdminBusinessService.reject_business(
+                current_user, user_id, data["reason"]
+            )
+        except APIError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/businesses/<user_id>/unverify")
+class AdminBusinessUnverify(MethodView):
+    @login_required
+    @require_permission(Permission.BUSINESS_VERIFY)
+    @bp.arguments(AdminReasonSchema)
+    @bp.response(200, AdminBusinessDetailSchema)
+    def post(self, data, user_id):
+        """Withdraw a verification, back to unverified."""
+        try:
+            return AdminBusinessService.reset_business(
+                current_user, user_id, data.get("reason")
             )
         except APIError as e:
             abort(e.status_code, message=e.message)

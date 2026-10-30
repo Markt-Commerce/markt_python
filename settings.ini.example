@@ -92,3 +92,14 @@ RESEND_MARKETING_FROM_EMAIL=hello@markt.com
 RESEND_MARKETING_FROM_NAME=Markt
 EMAIL_REPLY_TO=support@markt.com
 EMAIL_UNSUBSCRIBE_URL=https://marktcommerce.com/settings/notifications
+
+# Markt Business (see main/config.py). Clients read these via
+# GET /api/v1/business/config -- never set them in the frontends.
+BUSINESS_MODE_ENABLED=True
+BUSINESS_REGISTRATION_ENABLED=True
+BUSINESS_DISCOVERY_ENABLED=True
+BUSINESS_PROCUREMENT_ENABLED=True
+# Off: the is_business tag is free. On: it needs an active subscription whose
+# plan grants "business_account". Create plans before turning this on.
+BUSINESS_SUBSCRIPTIONS_ENABLED=False
+BUSINESS_VERIFICATION_ENABLED=False

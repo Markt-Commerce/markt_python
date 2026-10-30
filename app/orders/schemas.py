@@ -1,5 +1,5 @@
-from marshmallow import Schema, fields, validate
-from app.libs.schemas import PaginationSchema
+from marshmallow import EXCLUDE, Schema, fields, validate
+from app.libs.schemas import PaginationQueryArgs, PaginationSchema
 from app.products.schemas import ProductSimpleSchema, ProductVariantSchema
 from app.users.schemas import BuyerSimpleSchema
 from .events import OrderEventType, ActorType
@@ -96,12 +96,29 @@ class OrderSchema(OrderCreateSchema):
     discount = fields.Float(dump_only=True)
     total = fields.Float(dump_only=True)
     created_at = fields.DateTime(dump_only=True)
+    # Markt Business: placed by a business account.
+    is_business = fields.Bool(dump_only=True)
     # For responses, serialize ORM relationship via helper dict on model
     shipping_address = fields.Dict(dump_only=True, attribute="shipping_address_dict")
     items = fields.Nested(lambda: OrderItemSchema(many=True), dump_only=True)
     # Absent on orders checked out without a delivery quote, which is why it
     # is allow_none rather than assumed.
     delivery = fields.Nested(OrderDeliverySchema, dump_only=True, allow_none=True)
+
+
+class OrderListQueryArgs(Schema):
+    # Absent: every order. true/false: business or consumer orders only.
+    is_business = fields.Bool(required=False)
+
+    class Meta:
+        # This route took no query schema before, so clients have long sent
+        # page/per_page here (the mobile app does). Ignore what isn't ours
+        # rather than start rejecting their requests with a 422.
+        unknown = EXCLUDE
+
+
+class SellerOrderQueryArgs(PaginationQueryArgs):
+    is_business = fields.Bool(required=False)
 
 
 class OrderPaginationSchema(Schema):
@@ -116,6 +133,7 @@ class BuyerOrderSchema(OrderCreateSchema):
     status = fields.Enum(OrderStatus, by_value=True, dump_only=True)
     subtotal = fields.Float(dump_only=True)
     created_at = fields.DateTime(dump_only=True)
+    is_business = fields.Bool(dump_only=True)
     items = fields.Nested(lambda: OrderItemSchema(many=True), dump_only=True)
     shipping_address = fields.Dict(dump_only=True, attribute="shipping_address_dict")
     delivery = fields.Nested(OrderDeliverySchema, dump_only=True, allow_none=True)
@@ -144,6 +162,8 @@ class SellerOrderItemSchema(Schema):
 class OrderSimpleSchema(Schema):
     id = fields.Str(dump_only=True)
     order_number = fields.Str(dump_only=True)
+    # Lets a seller see which of their orders came from a business buyer.
+    is_business = fields.Bool(dump_only=True)
     buyer = fields.Nested(lambda: BuyerSimpleSchema())
     created_at = fields.DateTime(dump_only=True)
 
