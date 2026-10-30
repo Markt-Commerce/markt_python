@@ -231,3 +231,48 @@ class AdminSellerPayoutEditSchema(Schema):
     payout_bank_code = fields.Str(required=False, validate=validate.Length(max=10))
     payout_account_number = fields.Str(required=False, validate=validate.Length(max=20))
     payout_account_name = fields.Str(required=False, validate=validate.Length(max=100))
+
+
+# ==================== Markt Business verification ====================
+
+BUSINESS_VERIFICATION_STATUSES = ("unverified", "pending", "verified", "rejected")
+
+
+class AdminBusinessListQuerySchema(Schema):
+    q = fields.Str(
+        required=False,
+        metadata={"description": "Search business name/registration no./owner"},
+    )
+    verification_status = fields.Str(
+        required=False, validate=validate.OneOf(BUSINESS_VERIFICATION_STATUSES)
+    )
+    page = fields.Int(required=False, load_default=1)
+    per_page = fields.Int(required=False, load_default=20)
+
+
+class AdminBusinessDetailSchema(Schema):
+    user_id = fields.Str()
+    name = fields.Str()
+    business_types = fields.List(fields.Str())
+    industry = fields.Str(allow_none=True)
+    city = fields.Str(allow_none=True)
+    state = fields.Str(allow_none=True)
+    registration_number = fields.Str(allow_none=True)
+    contact_email = fields.Str(allow_none=True)
+    contact_phone = fields.Str(allow_none=True)
+    website = fields.Str(allow_none=True)
+    verification_status = fields.Str()
+    verification_note = fields.Str(allow_none=True)
+    is_business = fields.Bool()
+    email = fields.Str(allow_none=True)
+    username = fields.Str(allow_none=True)
+    created_at = fields.Str(allow_none=True)
+    updated_at = fields.Str(allow_none=True)
+
+
+class AdminBusinessListResponseSchema(Schema):
+    items = fields.List(fields.Nested(AdminBusinessDetailSchema))
+    page = fields.Int()
+    per_page = fields.Int()
+    total_items = fields.Int()
+    total_pages = fields.Int()

@@ -76,6 +76,59 @@ def test_create_payment_wallet_debits_and_completes(mock_pay, mock_complete):
     mock_complete.assert_called_once_with(payment_id="PAY_TEST01")
 
 
+def test_wallet_payment_reaches_complete_payment_still_pending():
+    """complete_payment must see the wallet payment as *not yet* completed.
+
+    It used to be marked COMPLETED before complete_payment ran, which then
+    treated it as a duplicate and skipped every first-completion effect:
+    stock was never reduced, the paid items stayed in the cart, the chat
+    discount was never spent and no seller acceptance window opened.
+    """
+    from app.orders.models import OrderStatus
+    from app.payments.models import PaymentStatus
+
+    order = SimpleNamespace(
+        id="ORD_TEST02",
+        total=5000.0,
+        subtotal=5000.0,
+        buyer=SimpleNamespace(user_id="USR_BUYER2"),
+        status=OrderStatus.PENDING_PAYMENT,
+    )
+    session = MagicMock()
+    session.query.return_value.options.return_value.get.return_value = order
+    session.query.return_value.filter_by.return_value.first.return_value = None
+    added = {}
+    session.add.side_effect = lambda obj: added.setdefault("payment", obj)
+
+    def flush():
+        if added.get("payment") is not None and not added["payment"].id:
+            added["payment"].id = "PAY_TEST02"
+
+    session.flush.side_effect = flush
+    status_seen_by_complete = []
+
+    def fake_complete(payment_id):
+        status_seen_by_complete.append(added["payment"].status)
+        return True
+
+    with patch("app.payments.services.session_scope") as mock_scope, patch(
+        "app.wallet.services.WalletService.pay_for_order"
+    ), patch(
+        "app.payments.services.PaymentService.complete_payment",
+        side_effect=fake_complete,
+    ), patch(
+        "app.payments.services.PaymentService.get_payment", return_value=MagicMock()
+    ), patch(
+        "app.payments.services.PaymentService._cache_payment"
+    ):
+        mock_scope.return_value.__enter__.return_value = session
+        PaymentService.create_payment(
+            order_id="ORD_TEST02", amount=None, method=PaymentMethod.WALLET
+        )
+
+    assert status_seen_by_complete == [PaymentStatus.PENDING]
+
+
 @patch.object(WalletService, "debit")
 def test_pay_for_order_uses_order_payment_reference(mock_debit):
     WalletService.pay_for_order("USR_1", "ORD_1", "PAY_1", 1000.0)

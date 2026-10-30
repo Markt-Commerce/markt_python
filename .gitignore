@@ -153,3 +153,6 @@ main/static/*
 settings.ini
 main/firebase_creds.json
 main/notifications.yaml
+
+# Demo pipeline: served copies of seed images (rebuilt by scripts/seed_demo.py)
+demo/media/

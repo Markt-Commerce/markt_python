@@ -30,6 +30,18 @@ from app.media.services import media_service
 from app.media.models import Media, RequestImage
 from app.categories.models import Category, ProductCategory, RequestCategory
 from app.orders.models import OrderItem
+from app.business.entitlements import EntitlementService
+from app.business.features import business_features
+
+# BuyerRequest columns a Markt Business procurement request adds. Optional on
+# every request (see ProcurementFieldsMixin).
+PROCUREMENT_FIELDS = (
+    "quantity",
+    "unit",
+    "specifications",
+    "delivery_location",
+    "required_delivery_date",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +196,11 @@ class BuyerRequestService:
                 # Normalize the datetime to UTC naive
                 expires_at = BuyerRequestService._normalize_datetime(expires_at)
 
+            # A business account's request is a procurement request.
+            is_business = EntitlementService.is_business(user)
+            if is_business and not business_features()["procurement_enabled"]:
+                raise ForbiddenError("Procurement requests are not available")
+
             # Create request
             request = BuyerRequest(
                 user_id=user_id,
@@ -193,6 +210,8 @@ class BuyerRequestService:
                 request_metadata=data.get("metadata", {}),
                 expires_at=expires_at,
                 status=RequestStatus.OPEN,
+                is_business=is_business,
+                **{f: data.get(f) for f in PROCUREMENT_FIELDS},
             )
 
             session.add(request)
@@ -473,6 +492,7 @@ class BuyerRequestService:
                 product_id=data.get("product_id"),
                 price=data.get("price"),
                 message=data.get("message"),
+                proposed_quantity=data.get("proposed_quantity"),
                 status=OfferStatus.PENDING,
             )
 
@@ -686,6 +706,11 @@ class BuyerRequestService:
                     BuyerRequest.budget <= args["max_budget"]
                 )
 
+            if args.get("is_business") is not None:
+                base_query = base_query.filter(
+                    BuyerRequest.is_business.is_(args["is_business"])
+                )
+
             # Role-based filtering using current_role for dual-account users
             if user_id:
                 user = session.query(User).get(user_id)
@@ -789,6 +814,10 @@ class BuyerRequestService:
                     )
             if data.get("budget"):
                 request.budget = data["budget"]
+            # Present-but-null clears a procurement field; absent leaves it.
+            for field in PROCUREMENT_FIELDS:
+                if field in data:
+                    setattr(request, field, data[field])
             if data.get("metadata"):
                 request.request_metadata.update(data["metadata"])
             if data.get("expires_at"):

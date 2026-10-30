@@ -5,7 +5,6 @@ from flask_login import login_required, current_user
 from flask import jsonify, make_response
 
 # project imports
-from app.libs.schemas import PaginationQueryArgs
 from app.libs.decorators import seller_required, buyer_required
 from app.libs.errors import APIError
 from app.payments.schemas import PaymentSchema
@@ -32,6 +31,8 @@ from .schemas import (
     OrderEventSchema,
     DeliveryWaitChoiceSchema,
     DeliveryWaitChoiceResponseSchema,
+    OrderListQueryArgs,
+    SellerOrderQueryArgs,
 )
 
 bp = Blueprint("orders", __name__, description="Order operations", url_prefix="/orders")
@@ -41,10 +42,13 @@ bp = Blueprint("orders", __name__, description="Order operations", url_prefix="/
 class OrderList(MethodView):
     @login_required
     @buyer_required
+    @bp.arguments(OrderListQueryArgs, location="query")
     @bp.response(200, BuyerOrderSchema(many=True))
-    def get(self):
-        """List user's orders"""
-        return OrderService.get_user_orders(current_user.buyer_account.id)
+    def get(self, args):
+        """List user's orders (is_business=true for Markt Business orders)"""
+        return OrderService.get_user_orders(
+            current_user.buyer_account.id, is_business=args.get("is_business")
+        )
 
     @login_required
     @buyer_required
@@ -126,15 +130,16 @@ class OrderEventList(MethodView):
 class SellerOrderList(MethodView):
     @login_required
     @seller_required
-    @bp.arguments(PaginationQueryArgs, location="query")
+    @bp.arguments(SellerOrderQueryArgs, location="query")
     @bp.response(200, SellerOrderResponseSchema)
     def get(self, args):
-        """List orders for current seller"""
+        """List orders for current seller (is_business=true: from business buyers)"""
         return SellerOrderService.get_seller_orders(
             current_user.seller_account.id,
             status=args.get("status"),
             page=args.get("page", 1),
             per_page=args.get("per_page", 20),
+            is_business=args.get("is_business"),
         )
 
 
