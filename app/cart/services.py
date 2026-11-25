@@ -29,6 +29,7 @@ from app.users.models import User, Buyer
 from app.products.models import Product, ProductVariant
 from app.orders.models import Order, OrderItem, OrderStatus, ShippingAddress
 from app.orders.snapshot import product_snapshot
+from app.business.orders import stamp_business_order
 from app.orders.shipping import (
     normalize_shipping_address,
     shipping_address_to_model_kwargs,
@@ -45,6 +46,22 @@ class CartService:
     # Cache configuration
     CACHE_EXPIRY = 3600  # 1 hour
     CART_CACHE_KEY = "cart:{buyer_id}"
+
+    @staticmethod
+    def _resolve_shipping_area(session, shipping_address) -> None:
+        """Stamp the delivery Area onto a new order's shipping address.
+
+        Same best-effort rule as OrderService.create_order_from_checkout_snapshot:
+        no coordinates, or nothing near enough, leaves it unset rather than
+        failing the checkout.
+        """
+        from app.markets.services import MarketService
+
+        area = MarketService.resolve_area_for_coordinates(
+            session, shipping_address.latitude, shipping_address.longitude
+        )
+        if area:
+            shipping_address.area_id = area.id
 
     @staticmethod
     def resolve_cart(session, buyer_id: int, *, options=None):
@@ -465,10 +482,17 @@ class CartService:
             order.service_fee = service_fee
             order.discount = discount
             order.total = total
+            stamp_business_order(session, order, order.buyer_id)
 
             order.shipping_address = ShippingAddress(
                 **shipping_address_to_model_kwargs(shipping_normalized)
             )
+            # Which delivery area this goes to: a run groups orders by
+            # (market, area), and an order with no area is never even a
+            # candidate. The payment-first path resolved it; this one did
+            # not, so no cart-checkout order -- every order the app places --
+            # could join a shared run, opted in or not. Best effort, as there.
+            CartService._resolve_shipping_area(session, order.shipping_address)
 
             # billing_address is JSONB on Order, so we can store the dict directly
             order.billing_address = checkout_data.get("billing_address")

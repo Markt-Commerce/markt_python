@@ -1,6 +1,8 @@
 from marshmallow import Schema, fields, validate, validates, ValidationError
 from datetime import datetime
 
+from app.business.constants import UNIT_KEYS
+
 # import pytz
 
 from app.categories.schemas import CategorySchema
@@ -19,6 +21,7 @@ class SellerOfferSchema(Schema):
     product_id = fields.Str(allow_none=True)
     price = fields.Float(validate=validate.Range(min=0))
     message = fields.Str(validate=validate.Length(max=1000))
+    proposed_quantity = fields.Float(allow_none=True, dump_only=True)
     status = fields.Enum(OfferStatus, dump_only=True)
     created_at = fields.DateTime(dump_only=True)
 
@@ -33,6 +36,26 @@ class SellerOfferCreateSchema(Schema):
     product_id = fields.Str(allow_none=True)
     price = fields.Float(required=True, validate=validate.Range(min=0))
     message = fields.Str(validate=validate.Length(max=1000))
+    proposed_quantity = fields.Float(allow_none=True, validate=validate.Range(min=0))
+
+
+class ProcurementFieldsMixin(Schema):
+    """Markt Business procurement details. Optional on every request; a
+    business account's request is a procurement request whether or not it
+    fills them in."""
+
+    quantity = fields.Float(allow_none=True, validate=validate.Range(min=0))
+    unit = fields.Str(allow_none=True)
+    specifications = fields.Dict(
+        keys=fields.Str(), values=fields.Str(), allow_none=True
+    )
+    delivery_location = fields.Str(allow_none=True, validate=validate.Length(max=255))
+    required_delivery_date = fields.Date(allow_none=True)
+
+    @validates("unit")
+    def validate_unit(self, value, **kwargs):
+        if value and value not in UNIT_KEYS:
+            raise ValidationError(f"Unknown unit: {value}")
 
 
 class BuyerRequestSchema(Schema):
@@ -45,6 +68,12 @@ class BuyerRequestSchema(Schema):
     budget = fields.Float(validate=validate.Range(min=0))
     status = fields.Enum(RequestStatus, dump_only=True)
     request_metadata = fields.Dict(dump_only=True)
+    is_business = fields.Bool(dump_only=True)
+    quantity = fields.Float(allow_none=True, dump_only=True)
+    unit = fields.Str(allow_none=True, dump_only=True)
+    specifications = fields.Dict(allow_none=True, dump_only=True)
+    delivery_location = fields.Str(allow_none=True, dump_only=True)
+    required_delivery_date = fields.Date(allow_none=True, dump_only=True)
     expires_at = fields.DateTime(dump_only=True)
     upvotes = fields.Int(dump_only=True)
     views = fields.Int(dump_only=True)
@@ -78,7 +107,7 @@ class BuyerRequestSearchResultSchema(Schema):
     pagination = fields.Nested(PaginationSchema)
 
 
-class BuyerRequestCreateSchema(Schema):
+class BuyerRequestCreateSchema(ProcurementFieldsMixin):
     """Schema for creating buyer requests"""
 
     title = fields.Str(required=True, validate=validate.Length(min=1, max=100))
@@ -104,7 +133,7 @@ class BuyerRequestCreateSchema(Schema):
                 raise ValidationError("Expiration date must be in the future")
 
 
-class BuyerRequestUpdateSchema(Schema):
+class BuyerRequestUpdateSchema(ProcurementFieldsMixin):
     """Schema for updating buyer requests"""
 
     title = fields.Str(validate=validate.Length(min=1, max=100))
@@ -134,6 +163,9 @@ class BuyerRequestSearchSchema(Schema):
     min_budget = fields.Float(validate=validate.Range(min=0), allow_none=True)
     max_budget = fields.Float(validate=validate.Range(min=0), allow_none=True)
     status = fields.Enum(RequestStatus, allow_none=True)
+    # True: procurement requests from business accounts only. False: consumer
+    # requests only. Absent: both, as before.
+    is_business = fields.Bool(allow_none=True)
     page = fields.Int(validate=validate.Range(min=1), missing=1)
     per_page = fields.Int(validate=validate.Range(min=1, max=100), missing=20)
 

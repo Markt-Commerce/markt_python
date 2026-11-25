@@ -1340,6 +1340,122 @@ class AccountService:
             return seller
 
     @staticmethod
+    def submit_seller_application(user_id, data):
+        """Apply to become a seller WITHOUT instant activation (#9).
+
+        Unlike create_seller_account, this creates (or, after a rejection,
+        re-opens) the shop in verification_status=PENDING with its documents and
+        deliberately leaves user.is_seller False. The shop is activated only
+        when an admin approves it (AdminSellerService.verify_seller). The
+        applicant is notified that the application was received.
+        """
+        notify_user_id = None
+        seller_id = None
+        shop_name = None
+
+        with session_scope() as session:
+            user = session.query(User).get(user_id)
+            if not user:
+                raise AuthError("User not found")
+            if user.is_seller:
+                raise ConflictError("You already have an active seller account")
+
+            existing = session.query(Seller).filter_by(user_id=user.id).first()
+            if (
+                existing
+                and existing.verification_status == SellerVerificationStatus.PENDING
+            ):
+                raise ConflictError("Your seller application is already under review")
+
+            documents = data.get("documents") or []
+
+            # Seed the shop's location from the address the user already gave,
+            # same as create_seller_account -- a shop with no coordinates never
+            # shows in a proximity search.
+            address = session.query(UserAddress).filter_by(user_id=user.id).first()
+            lat = getattr(address, "latitude", None)
+            lng = getattr(address, "longitude", None)
+            located = is_valid_coordinate(lat, lng)
+
+            if existing:
+                # Re-application after a rejection: reuse the row rather than
+                # leaving a stale rejected shell and creating a second shop.
+                seller = existing
+                seller.shop_name = data["shop_name"]
+                seller.description = data["description"]
+                seller.policies = data.get("policies") or {}
+                seller.verification_documents = documents
+                seller.verification_status = SellerVerificationStatus.PENDING
+                seller.verification_note = None
+                if located:
+                    seller.shop_latitude = lat
+                    seller.shop_longitude = lng
+            else:
+                seller = Seller(
+                    user_id=user.id,
+                    shop_name=data["shop_name"],
+                    description=data["description"],
+                    policies=data.get("policies") or {},
+                    shop_slug=shop_slug_for(session, data["shop_name"]),
+                    shop_latitude=lat if located else None,
+                    shop_longitude=lng if located else None,
+                    verification_status=SellerVerificationStatus.PENDING,
+                    verification_documents=documents,
+                )
+                session.add(seller)
+                session.flush()  # Get the seller ID for categories
+
+                for idx, category_id in enumerate(data.get("category_ids") or []):
+                    category = session.query(Category).get(category_id)
+                    if not category:
+                        raise ValidationError(f"Category {category_id} not found")
+                    session.add(
+                        SellerCategory(
+                            seller_id=seller.id,
+                            category_id=category_id,
+                            is_primary=(idx == 0),
+                        )
+                    )
+
+            # Deliberately NOT setting user.is_seller -- that is the whole point
+            # of the gate. Activation happens on admin approval.
+            session.flush()
+            notify_user_id = user.id
+            seller_id = seller.id
+            shop_name = seller.shop_name
+
+        # Post-commit: let the applicant know it's in the queue.
+        try:
+            from app.notifications.services import NotificationService
+            from app.notifications.models import NotificationType
+
+            NotificationService.create_notification(
+                user_id=notify_user_id,
+                notification_type=NotificationType.SELLER_APPLICATION_SUBMITTED,
+                reference_type="seller",
+                reference_id=str(seller_id),
+                metadata_={
+                    "message": (
+                        "We've received your seller application and it's now "
+                        "under review. We'll let you know once it's decided."
+                    )
+                },
+            )
+        except Exception:
+            logger.exception(
+                "Failed to notify user %s of seller application submission",
+                notify_user_id,
+            )
+
+        return {
+            "seller_id": seller_id,
+            "shop_name": shop_name,
+            "verification_status": SellerVerificationStatus.PENDING,
+            "verification_note": None,
+            "message": "Application submitted and under review.",
+        }
+
+    @staticmethod
     def deactivate_user(user_id: str) -> bool:
         """Deactivate a user account"""
         with session_scope() as session:

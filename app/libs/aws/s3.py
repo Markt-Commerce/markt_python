@@ -289,6 +289,8 @@ class S3Service:
         Returns:
             Full URL to the S3 object
         """
+        if settings.MEDIA_BASE_URL:
+            return f"{settings.MEDIA_BASE_URL}/{s3_key}"
         if self.cdn_domain:
             return f"https://{self.cdn_domain}/{s3_key}"
         else:

@@ -51,6 +51,10 @@ class UserSchema(Schema):
     profile_picture_url = fields.Method("get_profile_picture_url", dump_only=True)
     is_buyer = fields.Bool(dump_only=True)
     is_seller = fields.Bool(dump_only=True)
+    # Effective Markt Business status (the tag, plus a subscription while
+    # subscriptions are on), so clients never apply the subscription rule
+    # themselves.
+    is_business = fields.Method("get_is_business", dump_only=True)
     email_verified = fields.Bool(dump_only=True)
     current_role = fields.Str(dump_only=True)
     created_at = fields.DateTime(dump_only=True)
@@ -66,6 +70,13 @@ class UserSchema(Schema):
             # The profile_picture field should already contain the thumbnail URL
             return obj.profile_picture
         return "/static/images/default-avatar.jpg"
+
+    def get_is_business(self, obj):
+        if isinstance(obj, dict):
+            return bool(obj.get("is_business", False))
+        from app.business.entitlements import EntitlementService
+
+        return EntitlementService.is_business(obj)
 
 
 class AddressSchema(Schema):
@@ -123,6 +134,58 @@ class SellerCreateSchema(Schema):
         allow_none=True,
         description="Optional: set from the dashboard after the shop exists",
     )
+
+
+class SellerApplicationDocumentSchema(Schema):
+    """One document submitted with a seller application -- a reference to an
+    already-uploaded media object, tagged with what it is."""
+
+    type = fields.Str(
+        required=True,
+        validate=validate.OneOf(
+            ["gov_id", "proof_of_address", "business_registration", "shop_photo"]
+        ),
+        description="What this document is.",
+    )
+    media_id = fields.Int(
+        required=True, description="Id of the uploaded media (see POST /media/upload)."
+    )
+
+
+class SellerApplicationSchema(Schema):
+    """Apply to become a seller WITHOUT instant activation (#9).
+
+    Unlike SellerCreateSchema (which the legacy POST /users/create-seller still
+    uses to activate a shop immediately), this creates the shop in
+    verification_status=pending with its documents and leaves is_seller false
+    until an admin approves it.
+    """
+
+    shop_name = fields.Str(required=True)
+    description = fields.Str(required=True)
+    category_ids = fields.List(fields.Int(), required=False, load_default=list)
+    policies = fields.Dict(required=False, allow_none=True)
+    documents = fields.List(
+        fields.Nested(SellerApplicationDocumentSchema),
+        required=True,
+        validate=validate.Length(
+            min=1, error="At least one verification document is required."
+        ),
+        description="Gov ID, proof of address/registration and shop photos.",
+    )
+
+
+class SellerApplicationStatusSchema(Schema):
+    """What the applicant gets back after submitting, and what the profile
+    exposes so the app can show where the application stands (#9.4)."""
+
+    seller_id = fields.Int(dump_only=True)
+    shop_name = fields.Str(dump_only=True)
+    verification_status = fields.Enum(
+        SellerVerificationStatus, by_value=True, dump_only=True
+    )
+    verification_note = fields.Str(dump_only=True, allow_none=True)
+    message = fields.Str(dump_only=True)
 
 
 class UserRegisterSchema(UserSchema):
@@ -357,6 +420,11 @@ class SellerProfileSchema(Schema):
     verification_status = fields.Enum(
         SellerVerificationStatus, by_value=True, dump_only=True
     )
+    # So the applicant can read where their application stands and why (#9.4):
+    # the rejection reason lands here, and the submitted documents are echoed
+    # back. verification_note/_documents are null for legacy instant shops.
+    verification_note = fields.Str(dump_only=True, allow_none=True)
+    verification_documents = fields.Raw(dump_only=True, allow_none=True)
     total_products = fields.Int(dump_only=True)
     total_sales = fields.Float(dump_only=True)
     average_rating = fields.Float(dump_only=True)

@@ -1,5 +1,6 @@
 from decouple import AutoConfig
 from pathlib import Path
+from urllib.parse import urlsplit
 
 config = AutoConfig()
 
@@ -71,6 +72,28 @@ class Config:
         self.PAYMENT_CURRENCY = config("PAYMENT_CURRENCY", default="NGN")
         self.PAYMENT_GATEWAY = config("PAYMENT_GATEWAY", default="paystack")
 
+        # The rider account App Store and Play reviewers sign in with. They
+        # cannot receive a code, so this phone number always gets the fixed
+        # code below and nothing is sent. Both empty means there is no demo
+        # account, which is the default everywhere but the box the store
+        # builds point at.
+        self.DELIVERY_DEMO_PHONE = config("DELIVERY_DEMO_PHONE", default="")
+        self.DELIVERY_DEMO_OTP = config("DELIVERY_DEMO_OTP", default="")
+
+        # How rider sign-in codes are sent: channel names in the order to
+        # try them (see app/libs/otp_delivery.py). Email only by default, so
+        # SMS is never attempted before a sender ID is approved and a key
+        # is in place; production wants "sms,email".
+        self.OTP_CHANNELS = config("OTP_CHANNELS", default="email")
+        self.TERMII_API_KEY = config("TERMII_API_KEY", default="")
+        # Must be a sender ID approved on the Termii dashboard.
+        self.TERMII_SENDER_ID = config("TERMII_SENDER_ID", default="")
+        self.TERMII_CHANNEL = config("TERMII_CHANNEL", default="dnd")
+        # Per account: the Termii dashboard shows which one to use.
+        self.TERMII_BASE_URL = config(
+            "TERMII_BASE_URL", default="https://v3.api.termii.com"
+        )
+
         # API Base URL for callbacks and redirects
         # For production: https://api.yourdomain.com
         # For development: http://localhost:8000
@@ -94,6 +117,23 @@ class Config:
             or "127.0.0.1" in self.API_BASE_URL
         )
 
+        # Socket.IO checks the Origin header against an allowlist. ALLOWED_ORIGINS
+        # lists web frontends, but React Native's iOS WebSocket sends the
+        # server's *own* URL as its Origin -- so the app's chat and notification
+        # sockets were refused ("<api> is not an accepted origin") wherever the
+        # API host was not also listed as a frontend. A client talking to the
+        # server's own origin is same-origin; always allow it.
+        api_origin = ""
+        if self.API_BASE_URL:
+            parsed = urlsplit(self.API_BASE_URL)
+            if parsed.scheme and parsed.netloc:
+                api_origin = f"{parsed.scheme}://{parsed.netloc}"
+        self.SOCKET_ALLOWED_ORIGINS = self.ALLOWED_ORIGINS + (
+            [api_origin]
+            if api_origin and api_origin not in self.ALLOWED_ORIGINS
+            else []
+        )
+
         # Web app base URL for payment redirects
         # For production: https://marktcommerce.com/app
         # For development: http://localhost:3000
@@ -115,6 +155,10 @@ class Config:
         self.AWS_REGION = config("AWS_REGION", default="us-east-1")
         self.AWS_S3_BUCKET = config("AWS_S3_BUCKET", default="markt-media")
         self.CDN_DOMAIN = config("CDN_DOMAIN", default="")
+        # Local/demo only: serve media keys from a plain HTTP origin (e.g. the
+        # nginx container in docker-compose.demo.yml) instead of S3/CDN. Takes
+        # precedence over CDN_DOMAIN when set; leave empty everywhere else.
+        self.MEDIA_BASE_URL = config("MEDIA_BASE_URL", default="").rstrip("/")
 
         # Email Configuration (Resend)
         self.RESEND_API_KEY = config("RESEND_API_KEY", default="")
@@ -194,6 +238,34 @@ class Config:
         # sign-in, and the Services ID for a web/Android one. Both accepted.
         self.APPLE_BUNDLE_ID = config("APPLE_BUNDLE_ID", default="")
         self.APPLE_SERVICES_ID = config("APPLE_SERVICES_ID", default="")
+
+        # --- Markt Business --------------------------------------------------
+        # The one place these are read. Clients never decide for themselves:
+        # they fetch GET /api/v1/business/config, which is built from these by
+        # app.business.features.
+        #
+        # BUSINESS_SUBSCRIPTIONS_ENABLED off means the is_business tag is free
+        # to anyone who sets up a business profile, and every subscription
+        # page and badge is hidden. On means the tag only counts while the
+        # account holds an active subscription (app.business.entitlements).
+        self.BUSINESS_MODE_ENABLED = config(
+            "BUSINESS_MODE_ENABLED", default=True, cast=bool
+        )
+        self.BUSINESS_REGISTRATION_ENABLED = config(
+            "BUSINESS_REGISTRATION_ENABLED", default=True, cast=bool
+        )
+        self.BUSINESS_DISCOVERY_ENABLED = config(
+            "BUSINESS_DISCOVERY_ENABLED", default=True, cast=bool
+        )
+        self.BUSINESS_PROCUREMENT_ENABLED = config(
+            "BUSINESS_PROCUREMENT_ENABLED", default=True, cast=bool
+        )
+        self.BUSINESS_SUBSCRIPTIONS_ENABLED = config(
+            "BUSINESS_SUBSCRIPTIONS_ENABLED", default=False, cast=bool
+        )
+        self.BUSINESS_VERIFICATION_ENABLED = config(
+            "BUSINESS_VERIFICATION_ENABLED", default=False, cast=bool
+        )
 
     @property
     def GOOGLE_AUDIENCES(self) -> list:

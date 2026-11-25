@@ -46,6 +46,20 @@ PAYSTACK_PUBLIC_KEY=pk_test_your_public_key_here
 PAYMENT_CURRENCY=NGN
 PAYMENT_GATEWAY=paystack
 
+# Store-review demo rider: this phone number always gets this six-digit code
+# and nothing is sent. Leave both empty to have no demo account.
+DELIVERY_DEMO_PHONE=
+DELIVERY_DEMO_OTP=
+
+# Rider sign-in codes: channels tried in order (sms, email). SMS is Termii
+# and needs an API key and an approved sender ID; channel dnd is
+# transactional. The base URL is per account (Termii dashboard).
+OTP_CHANNELS=email
+TERMII_API_KEY=
+TERMII_SENDER_ID=
+TERMII_CHANNEL=dnd
+TERMII_BASE_URL=https://v3.api.termii.com
+
 # API & Frontend URLs (for payment callbacks and redirects)
 # Development: http://localhost:8000
 # Production: https://api.yourdomain.com
@@ -78,3 +92,14 @@ RESEND_MARKETING_FROM_EMAIL=hello@markt.com
 RESEND_MARKETING_FROM_NAME=Markt
 EMAIL_REPLY_TO=support@markt.com
 EMAIL_UNSUBSCRIBE_URL=https://marktcommerce.com/settings/notifications
+
+# Markt Business (see main/config.py). Clients read these via
+# GET /api/v1/business/config -- never set them in the frontends.
+BUSINESS_MODE_ENABLED=True
+BUSINESS_REGISTRATION_ENABLED=True
+BUSINESS_DISCOVERY_ENABLED=True
+BUSINESS_PROCUREMENT_ENABLED=True
+# Off: the is_business tag is free. On: it needs an active subscription whose
+# plan grants "business_account". Create plans before turning this on.
+BUSINESS_SUBSCRIPTIONS_ENABLED=False
+BUSINESS_VERIFICATION_ENABLED=False

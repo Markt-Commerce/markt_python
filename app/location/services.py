@@ -82,6 +82,9 @@ def _within_radius(Product, Seller, lat, lng, radius_km, limit, cursor):
             .filter(
                 Seller.shop_latitude.between(lat_min, lat_max),
                 Seller.shop_longitude.between(lng_min, lng_max),
+                # Only what is on sale: drafts, archived and deleted products
+                # were being shown to guests as "near you".
+                Product.status == Product.Status.ACTIVE,
             )
         )
         if cursor:
@@ -105,7 +108,11 @@ def _nationwide(limit, cursor, *, reason: str):
     from app.products.models import Product
 
     with read_scope() as session:
-        q = session.query(Product).order_by(Product.created_at.desc())
+        q = (
+            session.query(Product)
+            .filter(Product.status == Product.Status.ACTIVE)
+            .order_by(Product.created_at.desc())
+        )
         if cursor:
             q = q.filter(Product.id > cursor)
         rows = [(p, None) for p in q.limit(limit).all()]

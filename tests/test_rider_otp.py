@@ -124,3 +124,69 @@ class TestTheResponseDoesNotHandOutTheAddress:
 
         source = inspect.getsource(DeliveryService.send_otp)
         assert "Failed to send OTP to {email}" not in source
+
+
+DEMO_PHONE = "2348000000001"
+DEMO_KEY = f"otp_cache:{DEMO_PHONE}"
+
+
+@pytest.fixture
+def demo(monkeypatch):
+    """A demo rider configured, Redis faked, and email made to fail loudly."""
+    from main.config import settings
+
+    fake = FakeRedis()
+    monkeypatch.setattr("app.deliveries.services.redis_client", fake)
+    monkeypatch.setattr(settings, "DELIVERY_DEMO_PHONE", "+" + DEMO_PHONE)
+    monkeypatch.setattr(settings, "DELIVERY_DEMO_OTP", "424242")
+
+    sent = []
+    monkeypatch.setattr(
+        "app.libs.otp_delivery.email_service.send_otp_email",
+        lambda email, code: sent.append(email) or True,
+    )
+    return fake, sent, settings
+
+
+class TestTheStoreReviewDemoRider:
+    """Apple and Google reviewers sign in with a fixed code they were given
+    in the review notes, because they cannot receive one."""
+
+    def test_the_demo_number_gets_the_fixed_code_and_no_email(self, demo):
+        fake, sent, _ = demo
+        result = DeliveryService.send_otp(DEMO_PHONE)
+        assert result["status"] == "success"
+        assert fake.store[DEMO_KEY] == "424242"
+        assert sent == []
+
+    def test_the_fixed_code_is_spent_on_use_like_any_other(self, demo, monkeypatch):
+        fake, _, _ = demo
+        DeliveryService.send_otp(DEMO_PHONE)
+        monkeypatch.setattr(
+            "app.deliveries.services.session_scope",
+            lambda: (_ for _ in ()).throw(RuntimeError("no db")),
+        )
+        with pytest.raises(Exception):
+            DeliveryService.login_delivery_partner(DEMO_PHONE, "424242")
+        with pytest.raises(ValidationError):
+            DeliveryService.login_delivery_partner(DEMO_PHONE, "424242")
+
+    def test_other_numbers_are_untouched(self, demo):
+        from app.deliveries.services import _demo_otp_for
+
+        assert _demo_otp_for(PHONE) is None
+
+    def test_no_demo_account_unless_both_settings_are_set(self, demo, monkeypatch):
+        from app.deliveries.services import _demo_otp_for
+
+        _, _, settings = demo
+        monkeypatch.setattr(settings, "DELIVERY_DEMO_OTP", "")
+        assert _demo_otp_for(DEMO_PHONE) is None
+
+    @pytest.mark.parametrize("bad", ["1234", "abcdef", "1234567"])
+    def test_a_code_that_is_not_six_digits_turns_it_off(self, demo, monkeypatch, bad):
+        from app.deliveries.services import _demo_otp_for
+
+        _, _, settings = demo
+        monkeypatch.setattr(settings, "DELIVERY_DEMO_OTP", bad)
+        assert _demo_otp_for(DEMO_PHONE) is None

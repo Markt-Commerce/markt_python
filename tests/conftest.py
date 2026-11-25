@@ -32,6 +32,7 @@ def pytest_configure():
     import app.users.models  # noqa: F401
     import app.wallet.models  # noqa: F401
     import app.admin.models  # noqa: F401
+    import app.business.models  # noqa: F401
 
 
 @pytest.fixture

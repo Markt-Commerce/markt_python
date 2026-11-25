@@ -890,8 +890,13 @@ class PaymentService:
                     resolved_amount,
                     currency=currency,
                 )
-                payment.transition_to(PaymentStatus.COMPLETED)
-                payment.paid_at = datetime.utcnow()
+                # Left PENDING on purpose: complete_payment() below does the
+                # transition. Marking it COMPLETED here made complete_payment
+                # read it as a duplicate ("already_completed") and skip
+                # everything a first completion does -- reducing stock, the
+                # Transaction row, clearing the paid items from the cart,
+                # spending the chat discount, notifications and the seller
+                # acceptance windows -- for every wallet payment.
                 wallet_payment_id = payment.id
             elif method == PaymentMethod.CARD:
                 PaymentService._initialize_paystack_transaction(payment, metadata)
@@ -1653,6 +1658,15 @@ class PaymentService:
 
             return WalletService.complete_topup(reference, data)
 
+        # Markt Business plan payments (app.business.subscription_checkout).
+        if (
+            reference.startswith("SUB_")
+            or metadata.get("type") == "business_subscription"
+        ):
+            from app.business.subscription_checkout import complete_subscription
+
+            return complete_subscription(reference, data)
+
         # Which completion path this is was decided purely by metadata Paystack
         # echoes back. When that echo is missing -- a replayed event, a manual
         # retry from the dashboard, a gateway that trims unknown fields -- a
@@ -1818,7 +1832,10 @@ class PaymentService:
                         "amount": payment.amount,
                         "currency": payment.currency,
                         "reference": payment.transaction_id or "",
-                        "method": payment.method,
+                        # The enum's value: metadata is stored as JSON, and the
+                        # bare member made this notification -- and the seller's
+                        # ORDER_PLACED after it -- fail for every payment.
+                        "method": getattr(payment.method, "value", payment.method),
                         "items": items,
                     },
                 )

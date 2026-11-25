@@ -125,6 +125,7 @@ class ChatMessages(MethodView):
                 message_type=message_data.get("message_type", "text"),
                 message_data=message_data.get("message_data"),
             )
+            ChatService.broadcast_message(message, current_user.username)
 
             return {
                 "id": message.id,

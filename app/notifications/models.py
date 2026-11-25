@@ -65,6 +65,13 @@ class NotificationType(Enum):
     NICHE_POST_APPROVED = "niche_post_approved"
     NICHE_POST_REJECTED = "niche_post_rejected"
     MODERATION_ACTION = "moderation_action"
+    # Seller application lifecycle: the applicant hears that their application
+    # was received, and later that it was approved (shop activated) or rejected
+    # (with a reason). Distinct from MODERATION_ACTION, which is a punitive
+    # action on existing content, not a KYC application decision.
+    SELLER_APPLICATION_SUBMITTED = "seller_application_submitted"
+    SELLER_APPLICATION_APPROVED = "seller_application_approved"
+    SELLER_APPLICATION_REJECTED = "seller_application_rejected"
     CHAT_MESSAGE = "chat_message"
     CHAT_OFFER = "chat_offer"
     CHAT_OFFER_RESPONSE = "chat_offer_response"

@@ -24,6 +24,14 @@ class User(BaseModel, UserMixin, UniqueIdMixin):
 
     is_buyer = db.Column(db.Boolean, default=False)
     is_seller = db.Column(db.Boolean, default=False)
+    # Markt Business tag. The account's buyer side is then a business buyer
+    # (manufacturer) and its seller side a business seller (producer) -- no
+    # separate business entity. This is the raw tag only: whether it counts
+    # depends on subscriptions, so read it through
+    # app.business.entitlements.EntitlementService.is_business, never directly.
+    is_business = db.Column(
+        db.Boolean, default=False, nullable=False, server_default="false"
+    )
     # Admin gate for app.libs.decorators.admin_required/_has_permission --
     # no self-serve path to set this; an admin sets it directly (DB or a
     # future internal tool), same "flagged permanently until someone
@@ -400,6 +408,13 @@ class Seller(BaseModel):
     # verified or rejected). The full history lives in admin_audit_logs; this
     # is the denormalised "current reason" a reviewer sees on the shop.
     verification_note = db.Column(db.String(500), nullable=True)
+    # Documents submitted with a seller application (gov ID, proof of
+    # address/registration, shop photos), as a list of
+    # {"type": "<doc type>", "media_id": <int>} referencing uploaded media.
+    # Populated by AccountService.submit_seller_application; the admin review
+    # surface reads it to decide verification. Null for shops created through
+    # the legacy instant create-seller path.
+    verification_documents = db.Column(db.JSON, nullable=True)
     # Editorial promotion of a shop (admin-curated). Distinct from
     # verification_status, which is KYC/trust, and from is_active, which is
     # whether the shop can sell at all.

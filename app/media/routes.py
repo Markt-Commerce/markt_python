@@ -429,20 +429,35 @@ class MediaDelete(MethodView):
 
 @bp.route("/")
 class MediaList(MethodView):
+    @login_required
     @bp.arguments(MediaFilterSchema, location="query")
     @bp.response(200, MediaListSchema)
     def get(self, args):
-        """List media with filtering and pagination"""
+        """List the authenticated user's media with filtering and pagination.
+
+        Server-scoped: a non-admin caller only ever sees their own uploads,
+        regardless of any ``user_id`` passed in the query. This endpoint was
+        previously unauthenticated and filtered purely by a client-supplied
+        ``user_id``, so any caller could enumerate every user's media. Auth is
+        now required and the caller's own id is forced; admins may still inspect
+        a specific user's media via the ``user_id`` filter (moderation).
+        """
         query = Media.query.filter(
             Media.deleted_at.is_(None)
         )  # Exclude soft-deleted media
 
+        # Scope to the caller. The client-supplied ``user_id`` is ignored for
+        # everyone except admins, who may use it to inspect one user's media;
+        # an admin with no ``user_id`` filter sees all media (moderation view).
+        if current_user.is_admin:
+            if args.get("user_id"):
+                query = query.filter(Media.user_id == args["user_id"])
+        else:
+            query = query.filter(Media.user_id == current_user.id)
+
         # Apply filters
         if args.get("media_type"):
             query = query.filter(Media.media_type == args["media_type"])
-
-        if args.get("user_id"):
-            query = query.filter(Media.user_id == args["user_id"])
 
         if args.get("is_public") is not None:
             query = query.filter(Media.is_public == args["is_public"])

@@ -3,7 +3,7 @@ from main.config import settings
 
 # Initialize with Redis message queue for scaling
 socketio = SocketIO(
-    cors_allowed_origins=settings.ALLOWED_ORIGINS,
+    cors_allowed_origins=settings.SOCKET_ALLOWED_ORIGINS,
     async_mode="gevent",
     logger=False,
     engineio_logger=False,
