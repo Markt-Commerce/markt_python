@@ -1415,9 +1415,18 @@ class SellerOrderService:
                 or 0
             )
 
+    # Trailing window for the trend figures on the seller dashboard (#7): the
+    # lifetime totals alone can't show whether a shop is picking up or going
+    # quiet.
+    STATS_WINDOW_DAYS = 30
+
     @staticmethod
     def get_seller_order_stats(seller_id):
         with session_scope() as session:
+            window_start = datetime.utcnow() - timedelta(
+                days=SellerOrderService.STATS_WINDOW_DAYS
+            )
+
             # The unpaid filter matches the queue and the badge. Without it the
             # dashboard counted orders the seller cannot act on, and disagreed
             # with the list right below it.
@@ -1434,13 +1443,24 @@ class SellerOrderService:
                     OrderItem.seller_id == seller_id,
                     OrderItem.status == OrderItem.Status.PENDING,
                 ).count(),
+                # Paid order items in the trailing window -- the trend count the
+                # dashboard needs alongside the lifetime total_orders. Uses the
+                # same paid semantics as total_orders so the two are comparable.
+                "orders_last_30d": paid_only.filter(
+                    OrderItem.seller_id == seller_id,
+                    OrderItem.created_at >= window_start,
+                ).count(),
                 "monthly_earnings": session.query(
                     db.func.sum(OrderItem.price * OrderItem.quantity)
                 )
                 .filter(
                     OrderItem.seller_id == seller_id,
-                    OrderItem.created_at >= (datetime.utcnow() - timedelta(days=30)),
+                    OrderItem.created_at >= window_start,
                 )
                 .scalar()
                 or 0,
+                # The window the *_last_30d / monthly_earnings figures cover, so
+                # the client can label the trend ("last 30 days") without
+                # hard-coding it.
+                "stats_window_days": SellerOrderService.STATS_WINDOW_DAYS,
             }
