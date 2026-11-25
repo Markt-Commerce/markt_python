@@ -486,9 +486,7 @@ class OrderService:
         """
         with session_scope() as session:
             order = (
-                session.query(Order)
-                .options(db.joinedload(Order.items))
-                .get(order_id)
+                session.query(Order).options(db.joinedload(Order.items)).get(order_id)
             )
             if not order or order.status not in ROLLABLE_ORDER_STATUSES:
                 return
