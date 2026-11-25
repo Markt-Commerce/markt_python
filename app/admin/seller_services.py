@@ -164,6 +164,30 @@ class AdminSellerService:
 
     # --- mutations ------------------------------------------------------
     @staticmethod
+    def _notify_applicant(user_id, notification_type, message, seller_id):
+        """Tell the applicant their application was received/approved/rejected
+        (#9.3). Best-effort: a notification failure must never undo the admin
+        decision, which has already committed."""
+        if not user_id:
+            return
+        try:
+            from app.notifications.services import NotificationService
+
+            NotificationService.create_notification(
+                user_id=user_id,
+                notification_type=notification_type,
+                reference_type="seller",
+                reference_id=str(seller_id),
+                metadata_={"message": message},
+            )
+        except Exception:  # pragma: no cover - defensive
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "Failed to notify applicant %s of seller decision", user_id
+            )
+
+    @staticmethod
     def verify_seller(actor, seller_id, note=None) -> dict:
         from app.users.models import SellerVerificationStatus
 
@@ -176,6 +200,12 @@ class AdminSellerService:
             }
             seller.verification_status = SellerVerificationStatus.VERIFIED
             seller.verification_note = note
+            # Approval is what activates the shop for an application that came
+            # through the non-auto-activating path (#9): the account only
+            # becomes a seller here. Guarded for the rare detached seller with
+            # no loaded user.
+            if seller.user is not None:
+                seller.user.is_seller = True
             AdminAuditService.record(
                 session,
                 actor,
@@ -186,7 +216,18 @@ class AdminSellerService:
                 before=before,
                 after={"verification_status": "verified"},
             )
-            return AdminSellerService._detail(seller)
+            detail = AdminSellerService._detail(seller)
+            notify_user_id = seller.user_id
+
+        from app.notifications.models import NotificationType
+
+        AdminSellerService._notify_applicant(
+            notify_user_id,
+            NotificationType.SELLER_APPLICATION_APPROVED,
+            "Your seller application was approved -- your shop is now active.",
+            seller_id,
+        )
+        return detail
 
     @staticmethod
     def reject_seller(actor, seller_id, reason) -> dict:
@@ -213,7 +254,18 @@ class AdminSellerService:
                 before=before,
                 after={"verification_status": "rejected"},
             )
-            return AdminSellerService._detail(seller)
+            detail = AdminSellerService._detail(seller)
+            notify_user_id = seller.user_id
+
+        from app.notifications.models import NotificationType
+
+        AdminSellerService._notify_applicant(
+            notify_user_id,
+            NotificationType.SELLER_APPLICATION_REJECTED,
+            f"Your seller application wasn't approved. Reason: {reason}",
+            seller_id,
+        )
+        return detail
 
     @staticmethod
     def suspend_seller(actor, seller_id, reason=None) -> dict:
