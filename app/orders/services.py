@@ -59,6 +59,51 @@ RETURNABLE_ORDER_STATUSES = {
     OrderStatus.DELIVERED,
 }
 
+# Order statuses that roll up from item progress (#5). Pre-payment
+# (PENDING_PAYMENT) and terminal (CANCELLED/RETURNED/FAILED) states are owned
+# by the payment and cancellation paths, and DELIVERED by the buyer/rider POD
+# confirmation -- so a seller advancing an item only ever rolls the order
+# between these three.
+ROLLABLE_ORDER_STATUSES = {
+    OrderStatus.READY_FOR_DELIVERY,
+    OrderStatus.PROCESSING,
+    OrderStatus.SHIPPED,
+}
+
+# Least-advanced active item wins: an order is only as far along as its
+# least-advanced item. A PENDING item (the seller hasn't started) keeps the
+# order at READY_FOR_DELIVERY rather than letting it claim PROCESSING.
+_ITEM_STATUS_RANK = {
+    OrderItem.Status.PENDING: 0,
+    OrderItem.Status.PROCESSING: 1,
+    OrderItem.Status.SHIPPED: 2,
+    OrderItem.Status.DELIVERED: 3,
+}
+_ITEM_TO_ORDER_STATUS = {
+    OrderItem.Status.PENDING: OrderStatus.READY_FOR_DELIVERY,
+    OrderItem.Status.PROCESSING: OrderStatus.PROCESSING,
+    OrderItem.Status.SHIPPED: OrderStatus.SHIPPED,
+    OrderItem.Status.DELIVERED: OrderStatus.DELIVERED,
+}
+
+
+def roll_up_order_status(item_statuses):
+    """Return the order-level status that rolls up from an order's item
+    statuses (least-advanced active item wins, #5), or None when the items
+    don't determine one.
+
+    CANCELLED items are excluded: a single declined item among shipped ones
+    must not drag the whole order backwards. When every item is cancelled there
+    is no active item to roll up from, so this returns None and the
+    cancellation path owns the terminal order status. (Item status has no
+    RETURNED member -- returns are tracked on OrderReturn, not the item.)
+    """
+    active = [s for s in item_statuses if s != OrderItem.Status.CANCELLED]
+    if not active:
+        return None
+    least = min(active, key=lambda s: _ITEM_STATUS_RANK[s])
+    return _ITEM_TO_ORDER_STATUS[least]
+
 
 class OrderService:
     @staticmethod
@@ -425,6 +470,40 @@ class OrderService:
             OrderService._emit_gam_order_reversed(order_id)
 
         return order
+
+    @staticmethod
+    def _recompute_order_status(order_id):
+        """Roll the order-level status up from its items (#5) after an item
+        advances, and let update_order_status fan out the realtime event and
+        buyer notification -- which is also what closes the #4 gap where a
+        seller marking an item SHIPPED never reached the buyer.
+
+        Only ever runs while the order is in the paid fulfilment band
+        (ROLLABLE_ORDER_STATUSES); pre-payment and terminal states are owned by
+        other paths. DELIVERED is deliberately not applied here -- it carries
+        settlement/gamification side effects and is driven solely by the
+        buyer/rider POD confirmation, so the rollup stops at SHIPPED.
+        """
+        with session_scope() as session:
+            order = (
+                session.query(Order)
+                .options(db.joinedload(Order.items))
+                .get(order_id)
+            )
+            if not order or order.status not in ROLLABLE_ORDER_STATUSES:
+                return
+
+            target = roll_up_order_status([item.status for item in order.items])
+            if (
+                target is None
+                or target == order.status
+                or target == OrderStatus.DELIVERED
+            ):
+                return
+
+        # Post-commit: update_order_status opens its own session scope and
+        # drives the realtime event + buyer notification off the transition.
+        OrderService.update_order_status(order_id, target)
 
     # The statuses worth an email. A buyer who has paid hears nothing at all
     # until the thing arrives -- no "it is packed", no "a rider has it" --
@@ -1374,7 +1453,17 @@ class SellerOrderService:
             OrderService.refund_unresolved_item(
                 cancelled_item_id, reason="Declined by seller"
             )
+            # The declined item leaves the active set; the order may now roll
+            # forward over its remaining items (e.g. the rest are all shipped).
+            OrderService._recompute_order_status(cancelled_order_id)
             return SellerOrderService._reload_item(cancelled_item_id)
+
+        # #5/#4: a seller advancing this item (-> PROCESSING/SHIPPED) rolls the
+        # order-level status up from its items and, on SHIPPED, notifies the
+        # buyer. Skipped when the item just reached DELIVERED and the whole
+        # order was completed above, which already set the order status.
+        if not (status == OrderItem.Status.DELIVERED and all_delivered):
+            OrderService._recompute_order_status(order_id)
 
         return item
 
