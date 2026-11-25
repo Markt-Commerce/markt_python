@@ -77,6 +77,12 @@ class NotificationService:
         NotificationType.DELIVERY_FAILED,
         NotificationType.REFUND_ISSUED,
         NotificationType.SUBSTITUTION_APPROVAL_REQUIRED,
+        # A seller application decision is an account-state change the applicant
+        # is waiting on, not optional marketing -- it must not be suppressed by
+        # the optional-email preference.
+        NotificationType.SELLER_APPLICATION_SUBMITTED,
+        NotificationType.SELLER_APPLICATION_APPROVED,
+        NotificationType.SELLER_APPLICATION_REJECTED,
     }
 
     # Notification templates
@@ -240,6 +246,18 @@ class NotificationService:
         NotificationType.MODERATION_ACTION: {
             "title": "Your report",
             "message": "{action_type}",
+        },
+        NotificationType.SELLER_APPLICATION_SUBMITTED: {
+            "title": "Application received",
+            "message": "{message}",
+        },
+        NotificationType.SELLER_APPLICATION_APPROVED: {
+            "title": "You're approved to sell",
+            "message": "{message}",
+        },
+        NotificationType.SELLER_APPLICATION_REJECTED: {
+            "title": "Seller application update",
+            "message": "{message}",
         },
         NotificationType.CHAT_MESSAGE: {
             "title": "New message",
@@ -536,6 +554,40 @@ class NotificationService:
             "immediate_websocket": True,
             "push_when_offline": True,
             "always_email": True,  # Important moderation notification
+        },
+        # Seller application decisions are business-critical and infrequent, so
+        # they get push-when-offline and email -- an approval or rejection the
+        # applicant is waiting on must not sit WebSocket-only behind a closed
+        # app (see the ITEM_UNFULFILLED note above on the default fallback).
+        NotificationType.SELLER_APPLICATION_SUBMITTED: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,
+        },
+        NotificationType.SELLER_APPLICATION_APPROVED: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,
+        },
+        NotificationType.SELLER_APPLICATION_REJECTED: {
+            "channels": [
+                DeliveryChannel.WEBSOCKET,
+                DeliveryChannel.PUSH,
+                DeliveryChannel.EMAIL,
+            ],
+            "immediate_websocket": True,
+            "push_when_offline": True,
+            "always_email": True,
         },
         NotificationType.CHAT_MESSAGE: {
             "channels": [DeliveryChannel.WEBSOCKET, DeliveryChannel.PUSH],

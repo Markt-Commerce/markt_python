@@ -44,6 +44,8 @@ from .schemas import (
     UsernameCheckSchema,
     BuyerCreateSchema,
     SellerCreateSchema,
+    SellerApplicationSchema,
+    SellerApplicationStatusSchema,
     UserUpdateSchema,
     BuyerUpdateSchema,
     SellerUpdateSchema,
@@ -370,6 +372,28 @@ class CreateSellerAccount(MethodView):
             AccountService.create_seller_account(current_user.id, data)
             return UserService.get_user_profile(current_user.id)
         except AuthError as e:
+            abort(e.status_code, message=e.message)
+
+
+@bp.route("/seller-application")
+class SellerApplication(MethodView):
+    @login_required
+    @bp.arguments(SellerApplicationSchema)
+    @bp.response(201, SellerApplicationStatusSchema)
+    def post(self, data):
+        """Apply to become a seller WITHOUT instant activation (#9).
+
+        Creates the shop in verification_status=pending with its documents and
+        leaves the account a non-seller until an admin approves it -- the real
+        gate, as opposed to POST /users/create-seller which activates
+        immediately. Read the application's status back from the seller profile
+        (verification_status / verification_note).
+        """
+        try:
+            if current_user.is_seller:
+                abort(400, message="You already have an active seller account")
+            return AccountService.submit_seller_application(current_user.id, data)
+        except (AuthError, ConflictError, ValidationError) as e:
             abort(e.status_code, message=e.message)
 
 
