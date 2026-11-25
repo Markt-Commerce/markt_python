@@ -1363,21 +1363,16 @@ class AccountService:
             existing = session.query(Seller).filter_by(user_id=user.id).first()
             if (
                 existing
-                and existing.verification_status
-                == SellerVerificationStatus.PENDING
+                and existing.verification_status == SellerVerificationStatus.PENDING
             ):
-                raise ConflictError(
-                    "Your seller application is already under review"
-                )
+                raise ConflictError("Your seller application is already under review")
 
             documents = data.get("documents") or []
 
             # Seed the shop's location from the address the user already gave,
             # same as create_seller_account -- a shop with no coordinates never
             # shows in a proximity search.
-            address = (
-                session.query(UserAddress).filter_by(user_id=user.id).first()
-            )
+            address = session.query(UserAddress).filter_by(user_id=user.id).first()
             lat = getattr(address, "latitude", None)
             lng = getattr(address, "longitude", None)
             located = is_valid_coordinate(lat, lng)
